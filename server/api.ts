@@ -9,6 +9,7 @@ import statusapi from "./api/status.js";
 import { conf } from "./ott-config.js";
 import announceapi from "./api/announce.js";
 import dataapi from "./api/data.js";
+import musicapi from "./api/music.js";
 
 const log = getLogger("api");
 export function buildApiRouter(): express.Router {
@@ -39,6 +40,7 @@ export function buildApiRouter(): express.Router {
 	router.use(auth.authTokenMiddleware);
 	router.use("/user", usermanager.router);
 	router.use("/user", userapi);
+	router.use("/music", musicapi);
 	router.use("/room", roomapi);
 	router.use("/announce", announceapi);
 

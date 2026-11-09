@@ -5,6 +5,7 @@ import { conf } from "../ott-config.js";
 import { createModel as createModelRoom } from "./room.js";
 import { createModel as createModelUser } from "./user.js";
 import { createModel as createModelCachedVideo } from "./cachedvideo.js";
+import { createMusicModels, type MusicModels } from "./music.js";
 
 const log = getLogger("db");
 
@@ -96,10 +97,18 @@ function buildConnection(config: Sequelize.Options): Sequelize.Sequelize {
 export let Room: ReturnType<typeof createModelRoom>;
 export let User: ReturnType<typeof createModelUser>;
 export let CachedVideo: ReturnType<typeof createModelCachedVideo>;
+export let Track: MusicModels["Track"];
+export let TrackSource: MusicModels["TrackSource"];
+export let Mood: MusicModels["Mood"];
+export let UserLibraryTrack: MusicModels["UserLibraryTrack"];
+export let UserTrackMood: MusicModels["UserTrackMood"];
+export let UserFavoriteMood: MusicModels["UserFavoriteMood"];
 function buildModels(sequelize: Sequelize.Sequelize) {
 	Room = createModelRoom(sequelize);
 	User = createModelUser(sequelize);
 	CachedVideo = createModelCachedVideo(sequelize);
+	({ Track, TrackSource, Mood, UserLibraryTrack, UserTrackMood, UserFavoriteMood } =
+		createMusicModels(sequelize));
 
 	Room.belongsTo(User, { foreignKey: "ownerId", as: "owner" });
 }
