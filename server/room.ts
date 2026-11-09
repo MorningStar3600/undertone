@@ -1,4 +1,14 @@
 import { Mutex } from "@divine/synchronization";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
+import { PlaybackJournal } from "./playback/journal.js";
+import { PlaybackReceipts } from "./playback/receipts.js";
+import {
+	PlaybackCommandSchema,
+	type PlaybackCommand,
+	type PlaybackCommandResult,
+} from "ott-common/playback/transport.js";
+import { PositionSecondsSchema, PlaybackRateSchema } from "ott-common/playback/index.js";
 import type { MusicCatalogue } from "./music/catalogue.js";
 import type { MusicRoomStore } from "./music/room-music-storage.js";
 import { RoomMusic, musicIdentity } from "./music/room-music.js";
@@ -69,7 +79,7 @@ import {
 } from "./exceptions.js";
 import storage from "./storage.js";
 import tokens, { type SessionInfo } from "./auth/tokens.js";
-import { OttException } from "ott-common/exceptions.js";
+import { OttException, PermissionDeniedException } from "ott-common/exceptions.js";
 import { fetchSegments } from "./sponsorblock.js";
 import {
 	ResponseError as SponsorblockResponseError,
@@ -87,6 +97,8 @@ import { canKickUser } from "ott-common/userutils.js";
 import { getSubtitleFormatFromUrl } from "ott-common/subtitles.js";
 import { conf } from "./ott-config.js";
 import { ALL_SKIP_CATEGORIES } from "ott-common/constants.js";
+
+const PLAYBACK_AUTH_FAILURE = /membership|session changed|quorum changed/;
 
 /**
  * Represents a User from the Room's perspective.
@@ -271,6 +283,198 @@ export type RoomStatePersistable = Omit<
 >;
 
 export class Room implements RoomState {
+	private playbackLock = new Mutex();
+	private playbackContext = new AsyncLocalStorage<{ active: boolean }>();
+	private playbackReceipts = new PlaybackReceipts();
+	private commandGuards = new WeakMap<RoomRequestContext, () => Promise<void>>();
+	private commandClears = new WeakMap<RoomRequestContext, () => void>();
+	private journal = new PlaybackJournal(message => {
+		void this.publishPlayback(message);
+	});
+	private async publishPlayback(message: ServerMessage) {
+		try {
+			await this.publish(message);
+		} catch (error) {
+			this.log.error(`Playback publication failed: ${String(error)}`);
+		}
+	}
+	private updatePending?: Promise<void>;
+	private withPlaybackLock<T>(work: () => Promise<T>): Promise<T> {
+		if (this.playbackContext.getStore()?.active) {
+			return work();
+		}
+		return this.playbackLock.protect(async () => {
+			const context = { active: true };
+			try {
+				return await this.playbackContext.run(context, work);
+			} finally {
+				context.active = false;
+			}
+		});
+	}
+	private recordPlayback(options: { load?: boolean; seek?: boolean } = {}) {
+		this.journal.commit(
+			{
+				currentSource: this.currentSource,
+				positionSeconds: this.realPlaybackPosition,
+				isPlaying: this.isPlaying,
+				rate: this.playbackSpeed,
+			},
+			options,
+		);
+	}
+	public playbackSnapshot(nonce: string) {
+		return this.journal.snapshot(nonce);
+	}
+	public executePlaybackCommand(
+		input: unknown,
+		authorization: RoomRequestAuthorization,
+	): Promise<PlaybackCommandResult> {
+		const command = PlaybackCommandSchema.parse(input);
+		const result = (code?: PlaybackCommandResult["code"]): PlaybackCommandResult => ({
+			requestId: command.requestId,
+			epoch: this.journal.epoch,
+			sequence: this.journal.sequence,
+			status: code ? "rejected" : "applied",
+			...(code ? { code } : {}),
+		});
+		const user = authorization.clientId ? this.getUser(authorization.clientId) : undefined;
+		if (!user || user.token !== authorization.token) {
+			return Promise.resolve(result("unauthorized"));
+		}
+		const identity = musicIdentity(user),
+			token = user.token;
+		const fingerprint = createHash("sha256").update(token).digest("hex");
+		const key = JSON.stringify([this.journal.epoch, fingerprint, identity, command.requestId]);
+		return this.playbackReceipts.run(key, JSON.stringify(command), result, async () => {
+			try {
+				let clearedSequence: number | undefined;
+				const authorize = async () => {
+					const session = await tokens.getSessionInfo(token);
+					if (
+						this.getUser(user.id) !== user ||
+						user.token !== token ||
+						musicIdentity(user) !== identity ||
+						musicIdentity({
+							token,
+							user_id: session.isLoggedIn ? session.user_id : undefined,
+						}) !== identity
+					) {
+						throw new OttException("unauthorized");
+					}
+					if (command.epoch !== this.journal.epoch) {
+						throw new OttException("stale-epoch");
+					}
+					// Music next has its own clear commit before asynchronous next-source resolution.
+					const ownClear =
+						command.command === "next" &&
+						this.queueMode === QueueMode.Music &&
+						this.journal.occurrenceId === null &&
+						this.journal.sequence === clearedSequence;
+					if (command.occurrenceId !== this.journal.occurrenceId && !ownClear) {
+						throw new OttException("stale-occurrence");
+					}
+					this.grants.check(
+						this.getRoleFromSession(session),
+						this.playbackPermission(command),
+					);
+				};
+				const execute = async () => {
+					await authorize();
+					const context = await this.deriveRequestContext(authorization);
+					this.commandGuards.set(context, authorize);
+					this.commandClears.set(context, () => {
+						clearedSequence = this.journal.sequence;
+					});
+					await authorize();
+					switch (command.command) {
+						case "play":
+						case "pause":
+							await this.playback(
+								{
+									type: RoomRequestType.PlaybackRequest,
+									state: command.command === "play",
+								},
+								context,
+							);
+							break;
+						case "seek":
+							await this.seek(
+								{
+									type: RoomRequestType.SeekRequest,
+									value: command.positionSeconds,
+								},
+								context,
+							);
+							break;
+						case "rate":
+							await this.setPlaybackSpeed(
+								{ type: RoomRequestType.PlaybackSpeedRequest, speed: command.rate },
+								context,
+							);
+							break;
+						case "next":
+							await this.skip({ type: RoomRequestType.SkipRequest }, context);
+							break;
+					}
+					return result();
+				};
+				return this.queueMode === QueueMode.Music
+					? await execute()
+					: await this.withPlaybackLock(execute);
+			} catch (error) {
+				const code = error instanceof OttException ? error.message : "failed";
+				return result(
+					code === "stale-epoch" || code === "stale-occurrence"
+						? code
+						: code.includes("occurrence changed")
+							? "stale-occurrence"
+							: error instanceof PermissionDeniedException ||
+									code === "unauthorized" ||
+									PLAYBACK_AUTH_FAILURE.test(code)
+								? "unauthorized"
+								: "failed",
+				);
+			}
+		});
+	}
+	private legacyAuthorization(context: RoomRequestContext, permission: string) {
+		const user = context.clientId ? this.getUser(context.clientId) : undefined;
+		const identity = user ? musicIdentity(user) : undefined;
+		const token = context.auth?.token;
+		const occurrence = this.journal.occurrenceId;
+		return async () => {
+			if (!token) {
+				return;
+			}
+			const session = await tokens.getSessionInfo(token);
+			if (
+				user &&
+				(this.getUser(user.id) !== user ||
+					user.token !== token ||
+					musicIdentity(user) !== identity ||
+					musicIdentity({
+						token,
+						user_id: session.isLoggedIn ? session.user_id : undefined,
+					}) !== identity)
+			) {
+				throw new OttException("Playback membership or session changed");
+			}
+			if (occurrence !== this.journal.occurrenceId) {
+				throw new OttException("Playback occurrence changed");
+			}
+			this.grants.check(this.getRoleFromSession(session), permission);
+		};
+	}
+	private playbackPermission(command: PlaybackCommand) {
+		return command.command === "next"
+			? "playback.skip"
+			: command.command === "seek"
+				? "playback.seek"
+				: command.command === "rate"
+					? "playback.speed"
+					: "playback.play-pause";
+	}
 	private _music?: RoomMusic;
 	private restoredMusicState?: MusicSchedulerState;
 	public get music(): MusicRoomPublic | null {
@@ -335,6 +539,27 @@ export class Room implements RoomState {
 						participantId: musicIdentity(user),
 						name: this.getUserInfo(user.id).name,
 					})),
+				(value, seek) => {
+					const p = value.playback;
+					const now = Date.now();
+					const position =
+						p.playbackPosition +
+						(p.isPlaying && p.playbackStart
+							? (Math.max(0, now - Date.parse(p.playbackStart)) / 1000) *
+								p.playbackSpeed
+							: 0);
+					return this.journal.stage(
+						{
+							currentSource: p.currentSource,
+							positionSeconds: position,
+							isPlaying: p.isPlaying,
+							rate: p.playbackSpeed,
+							playbackId: value.state.current?.playbackId,
+						},
+						{ seek },
+						now,
+					);
+				},
 			);
 		}
 		return this._music;
@@ -391,6 +616,7 @@ export class Room implements RoomState {
 				this.grants.check(role, permission);
 			}
 			authorizeRole?.(role);
+			await this.commandGuards.get(context)?.();
 		};
 	}
 	public async musicRequest(
@@ -543,7 +769,17 @@ export class Room implements RoomState {
 	loadEpoch: number = -1;
 
 	constructor(
-		options: Partial<RoomOptions & Pick<RoomState, "musicState">>,
+		options: Partial<
+			RoomOptions &
+				Pick<
+					RoomState,
+					| "musicState"
+					| "currentSource"
+					| "playbackPosition"
+					| "playbackSpeed"
+					| "isPlaying"
+				>
+		>,
 		private readonly musicDependencies: {
 			catalogue?: MusicCatalogue;
 			store?: MusicRoomStore;
@@ -642,6 +878,9 @@ export class Room implements RoomState {
 		}
 
 		this.queue.onDirty(() => this.markDirty("queue"));
+		if (this.queueMode !== QueueMode.Music) {
+			this.recordPlayback();
+		}
 	}
 
 	public get name(): string {
@@ -803,13 +1042,17 @@ export class Room implements RoomState {
 		return queueItemWithoutTrim;
 	}
 
-	async dequeueNext() {
+	async dequeueNext(authorize?: () => Promise<void>) {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.dequeueNext(authorize));
+		}
 		if (this.queueMode === QueueMode.Music) {
 			await this.musicEngine.advance("finished", this.requireMusicMode);
 			this.votesToSkip.clear();
 			this.markDirty("votesToSkip");
 			return;
 		}
+		await authorize?.();
 		this.log.debug(`dequeuing next video. mode: ${this.queueMode}`);
 		if (this.enableVoteSkip) {
 			this.votesToSkip.clear();
@@ -825,16 +1068,20 @@ export class Room implements RoomState {
 				this.currentSource = this.clearQueueItemTrim(this.currentSource);
 				this.playbackPosition = 0;
 				this._playbackStart = dayjs();
+				this.recordPlayback({ load: true });
 				return;
 			} else if (this.queueMode === QueueMode.Loop) {
 				this.log.debug(`queue in loop mode, requeuing current item`);
-				await this.queue.enqueue(this.clearQueueItemTrim(this.currentSource));
+				this.queue.items.push(this.clearQueueItemTrim(this.currentSource));
+				this.queue.markDirty();
 			}
 		}
 		if (this.queue.length > 0) {
 			this.log.debug(`queue has items in it, dequeuing`);
 
-			this.currentSource = (await this.queue.dequeue()) ?? null;
+			// Room serialization owns this synchronous queue/install/publication boundary.
+			this.currentSource = this.queue.items.shift() ?? null;
+			this.queue.markDirty();
 			this.playbackPosition = this.currentSource?.startAt ?? 0;
 			this._playbackStart = dayjs();
 			if (this.videoSegments.length > 0) {
@@ -862,6 +1109,7 @@ export class Room implements RoomState {
 		}
 		this.playbackSpeed = 1;
 
+		this.recordPlayback({ load: this.currentSource !== null });
 		this.log.debug(`Dirty props: ${Array.from(this._dirty)}`);
 	}
 
@@ -1032,7 +1280,21 @@ export class Room implements RoomState {
 		return counts;
 	}
 
-	public async update(): Promise<void> {
+	public update(): Promise<void> {
+		if (this.updatePending) {
+			return this.updatePending;
+		}
+		const work = () => this.updateOnce();
+		this.updatePending = (async () => {
+			try {
+				await (this.queueMode === QueueMode.Music ? work() : this.withPlaybackLock(work));
+			} finally {
+				this.updatePending = undefined;
+			}
+		})();
+		return this.updatePending;
+	}
+	private async updateOnce(): Promise<void> {
 		if (this.queueMode === QueueMode.Music) {
 			await this.musicEngine.refresh();
 		}
@@ -1296,7 +1558,11 @@ export class Room implements RoomState {
 		this.log.info(
 			`fetching sponsorblock segments for ${this.currentSource.service}:${this.currentSource.id}`,
 		);
-		this.videoSegments = await fetchSegments(this.currentSource.id);
+		const occurrence = this.journal.occurrenceId;
+		const segments = await fetchSegments(this.currentSource.id);
+		if (occurrence === this.journal.occurrenceId) {
+			this.videoSegments = segments;
+		}
 	}
 
 	/** Updates playbackPosition according to the computed value, and resets _playbackStart */
@@ -1378,6 +1644,20 @@ export class Room implements RoomState {
 	}
 
 	public async processRequest(request: RoomRequest, context: RoomRequestContext): Promise<void> {
+		if (
+			this.queueMode !== QueueMode.Music &&
+			!this.playbackContext.getStore()?.active &&
+			![
+				RoomRequestType.JoinRequest,
+				RoomRequestType.LeaveRequest,
+				RoomRequestType.UpdateUser,
+			].includes(request.type)
+		) {
+			return this.withPlaybackLock(async () => {
+				const live = context.auth ? await this.deriveRequestContext(context.auth) : context;
+				await this.processRequest(request, live);
+			});
+		}
 		if (!isRoomRequestType(request?.type)) {
 			throw new OttException("Invalid room request type");
 		}
@@ -1457,6 +1737,9 @@ export class Room implements RoomState {
 	}
 
 	public async play(): Promise<void> {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.play());
+		}
 		if (this.queueMode === QueueMode.Music) {
 			await this.musicEngine.setPlayback({ isPlaying: true }, this.requireMusicMode);
 			return;
@@ -1468,9 +1751,13 @@ export class Room implements RoomState {
 		this.log.debug("playback started");
 		this.isPlaying = true;
 		this._playbackStart = dayjs();
+		this.recordPlayback();
 	}
 
 	public async pause(): Promise<void> {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.pause());
+		}
 		if (this.queueMode === QueueMode.Music) {
 			await this.musicEngine.setPlayback({ isPlaying: false }, this.requireMusicMode);
 			return;
@@ -1483,12 +1770,25 @@ export class Room implements RoomState {
 		this.flushPlaybackPosition();
 		this._playbackStart = null;
 		this.isPlaying = false;
+		this.recordPlayback();
 	}
 
 	/**
 	 * Play or pause the video, depending on the desired state. Handles PlaybackRequest.
 	 */
 	public async playback(request: PlaybackRequest, context: RoomRequestContext): Promise<void> {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.playback(request, context));
+		}
+		if (typeof request.state !== "boolean") {
+			throw new OttException("Invalid playback state");
+		}
+		if (this.queueMode !== QueueMode.Music && context.auth) {
+			await (
+				this.commandGuards.get(context) ??
+				this.legacyAuthorization(context, "playback.play-pause")
+			)();
+		}
 		if (this.queueMode === QueueMode.Music) {
 			await this.musicEngine.setPlayback(
 				{ isPlaying: request.state },
@@ -1621,7 +1921,7 @@ export class Room implements RoomState {
 			};
 			const current = this.currentSource,
 				prevPosition = this.realPlaybackPosition;
-			await this.musicEngine.advance("skipped", guard);
+			await this.musicEngine.advance("skipped", guard, this.commandClears.get(context));
 			this.votesToSkip.clear();
 			this.musicSkipVotes.clear();
 			this.markDirty("votesToSkip");
@@ -1631,12 +1931,21 @@ export class Room implements RoomState {
 		});
 	}
 	public async skip(request: SkipRequest, context: RoomRequestContext): Promise<void> {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.skip(request, context));
+		}
 		if (!this.currentSource) {
 			return;
 		}
 		if (this.queueMode === QueueMode.Music) {
 			await this.skipMusic(request, context);
 			return;
+		}
+		if (context.auth) {
+			await (
+				this.commandGuards.get(context) ??
+				this.legacyAuthorization(context, "playback.skip")
+			)();
 		}
 		let shouldSkip = false;
 		if (this.enableVoteSkip) {
@@ -1667,7 +1976,10 @@ export class Room implements RoomState {
 			const current = this.currentSource;
 			const prevPosition = this.realPlaybackPosition;
 			counterMediaSkipped.labels({ service: this.currentSource.service }).inc();
-			await this.dequeueNext();
+			await this.dequeueNext(
+				this.commandGuards.get(context) ??
+					this.legacyAuthorization(context, "playback.skip"),
+			);
 			await this.publishRoomEvent(request, context, { video: current, prevPosition });
 			this.videoSegments = [];
 		}
@@ -1677,20 +1989,32 @@ export class Room implements RoomState {
 	 * Seek to the specified position in the video. This does the bare minimum to maintain state and record metrics.
 	 */
 	private seekRaw(value: number): void {
+		PositionSecondsSchema.parse(value);
 		counterSecondsWatched
 			.labels({ service: this.currentSource?.service })
 			.inc(this.calcDurationFromPlaybackStart());
 		this.playbackPosition = value;
 		this._playbackStart = dayjs();
+		this.recordPlayback({ seek: true });
 	}
 
 	/**
 	 * Seek to the specified position in the video.
 	 */
 	public async seek(request: SeekRequest, context: RoomRequestContext): Promise<void> {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.seek(request, context));
+		}
 		if (request.value === undefined || request.value === null) {
 			this.log.error("seek value was undefined or null");
 			return;
+		}
+		PositionSecondsSchema.parse(request.value);
+		if (this.queueMode !== QueueMode.Music && context.auth) {
+			await (
+				this.commandGuards.get(context) ??
+				this.legacyAuthorization(context, "playback.seek")
+			)();
 		}
 		const prev = this.realPlaybackPosition;
 		if (this.queueMode === QueueMode.Music) {
@@ -1944,11 +2268,23 @@ export class Room implements RoomState {
 	}
 
 	public async undo(request: UndoRequest, context: RoomRequestContext): Promise<void> {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.undo(request, context));
+		}
 		this.requireLegacyQueue();
 		// FIXME: room event type definitions suck ass, and needs to be reworked
+		if (context.auth) {
+			const permission =
+				request.event.request.type === RoomRequestType.SkipRequest
+					? "playback.skip"
+					: request.event.request.type === RoomRequestType.SeekRequest
+						? "playback.seek"
+						: "manage-queue.remove";
+			await this.legacyAuthorization(context, permission)();
+		}
 		switch (request.event.request.type) {
 			case RoomRequestType.SeekRequest:
-				if (request.event.additional.prevPosition) {
+				if (request.event.additional.prevPosition !== undefined) {
 					await this.processRequest(
 						{
 							type: request.event.request.type,
@@ -1960,11 +2296,17 @@ export class Room implements RoomState {
 				break;
 			case RoomRequestType.SkipRequest:
 				if (this.currentSource) {
-					this.queue.pushTop(this.currentSource);
+					this.queue.items.unshift(this.currentSource);
+					this.queue.markDirty();
 				}
-				if (request.event.additional.video && request.event.additional.prevPosition) {
+				if (
+					request.event.additional.video &&
+					request.event.additional.prevPosition !== undefined
+				) {
 					this.currentSource = request.event.additional.video;
 					this.playbackPosition = request.event.additional.prevPosition;
+					this._playbackStart = this.isPlaying ? dayjs() : null;
+					this.recordPlayback({ load: true });
 				}
 				break;
 			case RoomRequestType.AddRequest:
@@ -1976,6 +2318,7 @@ export class Room implements RoomState {
 					await this.processRequest(removeReq, context);
 				} else {
 					this.currentSource = null;
+					this.recordPlayback();
 				}
 				break;
 			case RoomRequestType.RemoveRequest:
@@ -2243,6 +2586,9 @@ export class Room implements RoomState {
 	 * Request that the room play a video immediately, pushing the current video to the queue. If the video is already in the queue, it will be removed from the queue and start playing. If the video is already playing, this will be ignored.
 	 */
 	public async playNow(request: PlayNowRequest, context: RoomRequestContext): Promise<void> {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.playNow(request, context));
+		}
 		this.requireLegacyQueue();
 		if (
 			this.currentSource !== null &&
@@ -2254,6 +2600,7 @@ export class Room implements RoomState {
 		}
 
 		// First, we need to determine what permissions we need to check for this request.
+		const authorize = this.legacyAuthorization(context, "manage-queue.play-now");
 		const alreadyInQueue = this.isVideoInQueue(request.video); // So we don't need to calculate this again later.
 		if (alreadyInQueue) {
 			this.grants.check(context.role, "manage-queue.order");
@@ -2263,12 +2610,23 @@ export class Room implements RoomState {
 
 		let videoToPlay: Video;
 		if (alreadyInQueue) {
-			const [_, item] = await this.queue.evict(request.video);
-			videoToPlay = item;
+			videoToPlay = this.queue.items.find(
+				item => item.service === request.video.service && item.id === request.video.id,
+			)!;
 		} else {
 			videoToPlay = await InfoExtract.getVideoInfo(request.video.service, request.video.id);
 		}
 		this.requireLegacyQueue();
+		await this.commandGuards.get(context)?.();
+		if (context.auth) {
+			await authorize();
+			this.grants.check(
+				await this.getRoleFromToken(context.auth.token),
+				alreadyInQueue ? "manage-queue.order" : "manage-queue.add",
+			);
+			await authorize();
+		}
+
 		if (request.video.subtitleUrl) {
 			if (getSubtitleFormatFromUrl(request.video.subtitleUrl) === null) {
 				this.log.error("subtitle URL has an unsupported extension");
@@ -2276,10 +2634,13 @@ export class Room implements RoomState {
 			}
 			videoToPlay.subtitleUrl = request.video.subtitleUrl;
 		}
-		if (this.currentSource) {
-			this.currentSource.startAt = this.realPlaybackPosition;
-			await this.queue.pushTop(this.currentSource);
+		if (alreadyInQueue) {
+			this.queue.items.splice(this.queue.findIndex(request.video), 1);
 		}
+		if (this.currentSource) {
+			this.queue.items.unshift({ ...this.currentSource, startAt: this.realPlaybackPosition });
+		}
+		this.queue.markDirty();
 		this.currentSource = videoToPlay;
 		this.markDirty("queue");
 		this.playbackPosition = 0;
@@ -2288,6 +2649,7 @@ export class Room implements RoomState {
 		if (this.autoSkipSegmentCategories.length > 0) {
 			this.wantSponsorBlock = true;
 		}
+		this.recordPlayback({ load: true });
 	}
 
 	public async shuffle(request: ShuffleRequest, context: RoomRequestContext): Promise<void> {
@@ -2317,6 +2679,16 @@ export class Room implements RoomState {
 		request: PlaybackSpeedRequest,
 		context: RoomRequestContext,
 	): Promise<void> {
+		if (this.queueMode !== QueueMode.Music && !this.playbackContext.getStore()?.active) {
+			return this.withPlaybackLock(() => this.setPlaybackSpeed(request, context));
+		}
+		PlaybackRateSchema.parse(request.speed);
+		if (this.queueMode !== QueueMode.Music && context.auth) {
+			await (
+				this.commandGuards.get(context) ??
+				this.legacyAuthorization(context, "playback.speed")
+			)();
+		}
 		if (this.queueMode === QueueMode.Music) {
 			await this.musicEngine.setPlayback(
 				{
@@ -2328,6 +2700,7 @@ export class Room implements RoomState {
 		}
 		this.flushPlaybackPosition();
 		this.playbackSpeed = request.speed;
+		this.recordPlayback();
 	}
 
 	public async restoreQueue(

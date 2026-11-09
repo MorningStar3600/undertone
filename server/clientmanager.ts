@@ -38,6 +38,12 @@ import usermanager from "./usermanager.js";
 import { OttException } from "ott-common/exceptions.js";
 import { conf } from "./ott-config.js";
 import { UnloadReason } from "./generated.js";
+import {
+	ClockProbeSchema,
+	PlaybackCommandSchema,
+	PlaybackSubscribeSchema,
+} from "ott-common/playback/transport.js";
+import { z } from "zod";
 
 const log = getLogger("clientmanager");
 
@@ -179,11 +185,16 @@ async function onClientAuth(client: Client, token: AuthToken, session: SessionIn
 		},
 	};
 	client.send(youmsg);
+	client.send({ action: "playback-capabilities", version: 1, recovery: "snapshot" });
 }
 
 async function onClientMessage(client: Client, msg: ClientMessage) {
+	const serverReceiveMs = Date.now();
 	try {
-		if (msg.action === "kickme") {
+		if (["clock-probe", "playback-subscribe", "playback-command"].includes(msg.action)) {
+			await handlePlaybackMessage(client, msg, serverReceiveMs);
+			return;
+		} else if (msg.action === "kickme") {
 			client.kick(msg.reason ?? OttWebsocketError.UNKNOWN);
 			return;
 		} else if (msg.action === "status") {
@@ -235,7 +246,95 @@ async function onClientMessage(client: Client, msg: ClientMessage) {
 	}
 }
 
+const playbackLimits = new WeakMap<Client, { start: number; count: number }>();
+/** Shared owning-monolith endpoint for direct and balancer opaque JSON transports. */
+export async function handlePlaybackMessage(
+	client: Client,
+	input: unknown,
+	serverReceiveMs = Date.now(),
+) {
+	if (!input || typeof input !== "object" || Array.isArray(input)) {
+		return;
+	}
+	const limit = playbackLimits.get(client);
+	if (limit && serverReceiveMs - limit.start < 10_000) {
+		if (++limit.count > 20) {
+			return;
+		}
+	} else {
+		playbackLimits.set(client, { start: serverReceiveMs, count: 1 });
+	}
+	if (
+		JSON.stringify(input).length > 2048 ||
+		client.joinStatus !== ClientJoinStatus.Joined ||
+		!client.token
+	) {
+		return;
+	}
+	const parsed = z
+		.union([
+			ClockProbeSchema,
+			PlaybackSubscribeSchema,
+			z
+				.object({ action: z.literal("playback-command"), command: PlaybackCommandSchema })
+				.strict(),
+		])
+		.safeParse(input);
+	if (!parsed.success) {
+		return;
+	}
+	const msg = parsed.data;
+	const revision =
+		msg.action === "playback-subscribe"
+			? ++client.playbackSubscriptionRevision
+			: client.playbackSubscriptionRevision;
+	const token = client.token;
+	const session = await tokens.getSessionInfo(token);
+	const found = await roommanager.getRoom(client.room, { mustAlreadyBeLoaded: true });
+	if (!found.ok || client.token !== token || client.joinStatus !== ClientJoinStatus.Joined) {
+		return;
+	}
+	const room = found.value;
+	const user = room.getUser(client.id);
+	if (
+		!user ||
+		user.token !== token ||
+		user.user_id !== (session.isLoggedIn ? session.user_id : undefined)
+	) {
+		return;
+	}
+	if (msg.action === "clock-probe") {
+		client.send({
+			action: "clock-reply",
+			generation: msg.generation,
+			nonce: msg.nonce,
+			serverReceiveMs,
+			serverSendMs: Math.max(serverReceiveMs, Date.now()),
+		});
+	} else if (msg.action === "playback-subscribe") {
+		if (revision !== client.playbackSubscriptionRevision) {
+			return;
+		}
+		// Register BEFORE taking the synchronous snapshot. There is no await between capture/send.
+		client.playbackSubscribed = true;
+		client.send(room.playbackSnapshot(msg.nonce));
+	} else {
+		if (!client.playbackSubscribed) {
+			return;
+		}
+		const result = await room.executePlaybackCommand(msg.command, {
+			token,
+			clientId: client.id,
+		});
+		if (client.token === token && client.joinStatus === ClientJoinStatus.Joined) {
+			client.send({ action: "playback-result", result });
+		}
+	}
+}
+
 async function onClientDisconnect(client: Client) {
+	client.playbackSubscribed = false;
+	client.playbackSubscriptionRevision++;
 	log.debug(`Client ${client.id} disconnected`);
 	const index = connections.indexOf(client);
 	if (index !== -1) {
@@ -458,6 +557,19 @@ async function broadcast(roomName: string, msg: ServerMessage) {
 }
 
 async function onRoomPublish(roomName: string, msg: ServerMessage) {
+	if (msg.action === "playback-event") {
+		// Per-client sends preserve opt-in over balancers too; room broadcasts cannot filter.
+		for (const client of roomJoins.get(roomName) ?? []) {
+			if (client.playbackSubscribed) {
+				try {
+					client.send(msg);
+				} catch (error) {
+					log.error(`Playback client send failed: ${String(error)}`);
+				}
+			}
+		}
+		return;
+	}
 	await broadcast(roomName, msg);
 }
 

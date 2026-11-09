@@ -40,6 +40,8 @@ export abstract class Client {
 	token: AuthToken | null = null;
 	session?: SessionInfo;
 	joinStatus: ClientJoinStatus = ClientJoinStatus.WaitingForAuth;
+	playbackSubscribed = false;
+	playbackSubscriptionRevision = 0;
 
 	private bus: EventEmitter;
 
@@ -70,6 +72,8 @@ export abstract class Client {
 	}
 
 	public async auth(token: AuthToken): Promise<void> {
+		this.playbackSubscribed = false;
+		this.playbackSubscriptionRevision++;
 		if (!token) {
 			log.warn("Client sent empty auth token, kicking");
 			this.kick(OttWebsocketError.MISSING_TOKEN);

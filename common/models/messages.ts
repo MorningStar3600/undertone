@@ -1,4 +1,5 @@
 import type { MusicRoomActionInput, MusicRoomPublic, MusicRoomResult } from "./music-room.js";
+import type { PlaybackClientMessage, PlaybackServerMessage } from "../playback/transport.js";
 import type { Category, Segment } from "sponsorblock-api";
 import type {
 	ClientId,
@@ -16,6 +17,7 @@ import type {
 import type { QueueItem, QueueItemExtras, VideoId, VideoAdd } from "./video.js";
 
 export type ServerMessage =
+	| PlaybackServerMessage
 	| ServerMessageSync
 	| ServerMessageUnload
 	| ServerMessageChat
@@ -133,6 +135,7 @@ export interface UserInfo extends RoomUserInfo {
 }
 
 export type ClientMessage =
+	| PlaybackClientMessage
 	| ClientMessageKickMe
 	| ClientMessagePlayerStatus
 	| ClientMessageAuthenticate

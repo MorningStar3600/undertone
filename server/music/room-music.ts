@@ -115,6 +115,7 @@ export class RoomMusic {
 		private store: MusicRoomStore = new SqlMusicRoomStore(),
 		private redisSnapshot?: MusicSchedulerState,
 		private names: () => { participantId: string; name: string }[] = () => [],
+		private stagePlayback?: (value: DurableMusicRoom, seek: boolean) => () => void,
 	) {
 		this.roomId = roomId.toLowerCase();
 	}
@@ -169,6 +170,7 @@ export class RoomMusic {
 			this.currentMoods = await this.loadCurrentMoods(saved.state);
 			this.ruleMoods = await this.loadRuleMoods(saved.state);
 			this.value = saved;
+			this.stagePlayback?.(saved, false)();
 			await this.publish(saved, this.publicState!);
 			return;
 		}
@@ -277,14 +279,23 @@ export class RoomMusic {
 		context?: RefreshedContext,
 		authorize?: Authorize,
 		timeline?: (now: number) => DurableMusicRoom,
+		seek = false,
 	) {
 		let next = { state, playback };
 		const currentMoods = await this.loadCurrentMoods(state);
 		await authorize?.();
+		let install = this.stagePlayback?.(next, seek);
 		try {
 			await this.store.save(next, this.value!.state.revision, {
 				authorize,
-				finalize: timeline ? () => (next = timeline(Date.now())) : undefined,
+				finalize: timeline
+					? () => {
+							next = timeline(Date.now());
+							// Retryable candidate derivation only; no live sequence or publication.
+							install = this.stagePlayback?.(next, seek);
+							return next;
+						}
+					: undefined,
 			});
 		} catch (error) {
 			this.invalid = true;
@@ -292,6 +303,7 @@ export class RoomMusic {
 		}
 		this.currentMoods = currentMoods;
 		this.value = next;
+		install?.();
 		if (context) {
 			this.versions = context.versions;
 			this.trackVersions = context.trackVersions;
@@ -793,7 +805,14 @@ export class RoomMusic {
 					};
 				};
 				const draft = timeline(Date.now());
-				await this.commit(draft.state, draft.playback, undefined, authorize, timeline);
+				await this.commit(
+					draft.state,
+					draft.playback,
+					undefined,
+					authorize,
+					timeline,
+					patch.playbackPosition !== undefined,
+				);
 				return true;
 			});
 			if (applied) {
@@ -805,12 +824,16 @@ export class RoomMusic {
 		}
 		throw new MusicRoomException("Music playback changed during source resolution; retry");
 	}
-	async advance(reason: "finished" | "skipped" = "finished", authorize?: Authorize) {
+	async advance(
+		reason: "finished" | "skipped" = "finished",
+		authorize?: Authorize,
+		onCleared?: () => void,
+	) {
 		const playbackId = this.value?.state.current?.playbackId;
 		await this.advanceLock.protect(async () => {
 			this.isAdvancing = true;
 			try {
-				await this.advanceLocked(reason, authorize, playbackId);
+				await this.advanceLocked(reason, authorize, playbackId, onCleared);
 			} finally {
 				this.isAdvancing = false;
 			}
@@ -820,6 +843,7 @@ export class RoomMusic {
 		reason: "finished" | "skipped",
 		authorize?: Authorize,
 		playbackId?: string,
+		onCleared?: () => void,
 	) {
 		await this.refresh();
 		await this.lock.protect(async () => {
@@ -849,6 +873,7 @@ export class RoomMusic {
 			};
 			const draft = timeline(Date.now());
 			await this.commit(draft.state, draft.playback, undefined, authorize, timeline);
+			onCleared?.();
 		});
 		// Concurrent requests/starts can change the head while a provider is resolving.
 		for (let attempt = 0; attempt < 5; attempt++) {
