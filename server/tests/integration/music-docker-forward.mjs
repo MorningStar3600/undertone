@@ -7,12 +7,15 @@ const HOST = /^(127\.0\.0\.1|ott-music-redis-[a-f0-9]{24})$/;
 // Both pumps die on EOF; removing the owned container also reaps remote execs.
 export const TCP_PUMP = `set -e
 exec 3<>"/dev/tcp/$1/$2"
+exec 4<&0
 printf 'music-forward-ready\\n' >&2
-cat <&3 &
-pump=$!
-trap 'kill "$pump" 2>/dev/null || true; wait "$pump" 2>/dev/null || true' EXIT
+exec cat <&3 &
+reader=$!
+exec cat <&4 >&3 &
+writer=$!
+trap 'kill -KILL "$reader" "$writer" 2>/dev/null || true; wait "$reader" 2>/dev/null || true; wait "$writer" 2>/dev/null || true' EXIT
 trap 'exit 0' HUP INT TERM
-cat >&3`;
+wait -n "$reader" "$writer"`;
 
 /** Missing publication permits fallback; an unsafe publication must fail closed. */
 export function publishedPort(metadata, service) {

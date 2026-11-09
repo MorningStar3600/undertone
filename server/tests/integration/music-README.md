@@ -104,32 +104,45 @@ check** replaces query execution/transactions. It does not prove DDL acceptance,
 foreign-key enforcement, rollback or concurrency on PostgreSQL. Collection skips
 every live test and proves only that all test modules load successfully.
 
+Test both directions of relay EOF separately using the actual Linux Bash program:
+
+```powershell
+node server/tests/integration/music-forward-check.mjs --docker
+```
+
+These two checks use disposable `postgres:15-bullseye` containers with no network,
+volumes or database process. An internal loopback fixture verifies the final bytes,
+child exit and socket cleanup before teardown. Failed checks remove only the exact
+container after checking its unique ownership label. Git Bash on Windows is not a
+substitute here: its handling of signals during a blocked pipe read differs from
+the Linux runtime used by the relay.
+
 ## Live scenarios (21 tests)
 
-- Seven PostgreSQL migration/catalogue cases: all discovered migrations on an empty
-  schema; failed transactional DDL/reapplication and FK/unique constraints; actual
-  advisory contention on absent provider identities with independent Sequelize
-  pools; aliased shared tracks in cross order and exact no-ops; two M0/M1 row-wait
-  interleavings for metadata/availability with owner-version rechecks; trigger-failed
-  import rollback of page/cursor/provenance/library/metadata/versions followed by
-  retry; repeatable-read tags/version coherence across a remote commit.
-- Nine SQL Room cases: competing CAS writers; a load blocked behind staged normalized
-  history/scores and finalized timeline; actual transaction-local 5s/10s settings and
-  save-hook revocation rollback; Room grant revocation during a server-observed CAS
-  wait; actual five-second PostgreSQL lock cancellation; failed normalized event
-  write/retry without extra play credit; missing-state debt protection; restored
-  account and guest manual requests detecting remote availability via durable
-  fingerprints without nonlibrary membership or owner hooks.
-- One Redis/SQL case: production `buildClients`/subscriber and Room save method over
-  real sockets, TTL and serialized storable/syncable conversions, restoration through
-  `redisStateToState`, SQL recovery after removing the test Redis key, and stable
-  history/session/playback identity without another credit.
-- Four timeline durability cases: a thrown finalizer and a trigger-rejected final
-  snapshot update both roll back SQL, live state and publication, then retry with
-  exactly sequences 1, 2, 3 and one play credit; commit-time retiming of the public
-  event, SQL playback anchor and normalized start after an observed CAS wait;
-  Redis and SQL-only restoration with distinct fresh public epochs while keeping
-  domain playback/session identity, history, two-contributor fairness and future plan.
+-   Seven PostgreSQL migration/catalogue cases: all discovered migrations on an empty
+    schema; failed transactional DDL/reapplication and FK/unique constraints; actual
+    advisory contention on absent provider identities with independent Sequelize
+    pools; aliased shared tracks in cross order and exact no-ops; two M0/M1 row-wait
+    interleavings for metadata/availability with owner-version rechecks; trigger-failed
+    import rollback of page/cursor/provenance/library/metadata/versions followed by
+    retry; repeatable-read tags/version coherence across a remote commit.
+-   Nine SQL Room cases: competing CAS writers; a load blocked behind staged normalized
+    history/scores and finalized timeline; actual transaction-local 5s/10s settings and
+    save-hook revocation rollback; Room grant revocation during a server-observed CAS
+    wait; actual five-second PostgreSQL lock cancellation; failed normalized event
+    write/retry without extra play credit; missing-state debt protection; restored
+    account and guest manual requests detecting remote availability via durable
+    fingerprints without nonlibrary membership or owner hooks.
+-   One Redis/SQL case: production `buildClients`/subscriber and Room save method over
+    real sockets, TTL and serialized storable/syncable conversions, restoration through
+    `redisStateToState`, SQL recovery after removing the test Redis key, and stable
+    history/session/playback identity without another credit.
+-   Four timeline durability cases: a thrown finalizer and a trigger-rejected final
+    snapshot update both roll back SQL, live state and publication, then retry with
+    exactly sequences 1, 2, 3 and one play credit; commit-time retiming of the public
+    event, SQL playback anchor and normalized start after an observed CAS wait;
+    Redis and SQL-only restoration with distinct fresh public epochs while keeping
+    domain playback/session identity, history, two-contributor fairness and future plan.
 
 Concurrency synchronization observes `pg_stat_activity.wait_event_type = 'Lock'`,
 or pauses an actual Sequelize `afterQuery` hook. It does not substitute SQL results.
