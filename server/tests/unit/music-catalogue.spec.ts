@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Sequelize, DataTypes } from "sequelize";
+import type { Transaction } from "sequelize";
+import type { Database } from "sqlite3";
 import { DEFAULT_MOODS, MOOD_ICON_KEYS } from "ott-common/models/music.js";
 import {
 	AddLibraryTrackSchema,
@@ -135,6 +137,71 @@ describe("Persistent music catalogue", () => {
 			await rmdir(directory);
 		}
 	});
+	it.each([true, false])(
+		"releases failed SQLite commits before retry (reader releases: %s)",
+		async releaseReader => {
+			const directory = await mkdtemp(join(tmpdir(), "undertone-commit-"));
+			const storage = join(directory, "catalogue.sqlite");
+			const first = await createCatalogueFixture(storage);
+			const second = new Sequelize({ dialect: "sqlite", storage, logging: false });
+			let reader: Transaction | undefined;
+			const listener = vi.fn();
+			const unsubscribe = subscribeCatalogueChanges(listener);
+			const query = first.connection.getQueryInterface();
+			const original = query.commitTransaction.bind(query);
+			let commitFailures = 0;
+			try {
+				const track = await first.catalogue.addLibraryTrack(1, reference);
+				listener.mockClear();
+				reader = await second.transaction();
+				await second.query('SELECT * FROM "UserLibraryTracks"', { transaction: reader });
+				vi.spyOn(query, "commitTransaction").mockImplementation(
+					async (transaction, options) => {
+						const raw = (transaction as Transaction & { connection: Database })
+							.connection;
+						raw.configure("busyTimeout", 10);
+						try {
+							return await original(transaction, { ...options, retry: { max: 0 } });
+						} catch (error) {
+							expect(error).toMatchObject({ original: { code: "SQLITE_BUSY" } });
+							commitFailures++;
+							if (releaseReader && reader) {
+								await reader.rollback();
+								reader = undefined;
+							}
+							throw error;
+						}
+					},
+				);
+				if (releaseReader) {
+					expect(
+						(await first.catalogue.addLibraryTrack(2, { trackId: track.id })).id,
+					).toBe(track.id);
+					expect(commitFailures).toBe(1);
+				} else {
+					await expect(
+						first.catalogue.addLibraryTrack(2, { trackId: track.id }),
+					).rejects.toMatchObject({ original: { code: "SQLITE_BUSY" } });
+					expect(commitFailures).toBe(4);
+					expect(listener).not.toHaveBeenCalled();
+					await reader.rollback();
+					reader = undefined;
+					expect(await first.models.UserLibraryTrack.count()).toBe(1);
+					await first.catalogue.addLibraryTrack(2, { trackId: track.id });
+				}
+				expect(listener).toHaveBeenCalledTimes(1);
+				expect(await first.models.UserLibraryTrack.count()).toBe(2);
+			} finally {
+				vi.mocked(query.commitTransaction).mockRestore();
+				unsubscribe();
+				await reader?.rollback();
+				await second.close();
+				await first.connection.close();
+				await unlink(storage);
+				await rmdir(directory);
+			}
+		},
+	);
 	it("bounds whole-transaction retries and does not emit a failed import", async () => {
 		const busy = Object.assign(new Error("busy"), { original: { code: "SQLITE_BUSY" } });
 		const transaction = vi.spyOn(fixture.connection, "transaction").mockRejectedValue(busy);

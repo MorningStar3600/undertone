@@ -2,6 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { Mutex } from "@divine/synchronization";
 import { Op, Transaction, type Sequelize } from "sequelize";
 import { setTimeout as delay } from "node:timers/promises";
+import type { Database } from "sqlite3";
 import { z } from "zod";
 import { ALL_VIDEO_SERVICES } from "ott-common/constants.js";
 import { OttException } from "ott-common/exceptions.js";
@@ -193,6 +194,29 @@ function referenceId(kind: "track" | "source", reference: VideoId): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/** Sequelize 6's pool destroy does not close SQLite transaction connections on failed COMMIT. */
+async function cleanFailedSqliteCommit(sequelize: Sequelize, connection: Database): Promise<void> {
+	if ((connection as Database & { filename: string }).filename === ":memory:") {
+		// Closing the shared in-memory connection would discard the entire database.
+		await new Promise<void>((resolve, reject) => {
+			connection.run("ROLLBACK", error => (error ? reject(error) : resolve()));
+		});
+		return;
+	}
+	// Closing rolls back outstanding writes and releases the lock before the next attempt.
+	await new Promise<void>((resolve, reject) => {
+		connection.close(error => (error ? reject(error) : resolve()));
+	});
+	const manager = sequelize.connectionManager as typeof sequelize.connectionManager & {
+		connections: Record<string, Database>;
+	};
+	for (const [key, cached] of Object.entries(manager.connections)) {
+		if (cached === connection) {
+			delete manager.connections[key];
+		}
+	}
+}
+
 export class MusicCatalogue {
 	private readonly lock = new Mutex();
 	constructor(
@@ -210,12 +234,21 @@ export class MusicCatalogue {
 			// Acquire the SQLite write lock before reading, even across connections/processes.
 			// Retry the whole transaction after rollback, never only a stale read's write.
 			for (let attempt = 0; ; attempt++) {
+				let committing: Database | undefined;
 				try {
 					return await connection.transaction(
 						{ type: Transaction.TYPES.IMMEDIATE },
-						operation,
+						async transaction => {
+							const result = await operation(transaction);
+							committing = (transaction as Transaction & { connection: Database })
+								.connection;
+							return result;
+						},
 					);
 				} catch (error) {
+					if (committing) {
+						await cleanFailedSqliteCommit(connection, committing);
+					}
 					const code = (error as { original?: { code?: string } }).original?.code;
 					if (attempt >= 3 || !["SQLITE_BUSY", "SQLITE_LOCKED"].includes(code ?? "")) {
 						throw error;
