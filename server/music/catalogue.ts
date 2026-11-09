@@ -1,6 +1,7 @@
 import { randomUUID, createHash } from "node:crypto";
 import { Mutex } from "@divine/synchronization";
-import { Op, type Sequelize, type Transaction } from "sequelize";
+import { Op, Transaction, type Sequelize } from "sequelize";
+import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 import { ALL_VIDEO_SERVICES } from "ott-common/constants.js";
 import { OttException } from "ott-common/exceptions.js";
@@ -23,6 +24,7 @@ import { getLogger } from "../logger.js";
 
 const log = getLogger("music/catalogue");
 const WHITESPACE = /\s+/gu;
+const URL_TITLE = /^\s*https?:\/\//i;
 const CONTROL = /[\p{Cc}\p{Cf}]/u;
 const OPAQUE_REFERENCE = /^[\p{L}\p{N}_:.-]+$/u;
 const PLUTO_REFERENCE = /^(movies|series)\/[\w-]+(?:\/[\w-]+)?$/;
@@ -200,8 +202,28 @@ export class MusicCatalogue {
 	) {}
 
 	private async write<T>(operation: (transaction: Transaction) => Promise<T>): Promise<T> {
-		// SQLite permits a single writer. DB uniqueness also arbitrates between server processes.
-		return this.lock.protect(() => this.connection().transaction(operation));
+		return this.lock.protect(async () => {
+			const connection = this.connection();
+			if (connection.getDialect() !== "sqlite") {
+				return connection.transaction(operation);
+			}
+			// Acquire the SQLite write lock before reading, even across connections/processes.
+			// Retry the whole transaction after rollback, never only a stale read's write.
+			for (let attempt = 0; ; attempt++) {
+				try {
+					return await connection.transaction(
+						{ type: Transaction.TYPES.IMMEDIATE },
+						operation,
+					);
+				} catch (error) {
+					const code = (error as { original?: { code?: string } }).original?.code;
+					if (attempt >= 3 || !["SQLITE_BUSY", "SQLITE_LOCKED"].includes(code ?? "")) {
+						throw error;
+					}
+					await delay(25 * 2 ** attempt);
+				}
+			}
+		});
 	}
 
 	async getTrack(trackId: string): Promise<Track> {
@@ -244,7 +266,7 @@ export class MusicCatalogue {
 				where: { id: trackId },
 				defaults: {
 					id: trackId,
-					title: (video.title || "Untitled track").slice(0, 512),
+					title: safeTrackTitle(video.title),
 					artists: [],
 					styles: [],
 					duration:
@@ -483,19 +505,24 @@ export class MusicCatalogue {
 		}
 		const source = row.get({ plain: true });
 		const video = await this.resolver.video(source);
-		return { ...video, ...extras, trackId, sourceId };
+		return { ...video, title: safeTrackTitle(video.title), ...extras, trackId, sourceId };
 	}
 }
 
 function trackDto(track: Track): Track {
 	return {
 		id: track.id,
-		title: track.title,
+		title: safeTrackTitle(track.title),
 		artists: track.artists,
 		styles: track.styles,
 		duration: track.duration,
 		artworkUrl: track.artworkUrl,
 	};
+}
+/** Adapters can use a signed playback URL as their fallback title. It is not public metadata.
+ * Also sanitize old/truncated URL titles until the cleanup migration has run. */
+function safeTrackTitle(title?: string): string {
+	return !title || URL_TITLE.test(title) ? "Untitled track" : title.slice(0, 512);
 }
 function moodDto(mood: Mood): Mood {
 	return {

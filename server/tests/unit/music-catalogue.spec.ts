@@ -13,7 +13,7 @@ import {
 } from "../../music/catalogue.js";
 import InfoExtract from "../../infoextractor.js";
 import { createMusicModels } from "../../models/music.js";
-import { createCatalogueFixture, migration } from "./music-test-helpers.js";
+import { createCatalogueFixture, migration, redactTitlesMigration } from "./music-test-helpers.js";
 
 vi.mock("../../infoextractor.js", () => ({
 	default: {
@@ -27,6 +27,128 @@ describe("Persistent music catalogue", () => {
 	const reference = { reference: { service: "youtube" as const, id: "recording-a" } };
 	beforeEach(async () => {
 		fixture = await createCatalogueFixture();
+	});
+	it("never shares URL fallback titles, including previously persisted titles", async () => {
+		const url = "https://media.example/private/session.m3u8?token=SECRET_FIXTURE";
+		vi.mocked(fixture.resolver.resolve).mockResolvedValue({
+			reference: { service: "hls", id: url },
+			video: { service: "hls", id: url, title: url },
+		});
+		const track = await fixture.catalogue.addLibraryTrack(1, {
+			reference: { service: "hls", id: url },
+		});
+		expect(track.title).toBe("Untitled track");
+		expect((await fixture.models.Track.findByPk(track.id))!.get("title")).toBe(
+			"Untitled track",
+		);
+		// Simulate the old version's persisted metadata before the cleanup migration.
+		await fixture.models.Track.update({ title: url }, { where: { id: track.id } });
+		expect((await fixture.catalogue.addLibraryTrack(2, { trackId: track.id })).title).toBe(
+			"Untitled track",
+		);
+		expect(JSON.stringify(await fixture.catalogue.listLibrary(2))).not.toContain(
+			"SECRET_FIXTURE",
+		);
+		const source = (await fixture.models.TrackSource.findOne())!;
+		vi.mocked(fixture.resolver.video).mockResolvedValue({
+			service: "hls",
+			id: url,
+			title: url,
+		});
+		expect((await fixture.catalogue.toQueueItem(track.id, source.get().id)).title).toBe(
+			"Untitled track",
+		);
+		await fixture.catalogue.setTrackMood(1, track.id, DEFAULT_MOODS[0].id, true);
+		await redactTitlesMigration.up(fixture.connection.getQueryInterface(), Sequelize);
+		await redactTitlesMigration.up(fixture.connection.getQueryInterface(), Sequelize);
+		await redactTitlesMigration.down(fixture.connection.getQueryInterface(), Sequelize);
+		expect((await fixture.models.Track.findByPk(track.id))!.get("title")).toBe(
+			"Untitled track",
+		);
+		expect((await source.reload()).get("providerId")).toBe(url);
+		expect(await fixture.models.UserLibraryTrack.count()).toBe(2);
+		expect((await fixture.catalogue.listTrackMoods(1, track.id)).total).toBe(1);
+	});
+	it("rolls back a partial title cleanup and preserves normal titles on retry", async () => {
+		const a = await fixture.catalogue.addLibraryTrack(1, reference);
+		const b = await fixture.catalogue.addLibraryTrack(1, {
+			reference: { service: "youtube", id: "recording-b" },
+		});
+		const normal = await fixture.catalogue.addLibraryTrack(1, {
+			reference: { service: "youtube", id: "normal" },
+		});
+		const url = "https://media.example/private?token=SECRET_FIXTURE";
+		await fixture.models.Track.update({ title: url }, { where: { id: [a.id, b.id] } });
+		const q = fixture.connection.getQueryInterface();
+		const original = q.bulkUpdate.bind(q);
+		const update = vi
+			.spyOn(q, "bulkUpdate")
+			.mockImplementationOnce(original)
+			.mockRejectedValueOnce(new Error("cleanup failed"));
+		try {
+			await expect(redactTitlesMigration.up(q, Sequelize)).rejects.toThrow("cleanup failed");
+			expect((await fixture.models.Track.findByPk(a.id))!.get("title")).toBe(url);
+			expect((await fixture.models.Track.findByPk(b.id))!.get("title")).toBe(url);
+		} finally {
+			update.mockRestore();
+		}
+		await redactTitlesMigration.up(q, Sequelize);
+		expect((await fixture.models.Track.findByPk(a.id))!.get("title")).toBe("Untitled track");
+		expect((await fixture.models.Track.findByPk(b.id))!.get("title")).toBe("Untitled track");
+		expect((await fixture.models.Track.findByPk(normal.id))!.get("title")).toBe("Same title");
+	});
+	it("admits both libraries when separate SQLite connections import the same source", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "undertone-concurrent-"));
+		const storage = join(directory, "catalogue.sqlite");
+		const first = await createCatalogueFixture(storage);
+		const secondConnection = new Sequelize({ dialect: "sqlite", storage, logging: false });
+		const secondModels = createMusicModels(secondConnection);
+		const second = new MusicCatalogue(
+			() => secondConnection,
+			() => secondModels,
+			first.resolver,
+		);
+		const listener = vi.fn();
+		const unsubscribe = subscribeCatalogueChanges(listener);
+		try {
+			const [a, b] = await Promise.all([
+				first.catalogue.addLibraryTrack(1, reference),
+				second.addLibraryTrack(2, reference),
+			]);
+			expect(a.id).toBe(b.id);
+			expect(await first.models.Track.count()).toBe(1);
+			expect(await first.models.TrackSource.count()).toBe(1);
+			expect((await first.catalogue.listLibrary(1)).total).toBe(1);
+			expect((await second.listLibrary(2)).total).toBe(1);
+			expect(listener).toHaveBeenCalledTimes(2);
+			await Promise.all([
+				first.catalogue.addLibraryTrack(1, reference),
+				second.addLibraryTrack(2, reference),
+			]);
+			expect(await first.models.UserLibraryTrack.count()).toBe(2);
+			expect(listener).toHaveBeenCalledTimes(2);
+		} finally {
+			unsubscribe();
+			await secondConnection.close();
+			await first.connection.close();
+			await unlink(storage);
+			await rmdir(directory);
+		}
+	});
+	it("bounds whole-transaction retries and does not emit a failed import", async () => {
+		const busy = Object.assign(new Error("busy"), { original: { code: "SQLITE_BUSY" } });
+		const transaction = vi.spyOn(fixture.connection, "transaction").mockRejectedValue(busy);
+		const listener = vi.fn();
+		const unsubscribe = subscribeCatalogueChanges(listener);
+		try {
+			await expect(fixture.catalogue.addLibraryTrack(1, reference)).rejects.toBe(busy);
+			expect(transaction).toHaveBeenCalledTimes(4);
+			expect(listener).not.toHaveBeenCalled();
+		} finally {
+			transaction.mockRestore();
+			unsubscribe();
+		}
+		expect(await fixture.models.Track.count()).toBe(0);
 	});
 
 	it("retains metadata, library, tags and favorites after reopening SQLite", async () => {

@@ -26,8 +26,15 @@ only these six tables. Neither migration nor model registration imports any `Cac
   be in `MOOD_ICON_KEYS`. Shared vocabulary administration is deferred.
 - Library membership, per-track tags and favorite shortcuts are independent. Removing membership
   or a favorite keeps annotations. Tags do not require library membership (e.g. the current room track).
-- All writes use Sequelize transactions and SQL unique/foreign-key constraints. A process-local
-  mutex serializes catalogue writers for SQLite. References resolve outside transactions.
+- All writes use Sequelize transactions and SQL unique/foreign-key constraints. SQLite uses
+  IMMEDIATE transactions to acquire the database write lock before reads, including across
+  connections/processes. A per-instance mutex also prevents competing transactions on the same
+  connection. SQLITE_BUSY/SQLITE_LOCKED failures retry the whole transaction at most three times;
+  other errors propagate. References resolve outside transactions and notifications follow commit.
+- HTTP(S) URLs used as fallback titles are replaced by `Untitled track` at import, read and playback
+  adaptation. Migration `20261109210000-redact-music-url-titles.js` cleans existing titles in a
+  transaction, without changing source references, membership or annotations. Its down migration
+  intentionally does not restore private URLs into public metadata. Normal titles remain intact.
 
 ## Personal REST API
 

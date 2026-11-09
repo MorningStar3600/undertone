@@ -6,6 +6,7 @@ import { MusicCatalogue, type CatalogueResolver } from "../../music/catalogue.js
 
 const require = createRequire(import.meta.url);
 export const migration = require("../../migrations/20261109190000-create-music-catalogue.js");
+export const redactTitlesMigration = require("../../migrations/20261109210000-redact-music-url-titles.js");
 
 export async function createCatalogueFixture(storage = ":memory:") {
 	const connection = new Sequelize({ dialect: "sqlite", storage, logging: false });
