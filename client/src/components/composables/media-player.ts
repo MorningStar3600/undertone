@@ -10,7 +10,8 @@ export function useVolume() {
 	const store = useStore();
 
 	onMounted(() => {
-		volume.value = store.state.settings.volume;
+		prevVolume.value = store.state.settings.volume;
+		volume.value = store.state.settings.muted ? 0 : store.state.settings.volume;
 		isMuted.value = store.state.settings.muted;
 	});
 

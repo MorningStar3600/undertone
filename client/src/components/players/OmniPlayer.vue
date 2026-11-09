@@ -131,6 +131,7 @@
 				@paused="onPaused"
 				@ready="onReady"
 				@buffering="onBuffering"
+				@waiting="onBuffering"
 				@error="onError"
 				@buffer-progress="onBufferProgress"
 				@buffer-spans="onBufferSpans"
@@ -342,9 +343,7 @@ watch(playbackRate.playbackRate, v => {
 	}
 });
 watchEffect(() => {
-	if (!props.surface) {
-		playbackRate.playbackRate.value = store.state.room.playbackSpeed;
-	}
+	playbackRate.playbackRate.value = store.state.room.playbackSpeed;
 });
 // Clear error state when source changes
 watch(

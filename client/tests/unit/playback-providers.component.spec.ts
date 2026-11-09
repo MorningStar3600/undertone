@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import PeertubePlayer from "@/components/players/PeertubePlayer.vue";
 import VimeoPlayer from "@/components/players/VimeoPlayer.vue";
 import DirectPlayer from "@/components/players/DirectPlayer.vue";
+import OmniPlayer from "@/components/players/OmniPlayer.vue";
+import { shallowRef } from "vue";
+import type { PlayerSurface } from "@/playback/player-surface";
 import { mountComponent } from "./component-test-utils";
 import type { MediaPlayerWithPlaybackRate } from "@/components/composables/media-player";
 
@@ -33,11 +36,44 @@ const { peer, vimeo } = vi.hoisted(() => ({
 	},
 }));
 vi.mock("@peertube/embed-api", () => ({ PeerTubePlayer: vi.fn(() => peer) }));
+vi.mock("@/common-http", () => ({
+	API: { get: vi.fn(() => new Promise(() => undefined)), post: vi.fn() },
+}));
 vi.mock("@vimeo/player", () => ({ default: vi.fn(() => vimeo) }));
 vi.mock("@/components/composables/media-audio-boost", () => ({
 	useMediaAudioBoost: () => ({ setBoost: vi.fn(), resetFailedSetup: vi.fn() }),
 }));
 describe("captured provider surfaces", () => {
+	it("forwards native waiting and playing through the timeline buffering bridge", async () => {
+		vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+		vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+		vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => undefined);
+		const source = {
+			service: "direct",
+			id: "https://example.test/movie.mp4",
+			mime: "video/mp4",
+			length: 200,
+		} as const;
+		const report = vi.fn();
+		const surface = {
+			key: 1,
+			source: shallowRef(source),
+			bind: vi.fn(),
+			ready: vi.fn(),
+			report,
+			active: true,
+		} satisfies PlayerSurface;
+		const { wrapper } = mountComponent(OmniPlayer, { props: { source, surface } });
+		await vi.waitFor(() => expect(wrapper.find("video").exists()).toBe(true));
+		await flushPromises();
+		await wrapper.get("video").trigger("canplay");
+		expect(surface.ready).toHaveBeenCalled();
+		report.mockClear();
+		await wrapper.get("video").trigger("waiting");
+		expect(report).toHaveBeenCalledWith({ type: "buffering" });
+		await wrapper.get("video").trigger("playing");
+		expect(report).toHaveBeenCalledWith({ type: "resumed" });
+	});
 	afterEach(() => {
 		vi.restoreAllMocks();
 		vi.clearAllMocks();

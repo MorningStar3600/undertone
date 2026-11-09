@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises } from "@vue/test-utils";
 import Room from "@/views/Room.vue";
 import OmniPlayer from "@/components/players/OmniPlayer.vue";
+import PlaybackRateSwitcher from "@/components/controls/PlaybackRateSwitcher.vue";
 import { OttRoomConnectionMock, connectionInjectKey } from "@/plugins/connection";
 import { OttSfx } from "@/plugins/sfx";
 import { getSdk } from "@/util/playerHelper";
@@ -128,6 +129,63 @@ async function mountRoom(playing = false) {
 	return { ...mounted, connection, provider, handlers };
 }
 describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
+	it("shows the authoritative rate applied to the captured provider", async () => {
+		const s = await mountRoom();
+		s.connection.mockReceive({
+			action: "playback-event",
+			event: {
+				epoch: "epoch",
+				sequence: 2,
+				occurrenceId: 1,
+				effectiveAtMs: 1000,
+				type: "rate",
+				rate: 2,
+			},
+		});
+		await vi.waitFor(() => expect(s.provider.api.setPlaybackRate).toHaveBeenCalledWith(2));
+		expect(s.store.state.room.playbackSpeed).toBe(2);
+		expect(s.wrapper.getComponent(PlaybackRateSwitcher).get("button").text()).toBe("2x");
+	});
+	it("keeps personal mute and its saved volume across occurrence replacement", async () => {
+		const s = await mountRoom();
+		const savedVolume = s.store.state.settings.volume;
+		await s.wrapper.get('button[aria-label="Mute"]').trigger("click");
+		await flushPromises();
+		expect(s.store.state.settings.muted).toBe(true);
+		expect(s.provider.api.setVolume).toHaveBeenLastCalledWith(0);
+		s.connection.mockReceive({
+			action: "playback-event",
+			event: {
+				epoch: "epoch",
+				sequence: 2,
+				occurrenceId: 2,
+				effectiveAtMs: 1000,
+				type: "load",
+				media: { service: "adapter", id: "replacement" },
+				positionSeconds: 0,
+				isPlaying: false,
+				rate: 1,
+			},
+			attachment: {
+				epoch: "epoch",
+				sequence: 2,
+				occurrenceId: 2,
+				media: { service: "adapter", id: "replacement" },
+				item: { service: "youtube", id: "second-video", length: 180 },
+			},
+		});
+		await vi.waitFor(() => expect(providers).toHaveLength(2));
+		const replacement = providers[1];
+		replacement.events.onReady();
+		replacement.events.onStateChange({ data: 5 });
+		await flushPromises();
+		expect(s.store.state.settings.muted).toBe(true);
+		expect(replacement.api.setVolume).toHaveBeenLastCalledWith(0);
+		await s.wrapper.get('button[aria-label="Unmute"]').trigger("click");
+		await flushPromises();
+		expect(s.store.state.settings.muted).toBe(false);
+		expect(replacement.api.setVolume).toHaveBeenLastCalledWith(savedVolume);
+	});
 	beforeEach(() => {
 		vi.stubGlobal(
 			"AudioContext",
