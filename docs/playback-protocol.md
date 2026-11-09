@@ -276,6 +276,12 @@ gets a fresh random transport epoch, unrelated to routing loadEpoch. Rebuild fro
 room/Music state and force snapshot recovery on restart. Music playbackId/fairness remains durable
 in its existing SQL state. Legacy playback durability remains its existing Redis contract.
 
+The synchronous SQL finalizer is the authorization linearization point. Invalidation observed before
+that point (including on a retry) rejects the transaction. Invalidation after finalization, during the
+remaining snapshot write or SQL COMMIT, does not cancel an already accepted transition; a successful
+commit can still publish it. The old connection's result is suppressed. This is not cancellation
+through SQL COMMIT.
+
 Music SQL retry finalizers stage independent journal candidates. They do not consume live sequences,
 publish or mutate the shared timeline. Only successful SQL commit installs/publishes the selected
 candidate; rolled-back attempts produce no speculative events or gaps. No separate durable transport

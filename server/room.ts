@@ -2207,6 +2207,8 @@ export class Room implements RoomState {
 		context.auth.assertCurrent?.();
 		const existing = this.realusers.findIndex(person => person.id === user.id);
 		if (existing !== -1) {
+			// Identity lookups can await; retain the connection's latest local player report.
+			user.playerStatus = request.info.status ?? this.realusers[existing].playerStatus;
 			this.realusers[existing] = user;
 		} else {
 			this.realusers.push(user);

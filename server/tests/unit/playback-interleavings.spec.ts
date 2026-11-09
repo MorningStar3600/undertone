@@ -6,7 +6,7 @@ import type { BalancerConnection } from "../../balancer.js";
 import { addClient, handlePlaybackMessage, setup } from "../../clientmanager.js";
 import roommanager from "../../roommanager.js";
 import usermanager from "../../usermanager.js";
-import { QueueMode, Role } from "ott-common/models/types.js";
+import { PlayerStatus, QueueMode, Role } from "ott-common/models/types.js";
 import {
 	RoomRequestType,
 	type ServerMessage,
@@ -124,6 +124,54 @@ describe("Playback review interleavings", () => {
 		expect(room.isPlaying).toBe(false);
 		expect(room.playbackSnapshot("after").timeline.baseline.sequence).toBe(1);
 	});
+	it("preserves reported player readiness through same-session reauthentication", async () => {
+		const { room, client } = fixture();
+		addClient(client);
+		await client.auth("session");
+		await vi.waitFor(() =>
+			expect(client.messages.filter(m => m.action === "playback-capabilities")).toHaveLength(
+				1,
+			),
+		);
+		await room.processUnauthorizedRequest(
+			{ type: RoomRequestType.UpdateUser, info: { id: "tab", status: PlayerStatus.ready } },
+			client.captureAuthorization(),
+		);
+		await client.auth("session");
+		await vi.waitFor(() =>
+			expect(client.messages.filter(m => m.action === "playback-capabilities")).toHaveLength(
+				2,
+			),
+		);
+		expect(room.getUserInfo("tab").status).toBe(PlayerStatus.ready);
+	});
+	it.each([undefined, PlayerStatus.none])(
+		"retains the latest status after identity lookup unless status %s is explicit",
+		async status => {
+			const { room, client } = fixture();
+			const entered = gate(),
+				blocked = gate();
+			vi.mocked(usermanager.getUser).mockImplementationOnce(async () => {
+				entered.release();
+				await blocked.promise;
+				return { id: 1, username: "one" } as User;
+			});
+			const pending = room.joinRoom(
+				{ type: RoomRequestType.JoinRequest, info: { id: "tab", user_id: 1, status } },
+				{
+					username: "one",
+					role: Role.RegisteredUser,
+					clientId: "tab",
+					auth: client.captureAuthorization(),
+				},
+			);
+			await entered.promise;
+			await room.getUser("tab")!.updateInfo({ id: "tab", status: PlayerStatus.ready });
+			blocked.release();
+			await pending;
+			expect(room.getUserInfo("tab").status).toBe(status ?? PlayerStatus.ready);
+		},
+	);
 	it("delivers each timeline and regular broadcast once after same-session reauth", async () => {
 		const { room, client } = fixture();
 		await setup();
