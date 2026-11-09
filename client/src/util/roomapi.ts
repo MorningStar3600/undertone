@@ -1,3 +1,4 @@
+import { getPlaybackSession } from "@/playback/playback-session";
 import type { MusicRoomActionInput, MusicRoomResult } from "ott-common/models/music-room";
 import type { OttRoomConnection } from "@/plugins/connection";
 import { type ClientMessageNotify, RoomRequestType } from "ott-common/models/messages";
@@ -34,6 +35,9 @@ class RoomApi {
 	}
 	/** Send a message to play the video. */
 	play() {
+		if (getPlaybackSession(this.connection)?.command({ command: "play" })) {
+			return;
+		}
 		this.connection.send({
 			action: "req",
 			request: {
@@ -45,6 +49,9 @@ class RoomApi {
 
 	/** Send a message to pause the video. */
 	pause() {
+		if (getPlaybackSession(this.connection)?.command({ command: "pause" })) {
+			return;
+		}
 		this.connection.send({
 			action: "req",
 			request: {
@@ -56,6 +63,9 @@ class RoomApi {
 
 	/** Send a message to skip the current video. */
 	skip() {
+		if (getPlaybackSession(this.connection)?.command({ command: "next" })) {
+			return;
+		}
 		this.connection.send({
 			action: "req",
 			request: {
@@ -65,6 +75,14 @@ class RoomApi {
 	}
 
 	seek(position: number) {
+		if (
+			getPlaybackSession(this.connection)?.command({
+				command: "seek",
+				positionSeconds: position,
+			})
+		) {
+			return;
+		}
 		this.connection.send({
 			action: "req",
 			request: {
@@ -141,6 +159,9 @@ class RoomApi {
 	}
 
 	setPlaybackRate(rate: number) {
+		if (getPlaybackSession(this.connection)?.command({ command: "rate", rate })) {
+			return;
+		}
 		this.connection.send({
 			action: "req",
 			request: {

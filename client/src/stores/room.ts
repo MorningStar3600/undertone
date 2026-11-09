@@ -9,6 +9,7 @@ import { deserializeMap, deserializeSet } from "ott-common/serialize";
 import type { FullOTTStoreState } from "@/store";
 
 export interface RoomState {
+	playbackEstablished: boolean;
 	music: MusicRoomPublic | null;
 	name: string;
 	title: string;
@@ -39,6 +40,7 @@ export interface RoomState {
 export const roomModule: Module<RoomState, FullOTTStoreState> = {
 	namespaced: true,
 	state: {
+		playbackEstablished: false,
 		music: null,
 		name: "",
 		title: "",
@@ -69,6 +71,17 @@ export const roomModule: Module<RoomState, FullOTTStoreState> = {
 	actions: {
 		sync(context, message: ServerMessageSync) {
 			const stateupdate: Partial<RoomState> = {};
+			if (context.state.playbackEstablished) {
+				message = { ...message };
+				for (const field of [
+					"currentSource",
+					"isPlaying",
+					"playbackPosition",
+					"playbackSpeed",
+				] as const) {
+					delete message[field];
+				}
+			}
 			if ("music" in message) {
 				stateupdate.music = message.music;
 			}

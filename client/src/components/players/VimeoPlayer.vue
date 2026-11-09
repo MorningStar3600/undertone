@@ -1,9 +1,9 @@
 <template>
-	<div class="vimeo" id="vimeo-player"></div>
+	<div ref="containerElem" class="vimeo" id="vimeo-player"></div>
 </template>
 
 <script lang="ts">
-import { defineComponent, onMounted, watch } from "vue";
+import { defineComponent, onMounted, watch, ref } from "vue";
 import vimeo from "@vimeo/player";
 import { onBeforeUnmount } from "vue";
 import "./iframe-bg-hack.scss";
@@ -17,11 +17,12 @@ const VimeoPlayer = defineComponent({
 	emits: ["playing", "paused", "ready", "buffering", "error", "apiready"],
 	setup(props, { emit }) {
 		let player: vimeo | undefined;
+		const containerElem = ref<HTMLElement>();
 		let isBuffering = false;
 		let resizeObserver: ResizeObserver | undefined;
 
 		onMounted(async () => {
-			const container = document.getElementById("vimeo-player");
+			const container = containerElem.value;
 			if (!container) {
 				return;
 			}
@@ -51,7 +52,7 @@ const VimeoPlayer = defineComponent({
 			player.on("error", () => emit("error"));
 			emit("apiready");
 
-			if (ResizeObserver) {
+			if (typeof ResizeObserver !== "undefined") {
 				resizeObserver = new ResizeObserver(fitToContainer);
 				resizeObserver.observe(container);
 			}
@@ -65,7 +66,7 @@ const VimeoPlayer = defineComponent({
 			player.loadVideo(parsedId);
 		});
 
-		onBeforeUnmount(() => {
+		function dispose() {
 			if (resizeObserver) {
 				resizeObserver.disconnect();
 				resizeObserver = undefined;
@@ -73,13 +74,16 @@ const VimeoPlayer = defineComponent({
 			if (!player) {
 				return;
 			}
-			player.destroy();
+			const captured = player;
 			player = undefined;
-		});
+			containerElem.value?.replaceChildren();
+			void captured.destroy().catch(() => undefined);
+		}
+		onBeforeUnmount(dispose);
 
 		function fitToContainer() {
-			const container = document.getElementById("vimeo-player");
-			const iframe = document.querySelector("iframe");
+			const container = containerElem.value;
+			const iframe = container?.querySelector("iframe");
 			if (!iframe || !container) {
 				return;
 			}
@@ -130,6 +134,8 @@ const VimeoPlayer = defineComponent({
 		}
 
 		return {
+			containerElem,
+			dispose,
 			isBuffering,
 
 			play,

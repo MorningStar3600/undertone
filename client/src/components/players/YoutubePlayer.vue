@@ -41,6 +41,7 @@ interface YoutubeSdk {
 				onStateChange: (event: YoutubeStateChangeEvent) => void;
 				onError: () => void;
 				onPlaybackRateChange: () => void;
+				onAutoplayBlocked: () => void;
 			};
 			playerVars: Record<string, number>;
 		},
@@ -87,6 +88,7 @@ interface Props {
 	/** When true, show YouTube's native control bar. Volume/mute changes made through it are
 	 * forwarded as user-* events; playback (play/pause/seek/rate) stays OTT-controlled. */
 	nativeControls?: boolean;
+	silent?: boolean;
 }
 
 const NATIVE_POLL_INTERVAL_MS = 250;
@@ -136,6 +138,22 @@ const queuedVolume = ref<number | null>(null);
 // Tracks the last caption setting applied to YouTube, not a pending request.
 const captionsEnabled = ref(false);
 const isApiReady = ref(false);
+let disposed = false;
+let pendingPlay: { resolve(): void; reject(error: unknown): void } | null = null;
+let playTimeout: ReturnType<typeof setTimeout> | undefined;
+function settlePlay(error?: unknown) {
+	clearTimeout(playTimeout);
+	const pending = pendingPlay;
+	pendingPlay = null;
+	if (error) {
+		pending?.reject(error);
+	} else {
+		pending?.resolve();
+	}
+}
+function onAutoplayBlocked() {
+	settlePlay(new DOMException("Autoplay blocked", "NotAllowedError"));
+}
 const isCaptionsLoaded = ref(false);
 
 // YouTube's IFrame API has no volume/mute change events, so native volume/mute control has to
@@ -162,6 +180,9 @@ onMounted(async () => {
 		"onYouTubeIframeAPIReady",
 	)) as YoutubeSdk;
 
+	if (disposed) {
+		return;
+	}
 	if (!player.value && containerElem.value) {
 		player.value = new YT.Player(containerElem.value, {
 			events: {
@@ -170,6 +191,7 @@ onMounted(async () => {
 				onStateChange,
 				onError,
 				onPlaybackRateChange,
+				onAutoplayBlocked,
 			},
 			playerVars: {
 				autoplay: 0,
@@ -198,7 +220,12 @@ onMounted(async () => {
 	}
 });
 
-onBeforeUnmount(() => {
+function dispose() {
+	if (disposed) {
+		return;
+	}
+	disposed = true;
+	settlePlay(new DOMException("Player disposed", "AbortError"));
 	resizeObserver.value?.disconnect();
 	resizeObserver.value = null;
 	if (nativePollInterval.value) {
@@ -208,7 +235,8 @@ onBeforeUnmount(() => {
 	player.value?.destroy?.();
 	player.value = null;
 	isApiReady.value = false;
-});
+}
+onBeforeUnmount(dispose);
 
 watch(
 	() => props.videoId,
@@ -219,7 +247,11 @@ watch(
 		emit("buffering");
 		isCaptionsLoaded.value = false;
 		captionsEnabled.value = false;
-		player.value.loadVideoById(videoId);
+		if (props.silent) {
+			player.value.cueVideoById(videoId);
+		} else {
+			player.value.loadVideoById(videoId);
+		}
 		// the new video can reset volume/mute; don't mistake that for user input. The next
 		// pollNativeVolume() re-baselines from whatever the player reports.
 		lastObservedVolume.value = null;
@@ -232,8 +264,19 @@ function play(): Promise<void> {
 		queuedPlaying.value = true;
 		return Promise.resolve();
 	}
-	player.value.playVideo();
-	return Promise.resolve();
+	if (!props.silent) {
+		player.value.playVideo();
+		return Promise.resolve();
+	}
+	if (disposed) {
+		return Promise.reject(new DOMException("Player disposed", "AbortError"));
+	}
+	return new Promise<void>((resolve, reject) => {
+		settlePlay();
+		pendingPlay = { resolve, reject };
+		playTimeout = setTimeout(onAutoplayBlocked, 4_000);
+		player.value!.playVideo();
+	});
 }
 
 function pause(): void {
@@ -384,6 +427,9 @@ function onStateChange(event: YoutubeStateChangeEvent): void {
 		return;
 	}
 	youtubeState.value = event.data;
+	if (event.data === YOUTUBE_STATUS_PLAYING) {
+		settlePlay();
+	}
 	if (event.data === YOUTUBE_STATUS_ENDED) {
 		emit("ended");
 	} else if (event.data === YOUTUBE_STATUS_PLAYING) {
@@ -476,6 +522,7 @@ function loadCaptionsIfNeeded(): void {
 }
 
 defineExpose({
+	dispose,
 	play,
 	pause,
 	getPosition,

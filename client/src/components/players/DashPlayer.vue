@@ -31,6 +31,7 @@ import type {
 import { useCaptions, useMediaAudioBoost, useQualities } from "../composables";
 
 interface Props {
+	silent?: boolean;
 	videoUrl: string;
 	thumbnail?: string;
 }
@@ -294,10 +295,18 @@ function loadVideoSource() {
 	});
 
 	dash.value.on(MediaPlayer.events.MANIFEST_LOADED, () => {
+		if (disposed) {
+			return;
+		}
 		console.info("DashPlayer: dash.js manifest loaded");
-		emit("ready");
+		if (!props.silent) {
+			emit("ready");
+		}
 	});
 	dash.value.on(MediaPlayer.events.TEXT_TRACKS_ADDED, () => {
+		if (disposed) {
+			return;
+		}
 		captions.captionsTracks.value = getCaptionsTracks();
 		captions.isCaptionsEnabled.value = isCaptionsEnabled();
 		if (dash.value?.getCurrentTextTrackIndex() !== -1) {
@@ -308,6 +317,9 @@ function loadVideoSource() {
 		}
 	});
 	dash.value.on(MediaPlayer.events.ERROR, (event: ErrorEvent) => {
+		if (disposed) {
+			return;
+		}
 		console.error("DashPlayer: dash.js error:", event);
 		console.log("DashPlayer: dash.js error event type:", typeof event);
 		const errorEvent: MediaPlayerError = {
@@ -321,6 +333,9 @@ function loadVideoSource() {
 	// 	emit("error");
 	// });
 	dash.value.on(MediaPlayer.events.STREAM_INITIALIZED, () => {
+		if (disposed) {
+			return;
+		}
 		console.info("DashPlayer: dash.js stream initialized");
 		qualities.videoTracks.value = getVideoTracks();
 		const isAuto = dash.value?.getSettings()?.streaming?.abr?.autoSwitchBitrate?.video || false;
@@ -331,20 +346,33 @@ function loadVideoSource() {
 		console.log("DashPlayer: current active quality:", qualities.currentActiveQuality.value);
 	});
 	dash.value.on(MediaPlayer.events.BUFFER_EMPTY, () => {
+		if (disposed) {
+			return;
+		}
 		console.info("DashPlayer: dash.js buffer stalled");
 		emit("buffering");
 	});
 	dash.value.on(MediaPlayer.events.BUFFER_LOADED, () => {
+		if (disposed) {
+			return;
+		}
 		console.info("DashPlayer: dash.js buffer loaded");
-		emit("ready");
+		if (!props.silent || (videoElem.value?.readyState ?? 0) >= 2) {
+			emit("ready");
+		}
 	});
 	dash.value.on(MediaPlayer.events.QUALITY_CHANGE_RENDERED, () => {
+		if (disposed) {
+			return;
+		}
 		console.info("DashPlayer: dash.js quality change rendered");
 		qualities.currentActiveQuality.value = getCurrentActiveQuality();
 	});
 
 	// this is needed to get the player to keep playing after the previous video has ended
-	videoElem.value.play();
+	if (!props.silent) {
+		void videoElem.value.play().catch(() => undefined);
+	}
 
 	emit("apiready");
 }
@@ -389,9 +417,23 @@ function onProgress() {
 	}
 }
 
-onBeforeUnmount(() => {
+let disposed = false;
+function dispose() {
+	if (disposed) {
+		return;
+	}
+	disposed = true;
 	dash.value?.destroy();
-});
+	dash.value = undefined;
+	const video = videoElem.value;
+	videoElem.value = undefined;
+	if (video) {
+		video.pause();
+		video.removeAttribute("src");
+		video.load();
+	}
+}
+onBeforeUnmount(dispose);
 
 watch(videoUrl, () => {
 	console.log("DashPlayer: videoUrl changed");
@@ -399,6 +441,7 @@ watch(videoUrl, () => {
 });
 
 defineExpose({
+	dispose,
 	play,
 	pause,
 	setVolume,

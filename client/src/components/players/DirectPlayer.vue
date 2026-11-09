@@ -47,6 +47,7 @@ import type {
 import { useCaptions, useMediaAudioBoost, useQualities } from "../composables";
 
 interface Props {
+	silent?: boolean;
 	service: string;
 	videoUrl: string;
 	videoMime: string;
@@ -154,6 +155,9 @@ function applyActiveTrack(idx: number, enabled: boolean): Promise<void> {
 }
 
 async function doApplyTrack(idx: number, enabled: boolean) {
+	if (disposed) {
+		return;
+	}
 	const source = idx >= 0 ? subtitleSources.value[idx] : undefined;
 
 	if (videoElem.value) {
@@ -180,9 +184,18 @@ async function doApplyTrack(idx: number, enabled: boolean) {
 				queryFonts: "localandremote",
 			});
 			await jassubInstance.ready;
+			if (disposed || !jassubInstance) {
+				return;
+			}
 		} else {
 			await jassubInstance.ready;
+			if (disposed || !jassubInstance) {
+				return;
+			}
 			await jassubInstance.renderer.setTrackByUrl(source.url);
+			if (disposed) {
+				return;
+			}
 		}
 		assVisible.value = true;
 		return;
@@ -191,6 +204,9 @@ async function doApplyTrack(idx: number, enabled: boolean) {
 	assVisible.value = false;
 	if (jassubInstance) {
 		await jassubInstance.ready;
+		if (disposed || !jassubInstance) {
+			return;
+		}
 		jassubInstance.renderer.freeTrack();
 	}
 	if (source?.format === "vtt" && enabled && videoElem.value) {
@@ -390,6 +406,9 @@ async function loadVideoSource() {
 	// runs after any switch already in flight, and blocks the new default track below from
 	// jumping ahead of it
 	await applyActiveTrack(-1, false);
+	if (disposed || !videoElem.value) {
+		return;
+	}
 	audioBoost.resetFailedSetup();
 	manifest.value = null;
 
@@ -401,7 +420,11 @@ async function loadVideoSource() {
 				emit("error");
 				return;
 			}
-			manifest.value = (await response.json()) as CustomMediaManifest;
+			const loadedManifest = (await response.json()) as CustomMediaManifest;
+			if (disposed || !videoElem.value) {
+				return;
+			}
+			manifest.value = loadedManifest;
 		} catch (e) {
 			console.error("DirectPlayer: failed to fetch manifest:", e);
 			emit("error");
@@ -427,6 +450,9 @@ async function loadVideoSource() {
 	if (subtitleSources.value.length > 0) {
 		// Wait for all vtt <track> elements to be inserted
 		await nextTick();
+		if (disposed || !videoElem.value) {
+			return;
+		}
 	}
 	captions.captionsTracks.value = getCaptionsTracks();
 	const defaultTrackIdx = subtitleSources.value.findIndex(t => t.default);
@@ -436,10 +462,15 @@ async function loadVideoSource() {
 		await applyActiveTrack(defaultTrackIdx, true);
 	}
 
+	if (disposed || !videoElem.value) {
+		return;
+	}
 	videoElem.value.poster = thumbnail.value ?? "";
 	videoElem.value.load();
 	// this is needed to get the player to keep playing after the previous video has ended
-	videoElem.value.play();
+	if (!props.silent) {
+		void videoElem.value.play().catch(() => undefined);
+	}
 
 	console.log("DirectPlayer: current subtitle track:", captions.currentTrack.value);
 	console.log("DirectPlayer: current video track:", qualities.currentVideoTrack.value);
@@ -494,9 +525,22 @@ onMounted(() => {
 	loadVideoSource();
 });
 
-onBeforeUnmount(() => {
+let disposed = false;
+function dispose() {
+	if (disposed) {
+		return;
+	}
+	disposed = true;
 	destroyJassub();
-});
+	const video = videoElem.value;
+	videoElem.value = undefined;
+	if (video) {
+		video.pause();
+		video.removeAttribute("src");
+		video.load();
+	}
+}
+onBeforeUnmount(dispose);
 
 watch([videoUrl, subtitleUrl], () => {
 	console.log("DirectPlayer: videoUrl or subtitleUrl changed");
@@ -504,6 +548,7 @@ watch([videoUrl, subtitleUrl], () => {
 });
 
 defineExpose({
+	dispose,
 	play,
 	pause,
 	setVolume,

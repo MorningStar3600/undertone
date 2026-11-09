@@ -1,6 +1,13 @@
 import { BehaviorOption, OttWebsocketError, Role } from "ott-common/models/types";
 
 export default {
+	playbackTimeline: {
+		"waiting-clock": "Calibrating playback clock...",
+		recovering: "Reconnecting playback...",
+		"unsupported-rate": "This player does not support the room's playback speed.",
+		error: "Playback could not start.",
+		retry: "Retry playback",
+	},
 	localMedia: {
 		title: "Local audio library",
 		working: "Scanning or loading local audio. Scans can take up to 30 seconds.",
@@ -181,21 +188,27 @@ export default {
 	},
 	musicRecommendations: {
 		title: "Suggestions",
-		discovery: "Load tracks explicitly shared by other signed-in accounts on this instance. Every selected mood must be published by the same person. Your library is excluded.",
-		"empty-selection": "No moods selected means any explicitly published mood combination. Up to 20 moods may be selected. This panel does not assess your listening history.",
+		discovery:
+			"Load tracks explicitly shared by other signed-in accounts on this instance. Every selected mood must be published by the same person. Your library is excluded.",
+		"empty-selection":
+			"No moods selected means any explicitly published mood combination. Up to 20 moods may be selected. This panel does not assess your listening history.",
 		load: "Load suggestions",
 		empty: "No suggestions on this page. Try another selection or load from the beginning.",
 		anonymous: "Shared anonymously by another account",
 		review: "Review suggested moods",
 		next: "Next suggestions",
 		confirm: "Add to your library?",
-		"confirm-hint": "Review the proposed moods and deselect any or all of them. Only your confirmed moods are added. You can edit or add other moods in your library afterwards. Playback still uses normal source checks.",
+		"confirm-hint":
+			"Review the proposed moods and deselect any or all of them. Only your confirmed moods are added. You can edit or add other moods in your library afterwards. Playback still uses normal source checks.",
 		"confirm-moods": "Moods to add (up to 20)",
 		adopt: "Confirm and add to my library",
 		"publish-title": "Share this track as a suggestion",
-		disclosure: "Private by default. Publishing shares this track’s title, artists, styles, duration and only the own moods you select with authenticated accounts on this instance. No name or account identifier is shown. Withdrawal hides future discovery and adoption; it cannot remove copies already added to someone’s library.",
-		ineligible: "Sharing requires a track in your library with an available canonical YouTube source. Local files, direct streams and other providers are excluded.",
-		partial: "Your annotations are still loading or only partly shown. Unloaded moods have unknown state. Load more or refresh; only explicitly selected own annotations will be published.",
+		disclosure:
+			"Private by default. Publishing shares this track’s title, artists, styles, duration and only the own moods you select with authenticated accounts on this instance. No name or account identifier is shown. Withdrawal hides future discovery and adoption; it cannot remove copies already added to someone’s library.",
+		ineligible:
+			"Sharing requires a track in your library with an available canonical YouTube source. Local files, direct streams and other providers are excluded.",
+		partial:
+			"Your annotations are still loading or only partly shown. Unloaded moods have unknown state. Load more or refresh; only explicitly selected own annotations will be published.",
 		"publish-moods": "Your moods to publish (up to 20)",
 		publish: "Publish selected own moods",
 		withdraw: "Withdraw publication",

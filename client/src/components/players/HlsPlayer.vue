@@ -31,6 +31,7 @@ import { useCaptions, useMediaAudioBoost, useQualities } from "../composables";
 import type { MediaPlayerError } from "../composables/media-player";
 
 interface Props {
+	silent?: boolean;
 	videoUrl: string;
 	thumbnail?: string;
 }
@@ -246,11 +247,19 @@ function loadVideoSource() {
 	hls.attachMedia(videoElem.value);
 
 	hls.on(Hls.Events.MANIFEST_PARSED, (_, data) => {
+		if (disposed) {
+			return;
+		}
 		console.info("HlsPlayer: hls.js manifest parsed", data);
-		emit("ready");
+		if (!props.silent) {
+			emit("ready");
+		}
 	});
 
 	hls.on(Hls.Events.ERROR, (event, data) => {
+		if (disposed) {
+			return;
+		}
 		console.error("HlsPlayer: hls.js error:", event, data);
 		console.error("HlsPlayer: hls.js inner error:", data.error);
 		if (data.fatal) {
@@ -264,6 +273,9 @@ function loadVideoSource() {
 	});
 
 	hls.on(Hls.Events.INIT_PTS_FOUND, () => {
+		if (disposed) {
+			return;
+		}
 		console.info("HlsPlayer: hls.js init pts found");
 
 		captions.captionsTracks.value = getCaptionsTracks();
@@ -278,20 +290,31 @@ function loadVideoSource() {
 	});
 
 	hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+		if (disposed) {
+			return;
+		}
 		console.info("HlsPlayer: hls.js level switched:", data);
 		qualities.currentActiveQuality.value = getCurrentActiveQuality();
 	});
 
 	hls.on(Hls.Events.SUBTITLE_TRACK_LOADED, (_, data) => {
+		if (disposed) {
+			return;
+		}
 		console.info("HlsPlayer: hls.js subtitle track loaded:", data);
 	});
 
 	hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, (_, data) => {
+		if (disposed) {
+			return;
+		}
 		console.info("HlsPlayer: hls.js subtitle track switched:", data);
 	});
 
 	// this is needed to get the player to keep playing after the previous video has ended
-	videoElem.value.play();
+	if (!props.silent) {
+		void videoElem.value.play().catch(() => undefined);
+	}
 
 	emit("apiready");
 }
@@ -334,9 +357,23 @@ function onEnd() {
 	emit("end");
 }
 
-onBeforeUnmount(() => {
+let disposed = false;
+function dispose() {
+	if (disposed) {
+		return;
+	}
+	disposed = true;
 	hls?.destroy();
-});
+	hls = undefined;
+	const video = videoElem.value;
+	videoElem.value = undefined;
+	if (video) {
+		video.pause();
+		video.removeAttribute("src");
+		video.load();
+	}
+}
+onBeforeUnmount(dispose);
 
 watch(videoUrl, () => {
 	console.log("HlsPlayer: videoUrl changed");
@@ -344,6 +381,7 @@ watch(videoUrl, () => {
 });
 
 defineExpose({
+	dispose,
 	play,
 	pause,
 	setVolume,

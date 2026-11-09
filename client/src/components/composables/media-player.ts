@@ -55,8 +55,8 @@ export interface MediaPlayer {
 	 */
 	pause(): void | Promise<void>;
 	setVolume(volume: number): void | Promise<void>;
-	getPosition(): number;
-	setPosition(position: number): void;
+	getPosition(): number | Promise<number>;
+	setPosition(position: number): void | Promise<unknown>;
 
 	isCaptionsSupported(): boolean;
 	isQualitySupported(): boolean;
@@ -75,8 +75,8 @@ export interface MediaPlayerWithCaptions extends MediaPlayer {
 }
 
 export interface MediaPlayerWithPlaybackRate extends MediaPlayer {
-	getPlaybackRate(): number;
-	setPlaybackRate(rate: number): void;
+	getPlaybackRate(): number | Promise<number>;
+	setPlaybackRate(rate: number): void | Promise<void>;
 }
 
 export interface MediaPlayerWithQuality extends MediaPlayer {

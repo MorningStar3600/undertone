@@ -1,5 +1,5 @@
 <template>
-	<div class="player">
+	<div ref="root" class="player">
 		<div class="in-player-notifs">
 			<div
 				v-if="showBufferWarning"
@@ -44,8 +44,9 @@
 		<Suspense>
 			<YoutubePlayer
 				v-if="!!source && source.service === 'youtube'"
-				:key="`yt-${nativeYoutubeControls}`"
+				:key="surface ? surface.key : `yt-${nativeYoutubeControls}`"
 				ref="player"
+				:silent="!!surface"
 				:video-id="source.id"
 				:native-controls="nativeYoutubeControls"
 				class="player"
@@ -63,6 +64,7 @@
 			<VimeoPlayer
 				v-else-if="!!source && source.service === 'vimeo'"
 				ref="player"
+				:silent="!!surface"
 				:video-id="source.id"
 				class="player"
 				@apiready="onApiReady"
@@ -81,6 +83,7 @@
 								source.mime?.includes('application/x-mpegURL'))))
 				"
 				ref="player"
+				:silent="!!surface"
 				:video-url="source.hls_url ?? source.id"
 				:thumbnail="source.thumbnail"
 				class="player"
@@ -96,6 +99,7 @@
 			<DashPlayer
 				v-else-if="!!source && source.service === 'dash'"
 				ref="player"
+				:silent="!!surface"
 				:video-url="source.dash_url ?? source.id"
 				:thumbnail="source.thumbnail"
 				class="player"
@@ -115,6 +119,7 @@
 						(source.service === 'odysee' && source.mime?.includes('video/mp4')))
 				"
 				ref="player"
+				:silent="!!surface"
 				:service="source.service"
 				:video-url="directUrl"
 				:video-mime="source.mime!"
@@ -133,12 +138,14 @@
 			<PeertubePlayer
 				v-else-if="!!source && source.service === 'peertube'"
 				ref="player"
+				:silent="!!surface"
 				:video-id="source.id"
 				class="player"
 				@apiready="onApiReady"
 				@playing="onPlaying"
 				@paused="onPaused"
 				@ready="onReady"
+				@error="onError"
 			/>
 			<div v-else class="no-video rounded-md border">
 				<h1 class="text-6xl">{{ $t("video.no-video") }}</h1>
@@ -166,6 +173,8 @@ import {
 	computed,
 	defineAsyncComponent,
 	type PropType,
+	nextTick,
+	onBeforeUnmount,
 	type Ref,
 	ref,
 	watch,
@@ -188,7 +197,10 @@ import {
 	useVolume,
 } from "../composables";
 
+import type { PlayerSurface } from "@/playback/player-surface";
+
 const props = defineProps({
+	surface: { type: Object as PropType<PlayerSurface | null>, default: null },
 	source: {
 		type: Object as PropType<QueueItem | null>,
 		validator: (source: QueueItem | null) => {
@@ -216,6 +228,32 @@ const directUrl = computed(() =>
 );
 
 const player: Ref<MediaPlayer | null> = ref(null);
+const root = ref<HTMLElement>();
+let disposed = false;
+function dispose() {
+	if (disposed) {
+		return;
+	}
+	disposed = true;
+	const captured = player.value as (MediaPlayer & { dispose?(): void }) | null;
+	try {
+		captured?.dispose?.();
+	} catch {
+		/* Detach media even if SDK teardown throws. */
+	}
+	for (const video of root.value?.querySelectorAll("video") ?? []) {
+		video.pause();
+		video.removeAttribute("src");
+		video.load();
+	}
+	for (const iframe of root.value?.querySelectorAll("iframe") ?? []) {
+		iframe.remove();
+	}
+	if (controls.player.value === captured) {
+		controls.setPlayer(null);
+	}
+}
+onBeforeUnmount(dispose);
 const hasPlayerChangedYet = ref(false);
 
 const controls = useMediaPlayer();
@@ -299,12 +337,14 @@ watch(qualities.currentVideoTrack, v => {
 });
 const playbackRate = usePlaybackRate();
 watch(playbackRate.playbackRate, v => {
-	if (player.value && implementsPlaybackRate(player.value)) {
+	if (!props.surface && player.value && implementsPlaybackRate(player.value)) {
 		player.value.setPlaybackRate(v);
 	}
 });
 watchEffect(() => {
-	playbackRate.playbackRate.value = store.state.room.playbackSpeed;
+	if (!props.surface) {
+		playbackRate.playbackRate.value = store.state.room.playbackSpeed;
+	}
 });
 // Clear error state when source changes
 watch(
@@ -323,18 +363,28 @@ watch(
 );
 // player events re-emitted or data stored
 async function onApiReady() {
-	if (!hasPlayerChangedYet.value) {
-		console.debug("waiting for player to change before emitting apiready");
-		await new Promise(resolve => {
-			const stop = watch(hasPlayerChangedYet, v => {
-				if (v && player.value) {
-					stop();
-					resolve(true);
-				}
-			});
-		});
+	await nextTick();
+	if (disposed || !player.value) {
+		return;
 	}
-
+	const captured = player.value;
+	props.surface?.bind({
+		play: () => captured.play(),
+		pause: () => captured.pause(),
+		getPosition: () => captured.getPosition(),
+		setPosition: value => captured.setPosition(value),
+		setVolume: value => captured.setVolume(value),
+		isCaptionsSupported: () => captured.isCaptionsSupported(),
+		isQualitySupported: () => captured.isQualitySupported(),
+		getAvailablePlaybackRates: () => captured.getAvailablePlaybackRates(),
+		...("setPlaybackRate" in captured
+			? {
+					setPlaybackRate: (rate: number) =>
+						(captured as MediaPlayerWithPlaybackRate).setPlaybackRate(rate),
+			  }
+			: {}),
+		dispose,
+	});
 	hasPlayerChangedYet.value = false;
 	controls.markApiReady();
 	captions.isCaptionsSupported.value = isCaptionsSupported();
@@ -354,12 +404,18 @@ async function onApiReady() {
 	}
 	if (implementsPlaybackRate(player.value)) {
 		playbackRate.availablePlaybackRates.value = player.value.getAvailablePlaybackRates();
-		player.value.setPlaybackRate(playbackRate.playbackRate.value);
+		if (!props.surface) {
+			player.value.setPlaybackRate(playbackRate.playbackRate.value);
+		}
 	}
 	emit("apiready");
 }
 
 function onReady() {
+	if (disposed) {
+		return;
+	}
+	props.surface?.ready();
 	store.commit("PLAYBACK_STATUS", PlayerStatus.ready);
 	emit("ready");
 }
@@ -371,18 +427,32 @@ function hackReadyEdgeCase() {
 }
 
 function onPlaying() {
+	if (disposed) {
+		return;
+	}
+	props.surface?.report({ type: "resumed" });
+	props.surface?.report({ type: "playback-change", isPlaying: true });
 	hackReadyEdgeCase();
 	controls.playing.value = true;
 	emit("playing");
 }
 
 function onPaused() {
+	if (disposed) {
+		return;
+	}
+	props.surface?.report({ type: "resumed" });
+	props.surface?.report({ type: "playback-change", isPlaying: false });
 	hackReadyEdgeCase();
 	controls.playing.value = false;
 	emit("paused");
 }
 
 function onBuffering() {
+	if (disposed) {
+		return;
+	}
+	props.surface?.report({ type: "buffering" });
 	store.commit("PLAYBACK_STATUS", PlayerStatus.buffering);
 	emit("buffering");
 }
@@ -390,6 +460,12 @@ function onBuffering() {
 // Playback rate stays OTT-controlled: if YouTube's native rate diverges from the room's rate
 // (e.g. the user picked a speed from the native bar's menu), snap it back.
 function onNativeRateChange(rate: number) {
+	if (props.surface) {
+		props.surface.report({ type: "buffering" });
+		props.surface.report({ type: "resumed" });
+		props.surface.report({ type: "playback-change", isPlaying: controls.playing.value });
+		return;
+	}
 	if (
 		rate !== store.state.room.playbackSpeed &&
 		player.value &&
@@ -415,16 +491,26 @@ const showPlaybackError = computed(() => {
 });
 
 function onError(errorType?: MediaPlayerError) {
+	if (disposed) {
+		return;
+	}
+	props.surface?.report({ type: "error", error: new Error("Provider playback failed") });
 	currentPlaybackError.value = errorType ?? { type: "unknown" };
 	store.commit("PLAYBACK_STATUS", PlayerStatus.error);
 	emit("error");
 }
 
 function onBufferProgress(percent: number) {
+	if (disposed) {
+		return;
+	}
 	store.commit("PLAYBACK_BUFFER", percent);
 }
 
 async function onBufferSpans(spans: TimeRanges) {
+	if (disposed || props.surface) {
+		return;
+	}
 	store.commit("PLAYBACK_BUFFER_SPANS", spans);
 
 	const position = store.state.room.isPlaying

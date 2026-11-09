@@ -9,28 +9,37 @@ import { useStore } from "@/store";
 
 const store = useStore();
 const connection = useConnection();
+const owned: (() => void)[] = [];
+const add: typeof connection.addMessageHandler = (action, handler) => {
+	connection.addMessageHandler(action, handler);
+	owned.push(() => connection.removeMessageHandler(action, handler));
+};
 
-connection.addMessageHandler("sync", msg => {
+add("sync", msg => {
 	store.dispatch("room/sync", msg);
 });
-connection.addMessageHandler("chat", msg => {
+add("chat", msg => {
 	store.dispatch("chat", msg);
 });
-connection.addMessageHandler("announcement", msg => {
+add("announcement", msg => {
 	store.dispatch("announcement", msg);
 });
-connection.addMessageHandler("user", msg => {
+add("user", msg => {
 	store.dispatch("users/user", msg);
 });
-connection.addMessageHandler("you", msg => {
+add("you", msg => {
 	store.dispatch("users/you", msg);
 });
-connection.addMessageHandler("event", msg => {
+add("event", msg => {
 	store.dispatch("event", msg);
 });
-connection.addMessageHandler("eventcustom", msg => {
+add("eventcustom", msg => {
 	store.dispatch("eventcustom", msg);
 });
 
-onUnmounted(() => connection.clearAllMessageHandlers());
+onUnmounted(() => {
+	for (const unsub of owned) {
+		unsub();
+	}
+});
 </script>

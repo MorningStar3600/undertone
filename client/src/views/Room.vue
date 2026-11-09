@@ -51,11 +51,32 @@
 					<span id="connectStatus" class="ml-1 label-mono">{{ connectionStatus }}</span>
 				</div>
 			</div>
+			<div
+				v-if="showPlaybackStatus"
+				role="status"
+				class="flex items-center gap-2 text-sm text-muted-foreground"
+			>
+				{{ $t("playbackTimeline." + playbackStatus) }}
+				<Button
+					v-if="playbackStatus === 'error'"
+					variant="outline"
+					size="sm"
+					@click="retryPlayback"
+					>{{ $t("playbackTimeline.retry") }}</Button
+				>
+			</div>
 			<div class="room-media-grid">
 				<div class="relative z-31 min-h-0 min-w-0">
 					<div class="relative size-full">
 						<OmniPlayer
-							:source="store.state.room.currentSource"
+							v-if="!timelineEstablished || playbackSurface"
+							:key="timelineEstablished ? playbackSurface?.key : 'legacy'"
+							:surface="timelineEstablished ? playbackSurface : null"
+							:source="
+								timelineEstablished
+									? playbackSurface?.source.value
+									: store.state.room.currentSource
+							"
 							@apiready="onPlayerApiReady"
 							@playing="onPlaybackChange(true)"
 							@paused="onPlaybackChange(false)"
@@ -71,7 +92,12 @@
 							class="absolute inset-0 z-200 flex items-center justify-center"
 							v-if="mediaPlaybackBlocked"
 						>
-							<Button size="xl" variant="default" @click="onClickUnblockPlayback">
+							<Button
+								data-cy="playback-activate"
+								size="xl"
+								variant="default"
+								@click="onClickUnblockPlayback"
+							>
 								<Icon :icon="mdiPlay" class="size-5" />
 								{{ $t("common.play") }}
 							</Button>
@@ -316,6 +342,9 @@ import {
 import AddPreview from "@/components/AddPreview.vue";
 import { calculateCurrentPosition } from "ott-common/timestamp";
 import _ from "lodash";
+import type { PlaybackStatusCode } from "@/playback/playback-controller";
+import { createPlaybackSession } from "@/playback/playback-session";
+import { createPlayerSurfaces } from "@/playback/player-surface";
 import OmniPlayer from "@/components/players/OmniPlayer.vue";
 import Chat from "@/components/Chat.vue";
 import ChatPlacementToggle from "@/components/ChatPlacementToggle.vue";
@@ -412,6 +441,76 @@ export default defineComponent({
 		const router = useRouter();
 		const route = useRoute();
 		const musicRoom = provideMusicRoom();
+		const granted = useGrants();
+		const surfaces = createPlayerSurfaces();
+		const timelineEstablished = ref(false);
+		const mediaPlaybackBlocked = ref(false);
+		const playbackStatus = ref<PlaybackStatusCode>("waiting-snapshot");
+		const showPlaybackStatus = computed(
+			() =>
+				timelineEstablished.value &&
+				["waiting-clock", "recovering", "unsupported-rate", "error"].includes(
+					playbackStatus.value,
+				),
+		);
+		let roomDisposed = false;
+		const playback = createPlaybackSession({
+			connection,
+			now: () => performance.now(),
+			createAdapter: surfaces.createAdapter,
+			allowed: granted,
+			onState(state, item, established) {
+				timelineEstablished.value = established;
+				store.commit("room/SYNC", {
+					playbackEstablished: established,
+					currentSource: item,
+					isPlaying: state?.isPlaying ?? false,
+					playbackPosition: state?.positionSeconds ?? 0,
+					playbackSpeed: state?.rate ?? 1,
+				});
+			},
+			onStatus(status) {
+				playbackStatus.value = status.code;
+				mediaPlaybackBlocked.value = status.code === "autoplay-blocked";
+			},
+		});
+		const playbackSurface = surfaces.surface;
+		watch(
+			() => route.params.roomId,
+			(roomId, previous) => {
+				// A canonical-name rewrite from sync stays on this authenticated room.
+				if (
+					roomDisposed ||
+					typeof previous !== "string" ||
+					typeof roomId !== "string" ||
+					roomId === previous ||
+					roomId === store.state.room.name
+				) {
+					return;
+				}
+				connection.disconnect();
+				connection.connect(roomId);
+			},
+		);
+		const resumePlayback = () => playback.resume();
+		onMounted(() => {
+			document.addEventListener("visibilitychange", resumePlayback);
+			window.addEventListener("pageshow", resumePlayback);
+		});
+		onUnmounted(() => {
+			roomDisposed = true;
+			playback.dispose();
+			document.removeEventListener("visibilitychange", resumePlayback);
+			window.removeEventListener("pageshow", resumePlayback);
+		});
+		watch(
+			() => store.state.settings.nativeYoutubeControls,
+			() => {
+				if (playback.established) {
+					playback.resume();
+				}
+			},
+		);
 		const isMusic = computed(() => store.state.room.queueMode === QueueMode.Music);
 		const queueTotal = computed(() =>
 			isMusic.value ? store.state.room.music?.queueTotal ?? 0 : store.state.room.queue.length,
@@ -423,6 +522,15 @@ export default defineComponent({
 		const iTimestampUpdater: Ref<ReturnType<typeof setInterval> | null> = ref(null);
 
 		function timestampUpdate() {
+			if (timelineEstablished.value) {
+				truePosition.value = store.state.room.playbackPosition;
+				sliderPosition.value = _.clamp(
+					truePosition.value,
+					0,
+					store.state.room.currentSource?.length ?? 0,
+				);
+				return;
+			}
 			if (!store.state.room.currentSource) {
 				truePosition.value = 0;
 				sliderPosition.value = 0;
@@ -454,12 +562,15 @@ export default defineComponent({
 		});
 
 		watch(truePosition, async newPosition => {
-			if (!player.isPlayerPresent()) {
+			if (timelineEstablished.value || !player.isPlayerPresent()) {
 				return;
 			}
 			const currentTime = player.getPosition();
 
 			const diff = Math.abs(newPosition - (await currentTime));
+			if (roomDisposed || timelineEstablished.value) {
+				return;
+			}
 			if (isNaN(diff)) {
 				console.error("player diff is NaN, this is a bug", newPosition, currentTime);
 				return;
@@ -496,60 +607,60 @@ export default defineComponent({
 			}
 		}
 
+		let legacyWait: Promise<void> | null = null;
+		const cancelLegacyWait = new Set<() => void>();
 		async function waitForPlayer() {
-			if (!player.isPlayerPresent()) {
-				console.debug("waiting for player", player);
-				await new Promise(resolve => {
-					const stop = watch(player.player, async newPlayer => {
-						if (newPlayer) {
-							stop();
-							resolve(true);
-						}
-					});
-					// const interval = setInterval(() => {
-					// 	if (player.isPlayerPresent()) {
-					// 		clearInterval(interval);
-					// 		resolve(true);
-					// 	}
-					// }, 100);
-				});
-			}
-			if (!player.isPlayerPresent()) {
-				return Promise.reject("Can't wait for player api ready: player not present");
-			}
-			if (player.apiReady.value) {
+			if (player.isPlayerPresent() && player.apiReady.value) {
 				return;
 			}
-			console.debug("detected player, waiting for api ready");
-			await new Promise(resolve => {
-				// const stop = watch(player.apiReady, async newReady => {
-				// 	if (newReady) {
-				// 		stop();
-				// 		resolve(true);
-				// 	}
-				// });
-				const interval = setInterval(() => {
-					if (player.apiReady.value) {
+			if (!legacyWait) {
+				legacyWait = new Promise<void>(resolve => {
+					const finish = () => {
 						clearInterval(interval);
-						resolve(true);
-					}
-				}, 100);
-			});
+						clearTimeout(timeout);
+						cancelLegacyWait.delete(finish);
+						legacyWait = null;
+						resolve();
+					};
+					const interval = setInterval(() => {
+						if (
+							roomDisposed ||
+							playback.established ||
+							(player.isPlayerPresent() && player.apiReady.value)
+						) {
+							finish();
+						}
+					}, 100);
+					const timeout = setTimeout(finish, 5_000);
+					cancelLegacyWait.add(finish);
+				});
+			}
+			await legacyWait;
 		}
+		onUnmounted(() => {
+			for (const cancel of cancelLegacyWait) {
+				cancel();
+			}
+		});
 
 		async function onSyncMsg(msg: ServerMessageSync) {
 			rewriteUrlToRoomName();
+			if (playback.established) {
+				return;
+			}
 			if (msg.isPlaying !== undefined && !mediaPlaybackBlocked.value) {
 				await applyIsPlaying(msg.isPlaying);
 			}
 		}
 
+		let roomCreatedTimer: ReturnType<typeof setTimeout> | undefined;
 		function onRoomCreated() {
 			if (connection.active.value) {
 				connection.disconnect();
 			}
-			setTimeout(() => {
-				if (!connection.active.value) {
+			clearTimeout(roomCreatedTimer);
+			roomCreatedTimer = setTimeout(() => {
+				if (!roomDisposed && !connection.active.value) {
 					connection.connect(route.params.roomId as string);
 				}
 			}, 100);
@@ -558,6 +669,9 @@ export default defineComponent({
 		let roomCreatedUnsub: (() => void) | null = null;
 		onMounted(async () => {
 			await waitForToken(store);
+			if (roomDisposed) {
+				return;
+			}
 
 			connection.addMessageHandler("sync", onSyncMsg);
 			if (!connection.active.value) {
@@ -572,6 +686,7 @@ export default defineComponent({
 		});
 
 		onUnmounted(() => {
+			clearTimeout(roomCreatedTimer);
 			connection.removeMessageHandler("sync", onSyncMsg);
 			connection.disconnect();
 
@@ -600,12 +715,16 @@ export default defineComponent({
 
 		// Indicates that starting playback is blocked by the browser. This usually means that the user needs
 		// to interact with the page before playback can start. This is because browsers block autoplaying videos.
-		const mediaPlaybackBlocked = ref(false);
-
 		async function applyIsPlaying(playing: boolean): Promise<void> {
+			if (roomDisposed || playback.established) {
+				return;
+			}
 			await waitForPlayer();
-			if (!player.isPlayerPresent()) {
-				return Promise.reject("Can't apply IsPlaying: player not present");
+			if (roomDisposed || playback.established) {
+				return;
+			}
+			if (!player.isPlayerPresent() || !player.apiReady.value) {
+				return;
 			}
 			try {
 				if (playing) {
@@ -625,6 +744,10 @@ export default defineComponent({
 		}
 
 		function onClickUnblockPlayback(): void {
+			if (playback.established) {
+				playback.controller.userActivated();
+				return;
+			}
 			player?.setPosition(truePosition.value);
 			applyIsPlaying(store.state.room.isPlaying);
 		}
@@ -634,6 +757,9 @@ export default defineComponent({
 		}
 
 		async function onPlaybackChange(changeTo: boolean) {
+			if (playback.established) {
+				return;
+			}
 			console.debug(`onPlaybackChange: ${changeTo}`);
 			if (changeTo === store.state.room.isPlaying) {
 				return;
@@ -642,6 +768,9 @@ export default defineComponent({
 			await applyIsPlaying(store.state.room.isPlaying);
 		}
 		function onPlayerReady() {
+			if (playback.established) {
+				return;
+			}
 			if (
 				currentSource.value?.service === "vimeo" ||
 				currentSource.value?.service === "youtube"
@@ -654,6 +783,9 @@ export default defineComponent({
 		// player, landing it cued at position 0). Re-apply both here rather than waiting for the
 		// timestamp watcher, which never fires while the room is paused.
 		async function onPlayerReadyApplyRoomState() {
+			if (playback.established) {
+				return;
+			}
 			player?.setPosition(truePosition.value);
 			await applyIsPlaying(store.state.room.isPlaying);
 		}
@@ -700,8 +832,6 @@ export default defineComponent({
 				await roomSettingsForm.value.loadRoomSettings();
 			}
 		});
-
-		const granted = useGrants();
 
 		const addpreview = ref<typeof AddPreview | null>(null);
 		async function setAddPreviewText(text: string) {
@@ -870,6 +1000,11 @@ export default defineComponent({
 		const gitCommit = __COMMIT_HASH__;
 
 		return {
+			timelineEstablished,
+			playbackSurface,
+			playbackStatus,
+			showPlaybackStatus,
+			retryPlayback: () => playback.controller.retry(),
 			musicRoom,
 			isMusic,
 			queueTotal,

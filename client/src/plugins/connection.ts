@@ -8,6 +8,9 @@ import type {
 import type { AuthToken, OttWebsocketError } from "ott-common/models/types";
 
 export interface OttRoomConnection {
+	/** Cached only for the current authenticated socket, including before Room mounts. */
+	playbackCapability?: boolean;
+	onLifecycle?(handler: () => void): () => void;
 	active: Ref<boolean>;
 	connected: Ref<boolean>;
 	kickReason: Ref<OttWebsocketError | null>;
@@ -64,7 +67,27 @@ function getReconnectDelayMs(
 	return Math.round(baseDelay * (0.5 + randomValue));
 }
 
-class OttRoomConnectionReal implements OttRoomConnection {
+export class OttRoomConnectionReal implements OttRoomConnection {
+	playbackCapability = false;
+	private generation = 0;
+	private lifecycle = new Set<() => void>();
+	onLifecycle(handler: () => void) {
+		if (this.lifecycle.size >= 64) {
+			throw new Error("Too many connection lifecycle listeners");
+		}
+		this.lifecycle.add(handler);
+		return () => this.lifecycle.delete(handler);
+	}
+	private resetPlayback() {
+		this.playbackCapability = false;
+		for (const handler of [...this.lifecycle]) {
+			try {
+				handler();
+			} catch {
+				console.error("connection: lifecycle handler failed");
+			}
+		}
+	}
 	/**
 	 * Indicates if the client is actively attempting to maintain a connection. Not an indication of whether the connection is connected, see `connected`.
 	 * @returns true if the client is actively attempting to maintain a connection to a room.
@@ -113,12 +136,40 @@ class OttRoomConnectionReal implements OttRoomConnection {
 	}
 
 	private doConnect(url: string) {
-		this.socket = new WebSocket(url);
+		if (this.reconnectTimeout) {
+			clearTimeout(this.reconnectTimeout);
+		}
+		this.reconnectTimeout = null;
+		const previous = this.socket;
+		const generation = ++this.generation;
+		this.socket = null;
+		previous?.close();
+		this.connected.value = false;
+		this.resetPlayback();
+		const socket = new WebSocket(url);
+		this.socket = socket;
+		const current = () => this.socket === socket && this.generation === generation;
 		console.debug(`connecting to ${url}`);
-		this.socket.addEventListener("open", () => this.onOpen());
-		this.socket.addEventListener("close", e => this.onClose(e));
-		this.socket.addEventListener("message", e => this.onMessage(e));
-		this.socket.addEventListener("error", e => this.onError(e));
+		socket.addEventListener("open", () => {
+			if (current()) {
+				this.onOpen();
+			}
+		});
+		socket.addEventListener("close", e => {
+			if (current()) {
+				this.onClose(e);
+			}
+		});
+		socket.addEventListener("message", e => {
+			if (current()) {
+				this.onMessage(e);
+			}
+		});
+		socket.addEventListener("error", e => {
+			if (current()) {
+				this.onError(e);
+			}
+		});
 	}
 
 	send(message: ClientMessage) {
@@ -127,6 +178,9 @@ class OttRoomConnectionReal implements OttRoomConnection {
 		}
 		if (!this.connected.value) {
 			throw new Error("send(): connection is not connected");
+		}
+		if (message.action === "auth") {
+			this.resetPlayback();
 		}
 		const text = JSON.stringify(message);
 		this.socket!.send(text);
@@ -137,9 +191,12 @@ class OttRoomConnectionReal implements OttRoomConnection {
 			console.log("disconnect(): connection is not active, ignoring");
 			return;
 		}
-		this.socket!.close();
+		++this.generation;
+		this.socket?.close();
 		this.socket = null;
-		if (this.reconnecting && this.reconnectTimeout) {
+		this.connected.value = false;
+		this.resetPlayback();
+		if (this.reconnectTimeout) {
 			clearTimeout(this.reconnectTimeout);
 			this.reconnectTimeout = null;
 		}
@@ -163,6 +220,7 @@ class OttRoomConnectionReal implements OttRoomConnection {
 		console.info("socket closed", e);
 		this.connected.value = false;
 		this.socket = null;
+		this.resetPlayback();
 		this.dispatchEvent({ kind: "disconnected" });
 		if (e.code >= 4000) {
 			this.kickReason.value = e.code;
@@ -187,8 +245,8 @@ class OttRoomConnectionReal implements OttRoomConnection {
 			try {
 				const msg = JSON.parse(e.data) as ServerMessage;
 				this.handleMessage(msg);
-			} catch (e) {
-				console.error("unable to process message: ", e.data, e);
+			} catch {
+				console.error("unable to process socket message");
 			}
 		}
 	}
@@ -217,13 +275,28 @@ class OttRoomConnectionReal implements OttRoomConnection {
 	}
 
 	private handleMessage(msg: ServerMessage) {
+		if (!msg || typeof msg !== "object" || typeof msg.action !== "string") {
+			return;
+		}
+		if (
+			msg.action === "playback-capabilities" &&
+			msg.version === 1 &&
+			msg.recovery === "snapshot" &&
+			Object.keys(msg).length === 3
+		) {
+			this.playbackCapability = true;
+		}
 		const handlers = this.messageHandlers.get(msg.action) ?? [];
 		if (handlers.length === 0) {
 			console.error("connection: no message handlers for message: ", msg.action);
 			return;
 		}
-		for (const handler of handlers) {
-			handler(msg);
+		for (const handler of [...handlers]) {
+			try {
+				handler(msg);
+			} catch {
+				console.error("connection: message handler failed", msg.action);
+			}
 		}
 	}
 
@@ -259,6 +332,18 @@ export const OttRoomConnectionPlugin: Plugin = (app: App, options) => {
 export default OttRoomConnectionPlugin;
 
 export class OttRoomConnectionMock implements OttRoomConnection {
+	playbackCapability = false;
+	private lifecycle = new Set<() => void>();
+	onLifecycle(handler: () => void) {
+		this.lifecycle.add(handler);
+		return () => this.lifecycle.delete(handler);
+	}
+	mockLifecycle() {
+		this.playbackCapability = false;
+		for (const handler of [...this.lifecycle]) {
+			handler();
+		}
+	}
 	active: Ref<boolean> = ref(false);
 	connected: Ref<boolean> = ref(false);
 	kickReason: Ref<OttWebsocketError | null> = ref(null);
@@ -271,6 +356,13 @@ export class OttRoomConnectionMock implements OttRoomConnection {
 	}
 
 	public mockReceive(msg: ServerMessage) {
+		if (
+			msg.action === "playback-capabilities" &&
+			msg.version === 1 &&
+			msg.recovery === "snapshot"
+		) {
+			this.playbackCapability = true;
+		}
 		this.handleMessage(msg);
 	}
 
@@ -278,9 +370,15 @@ export class OttRoomConnectionMock implements OttRoomConnection {
 	public connect(roomName: string) {}
 	// biome-ignore lint/suspicious/noEmptyBlockStatements: biome migration
 	public reconnect() {}
-	// biome-ignore lint/suspicious/noEmptyBlockStatements: biome migration
-	public disconnect() {}
+	public disconnect() {
+		this.active.value = false;
+		this.connected.value = false;
+		this.mockLifecycle();
+	}
 	public send(message: ClientMessage) {
+		if (message.action === "auth") {
+			this.mockLifecycle();
+		}
 		this.sent.push(message);
 	}
 
