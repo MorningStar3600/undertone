@@ -17,6 +17,10 @@ export async function createCatalogueFixture(storage = ":memory:") {
 	await User.bulkCreate([{ id: 1 }, { id: 2 }]);
 	const models = createMusicModels(connection);
 	await migration.up(connection.getQueryInterface(), Sequelize);
+	await require("../../migrations/20261109200000-create-music-rooms.js").up(
+		connection.getQueryInterface(),
+		Sequelize,
+	);
 	const resolver: CatalogueResolver = {
 		resolve: vi.fn(async reference => {
 			const identity =

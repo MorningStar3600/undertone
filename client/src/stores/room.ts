@@ -1,3 +1,4 @@
+import type { MusicRoomPublic } from "ott-common/models/music-room";
 import type { Module } from "vuex/types";
 import { Grants } from "ott-common/permissions";
 import { QueueMode, Visibility } from "ott-common/models/types";
@@ -8,6 +9,7 @@ import { deserializeMap, deserializeSet } from "ott-common/serialize";
 import type { FullOTTStoreState } from "@/store";
 
 export interface RoomState {
+	music: MusicRoomPublic | null;
 	name: string;
 	title: string;
 	description: string;
@@ -37,6 +39,7 @@ export interface RoomState {
 export const roomModule: Module<RoomState, FullOTTStoreState> = {
 	namespaced: true,
 	state: {
+		music: null,
 		name: "",
 		title: "",
 		description: "",
@@ -66,6 +69,9 @@ export const roomModule: Module<RoomState, FullOTTStoreState> = {
 	actions: {
 		sync(context, message: ServerMessageSync) {
 			const stateupdate: Partial<RoomState> = {};
+			if ("music" in message) {
+				stateupdate.music = message.music;
+			}
 			if ("name" in message) {
 				stateupdate.name = message.name;
 			}

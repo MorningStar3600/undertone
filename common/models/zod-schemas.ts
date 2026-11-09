@@ -1,3 +1,4 @@
+export { MusicRoomActionSchema } from "./music-room.js";
 import { ALL_VIDEO_SERVICES, ROOM_NAME_REGEX } from "ott-common/constants.js";
 import { BehaviorOption, Role } from "ott-common/models/types.js";
 import { Visibility, QueueMode } from "ott-common/models/types.js";

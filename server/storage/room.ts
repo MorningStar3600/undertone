@@ -1,3 +1,6 @@
+import { musicRoomModels } from "../models/music-room.js";
+import { sequelize } from "../models/index.js";
+import { musicTransaction } from "../music/room-music-db.js";
 import { Room as DbRoomModel, User as UserModel } from "../models/index.js";
 import type { Room as DbRoom, RoomAttributes } from "../models/room.js";
 import { Role, type RoomOptions } from "ott-common/models/types.js";
@@ -90,8 +93,19 @@ export async function updateRoom(room: Partial<RoomStatePersistable>): Promise<b
 
 export async function deleteRoom(roomName: string): Promise<boolean> {
 	try {
-		const deleted = await DbRoomModel.destroy({
-			where: buildFindRoomWhere(roomName),
+		const deleted = await musicTransaction(sequelize, async transaction => {
+			const deleted = await DbRoomModel.destroy({
+				where: buildFindRoomWhere(roomName),
+				transaction,
+			});
+			if (deleted) {
+				const models = musicRoomModels(sequelize),
+					roomId = roomName.toLowerCase();
+				await models.Event.destroy({ where: { roomId }, transaction });
+				await models.Score.destroy({ where: { roomId }, transaction });
+				await models.State.destroy({ where: { roomId }, transaction });
+			}
+			return deleted;
 		});
 		if (deleted === 0) {
 			log.debug(`Room ${roomName} not found in db to delete.`);

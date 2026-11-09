@@ -79,7 +79,15 @@ export const createModel = (sequelize: Sequelize) => {
 				defaultValue: QueueMode.Manual,
 				validate: {
 					// eslint-disable-next-line array-bracket-newline
-					isIn: [[QueueMode.Manual, QueueMode.Vote, QueueMode.Loop, QueueMode.Dj]],
+					isIn: [
+						[
+							QueueMode.Manual,
+							QueueMode.Vote,
+							QueueMode.Loop,
+							QueueMode.Dj,
+							QueueMode.Music,
+						],
+					],
 				},
 			},
 			ownerId: {

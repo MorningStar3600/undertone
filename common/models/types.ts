@@ -14,6 +14,7 @@ export enum QueueMode {
 	Vote = "vote",
 	Loop = "loop",
 	Dj = "dj",
+	Music = "music",
 }
 
 export enum BehaviorOption {

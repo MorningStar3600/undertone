@@ -119,6 +119,31 @@ describe("ClientManager", () => {
 		conf.set("base_url", "/");
 	});
 
+	it("targets private music results through existing direct and balancer transports", () => {
+		const direct = new TestClient("foo"),
+			bystander = new TestClient("foo"),
+			con = new BalancerConnectionMock(),
+			remote = new BalancerClient("foo", "remote-music", con);
+		for (const client of [direct, bystander, remote]) {
+			clientmanager.addClient(client);
+		}
+		const message = {
+			action: "music-result" as const,
+			result: { correlationId: "private", revision: 2, status: "applied" },
+		};
+		roommanager.command("foo", { type: "send", clientId: direct.id, message });
+		expect(JSON.parse(direct.sendRawMock.mock.calls[0][0])).toEqual(message);
+		expect(bystander.sendRawMock).not.toHaveBeenCalled();
+		expect(con.sendMock).not.toHaveBeenCalled();
+		roommanager.command("foo", { type: "send", clientId: remote.id, message });
+		expect(con.sendMock).toHaveBeenCalledWith({
+			type: "room_msg",
+			payload: { room: "foo", client_id: remote.id, payload: message },
+		});
+		for (const client of [direct, bystander, remote]) {
+			client.emit("disconnect", client);
+		}
+	});
 	it("should add clients", () => {
 		const client = new TestClient("foo");
 		clientmanager.addClient(client);

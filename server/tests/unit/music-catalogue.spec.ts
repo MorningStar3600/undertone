@@ -341,7 +341,15 @@ describe("Persistent music catalogue", () => {
 			.mockRejectedValueOnce(new Error("Injected migration failure"));
 		await expect(migration.up(queryInterface, Sequelize)).rejects.toThrow("Injected");
 		failedMigration.mockRestore();
-		expect(await queryInterface.showAllTables()).toEqual(["Users"]);
+		expect((await queryInterface.showAllTables()).sort()).toEqual(
+			[
+				"Users",
+				"MusicRoomStates",
+				"MusicRoomEvents",
+				"MusicRoomScores",
+				"MusicCatalogueVersions",
+			].sort(),
+		);
 		expect(await User.count()).toBe(2);
 	});
 

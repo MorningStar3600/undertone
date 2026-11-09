@@ -1,3 +1,4 @@
+import type { MusicRoomActionInput, MusicRoomPublic, MusicRoomResult } from "./music-room.js";
 import type { Category, Segment } from "sponsorblock-api";
 import type {
 	ClientId,
@@ -22,7 +23,13 @@ export type ServerMessage =
 	| ServerMessageEventCustom
 	| ServerMessageAnnouncement
 	| ServerMessageUser
-	| ServerMessageYou;
+	| ServerMessageYou
+	| ServerMessageMusicResult;
+
+export interface ServerMessageMusicResult {
+	action: "music-result";
+	result: MusicRoomResult;
+}
 
 export type ServerMessageActionType = ServerMessage["action"];
 
@@ -32,6 +39,7 @@ interface ServerMessageBase {
 
 export interface ServerMessageSync extends ServerMessageBase {
 	action: "sync";
+	music?: MusicRoomPublic | null;
 	name?: string;
 	title?: string;
 	description?: string;
@@ -207,7 +215,8 @@ export type RoomRequest =
 	| PlaybackSpeedRequest
 	| RestoreQueueRequest
 	| KickRequest
-	| UpdateQueueItemRequest;
+	| UpdateQueueItemRequest
+	| MusicRoomRequest;
 
 export enum RoomRequestType {
 	JoinRequest,
@@ -230,6 +239,7 @@ export enum RoomRequestType {
 	RestoreQueueRequest,
 	KickRequest,
 	UpdateQueueItemRequest,
+	MusicRoomRequest,
 }
 
 export interface RoomRequestBase {
@@ -343,4 +353,9 @@ export interface RestoreQueueRequest extends RoomRequestBase {
 export interface KickRequest extends RoomRequestBase {
 	type: RoomRequestType.KickRequest;
 	clientId: ClientId;
+}
+
+export interface MusicRoomRequest extends RoomRequestBase {
+	type: RoomRequestType.MusicRoomRequest;
+	command: MusicRoomActionInput;
 }

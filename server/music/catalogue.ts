@@ -1,8 +1,7 @@
+import { musicTransaction } from "./room-music-db.js";
+import { musicRoomModels } from "../models/music-room.js";
 import { randomUUID, createHash } from "node:crypto";
-import { Mutex } from "@divine/synchronization";
-import { Op, Transaction, type Sequelize } from "sequelize";
-import { setTimeout as delay } from "node:timers/promises";
-import type { Database } from "sqlite3";
+import { Op, type Sequelize, type Transaction } from "sequelize";
 import { z } from "zod";
 import { ALL_VIDEO_SERVICES } from "ott-common/constants.js";
 import { OttException } from "ott-common/exceptions.js";
@@ -194,31 +193,7 @@ function referenceId(kind: "track" | "source", reference: VideoId): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-/** Sequelize 6's pool destroy does not close SQLite transaction connections on failed COMMIT. */
-async function cleanFailedSqliteCommit(sequelize: Sequelize, connection: Database): Promise<void> {
-	if ((connection as Database & { filename: string }).filename === ":memory:") {
-		// Closing the shared in-memory connection would discard the entire database.
-		await new Promise<void>((resolve, reject) => {
-			connection.run("ROLLBACK", error => (error ? reject(error) : resolve()));
-		});
-		return;
-	}
-	// Closing rolls back outstanding writes and releases the lock before the next attempt.
-	await new Promise<void>((resolve, reject) => {
-		connection.close(error => (error ? reject(error) : resolve()));
-	});
-	const manager = sequelize.connectionManager as typeof sequelize.connectionManager & {
-		connections: Record<string, Database>;
-	};
-	for (const [key, cached] of Object.entries(manager.connections)) {
-		if (cached === connection) {
-			delete manager.connections[key];
-		}
-	}
-}
-
 export class MusicCatalogue {
-	private readonly lock = new Mutex();
 	constructor(
 		private readonly connection: () => Sequelize = () => db.sequelize,
 		private readonly models: () => MusicModels = () => db,
@@ -226,39 +201,92 @@ export class MusicCatalogue {
 	) {}
 
 	private async write<T>(operation: (transaction: Transaction) => Promise<T>): Promise<T> {
-		return this.lock.protect(async () => {
-			const connection = this.connection();
-			if (connection.getDialect() !== "sqlite") {
-				return connection.transaction(operation);
-			}
-			// Acquire the SQLite write lock before reading, even across connections/processes.
-			// Retry the whole transaction after rollback, never only a stale read's write.
-			for (let attempt = 0; ; attempt++) {
-				let committing: Database | undefined;
-				try {
-					return await connection.transaction(
-						{ type: Transaction.TYPES.IMMEDIATE },
-						async transaction => {
-							const result = await operation(transaction);
-							committing = (transaction as Transaction & { connection: Database })
-								.connection;
-							return result;
-						},
-					);
-				} catch (error) {
-					if (committing) {
-						await cleanFailedSqliteCommit(connection, committing);
-					}
-					const code = (error as { original?: { code?: string } }).original?.code;
-					if (attempt >= 3 || !["SQLITE_BUSY", "SQLITE_LOCKED"].includes(code ?? "")) {
-						throw error;
-					}
-					await delay(25 * 2 ** attempt);
-				}
-			}
-		});
+		// SQLite permits a single writer. DB uniqueness also arbitrates between server processes.
+		return musicTransaction(this.connection(), operation);
 	}
 
+	/** Trusted Room-only batch read. Caller supplies authenticated present account IDs;
+	 * results contain private tags and provider references and MUST NOT be synchronized. */
+	async roomSnapshot(
+		userIds: number[],
+		occurrenceTrackIds: string[] = [],
+		annotationUserIds = userIds,
+	) {
+		const models = this.models();
+		return musicTransaction(
+			this.connection(),
+			async transaction => {
+				const links = await models.UserLibraryTrack.findAll({
+					where: { userId: { [Op.in]: userIds } },
+					transaction,
+				});
+				const ids = [
+					...new Set([...links.map(row => row.get().trackId), ...occurrenceTrackIds]),
+				];
+				const tracks: Track[] = [],
+					sources: TrackSource[] = [],
+					tags: { userId: number; trackId: string; moodId: string }[] = [];
+				// Bounded bind batches work in both SQLite and PostgreSQL, even for large libraries.
+				for (let offset = 0; offset < ids.length; offset += 400) {
+					const trackId = { [Op.in]: ids.slice(offset, offset + 400) };
+					tracks.push(
+						...(
+							await models.Track.findAll({ where: { id: trackId }, transaction })
+						).map(row => trackDto(row.get({ plain: true }))),
+					);
+					sources.push(
+						...(
+							await models.TrackSource.findAll({ where: { trackId }, transaction })
+						).map(row => row.get({ plain: true })),
+					);
+					tags.push(
+						...(
+							await models.UserTrackMood.findAll({
+								where: { trackId, userId: { [Op.in]: annotationUserIds } },
+								transaction,
+							})
+						).map(row => row.get({ plain: true })),
+					);
+				}
+				const versions = await this.roomVersions(annotationUserIds, transaction);
+				const moods = (
+					await models.Mood.findAll({
+						where: { id: { [Op.in]: [...new Set(tags.map(tag => tag.moodId))] } },
+						transaction,
+					})
+				).map(row => moodDto(row.get({ plain: true })));
+				return {
+					links: links.map(row => row.get({ plain: true })),
+					tracks,
+					sources,
+					tags,
+					moods,
+					versions,
+				};
+			},
+			true,
+		);
+	}
+	async roomVersions(userIds: number[], transaction?: Transaction): Promise<string> {
+		const rows = await musicRoomModels(this.connection()).Version.findAll({
+			where: { userId: { [Op.in]: userIds } },
+			transaction,
+		});
+		return userIds
+			.slice()
+			.sort((a, b) => a - b)
+			.map(id => id + ":" + (rows.find(row => row.get().userId === id)?.get().revision ?? 0))
+			.join(",");
+	}
+	private async invalidateRoomUser(userId: number, transaction: Transaction) {
+		const model = musicRoomModels(this.connection()).Version;
+		await model.findOrCreate({
+			where: { userId },
+			defaults: { userId, revision: 0 },
+			transaction,
+		});
+		await model.increment("revision", { where: { userId }, transaction });
+	}
 	async getTrack(trackId: string): Promise<Track> {
 		MusicIdSchema.parse(trackId);
 		const row = await this.models().Track.findByPk(trackId);
@@ -354,6 +382,9 @@ export class MusicCatalogue {
 				},
 				transaction,
 			});
+			if (created) {
+				await this.invalidateRoomUser(userId, transaction);
+			}
 			return created;
 		});
 		if (created) {
@@ -364,9 +395,16 @@ export class MusicCatalogue {
 
 	async removeLibraryTrack(userId: number, trackId: string): Promise<void> {
 		MusicIdSchema.parse(trackId);
-		const count = await this.write(transaction =>
-			this.models().UserLibraryTrack.destroy({ where: { userId, trackId }, transaction }),
-		);
+		const count = await this.write(async transaction => {
+			const count = await this.models().UserLibraryTrack.destroy({
+				where: { userId, trackId },
+				transaction,
+			});
+			if (count) {
+				await this.invalidateRoomUser(userId, transaction);
+			}
+			return count;
+		});
 		if (count) {
 			await notify({ kind: "library", userId, trackId, action: "removed" });
 		}
@@ -482,13 +520,20 @@ export class MusicCatalogue {
 			await this.requireMood(moodId, transaction);
 			const where = { userId, trackId, moodId };
 			if (!active) {
-				return !!(await this.models().UserTrackMood.destroy({ where, transaction }));
+				const count = await this.models().UserTrackMood.destroy({ where, transaction });
+				if (count) {
+					await this.invalidateRoomUser(userId, transaction);
+				}
+				return !!count;
 			}
 			const [, created] = await this.models().UserTrackMood.findOrCreate({
 				where,
 				defaults: where,
 				transaction,
 			});
+			if (created) {
+				await this.invalidateRoomUser(userId, transaction);
+			}
 			return created;
 		});
 		if (changed) {

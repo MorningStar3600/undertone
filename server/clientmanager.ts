@@ -195,6 +195,15 @@ async function onClientMessage(client: Client, msg: ClientMessage) {
 			};
 			await makeRoomRequest(client, request);
 		} else if (msg.action === "req") {
+			if (
+				[
+					RoomRequestType.JoinRequest,
+					RoomRequestType.LeaveRequest,
+					RoomRequestType.UpdateUser,
+				].includes(msg.request.type)
+			) {
+				throw new OttException("Internal room request");
+			}
 			await makeRoomRequest(client, msg.request);
 		} else if (msg.action === "notify") {
 			if (msg.message === "usernameChanged") {
@@ -449,7 +458,12 @@ async function onRoomPublish(roomName: string, msg: ServerMessage) {
 }
 
 async function handleCommand(roomName: string, command: ClientManagerCommand) {
-	if (command.type === "kick") {
+	if (command.type === "send") {
+		const client = getClient(command.clientId);
+		if (client?.room === roomName) {
+			client.send(command.message);
+		}
+	} else if (command.type === "kick") {
 		const client = getClient(command.clientId);
 		client?.kick(OttWebsocketError.KICKED);
 	}
@@ -536,7 +550,9 @@ setInterval(() => {
 	}
 }, 10000);
 
-export type ClientManagerCommand = CmdKick;
+export type ClientManagerCommand =
+	| CmdKick
+	| { type: "send"; clientId: ClientId; message: ServerMessage };
 
 interface CmdBase {
 	type: string;

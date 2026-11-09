@@ -1,3 +1,4 @@
+import { subscribeCatalogueChanges } from "./music/catalogue.js";
 import { Room, type RoomState, type RoomStateFromRedis } from "./room.js";
 import type { Role, RoomOptions, Visibility } from "ott-common/models/types.js";
 import _ from "lodash";
@@ -19,6 +20,11 @@ import { UnloadReason } from "./generated.js";
 
 export const log = getLogger("roommanager");
 export const rooms: Room[] = [];
+subscribeCatalogueChanges(change => {
+	for (const room of rooms) {
+		room.invalidateMusic(change.userId);
+	}
+});
 const LOAD_EPOCH_KEY = "roommanager:load_epoch";
 
 export type RoomManagerEvents = "publish" | "load" | "unload" | "command";
@@ -34,6 +40,7 @@ export type RoomManagerEventHandlers<E> = E extends "publish"
 const bus = new EventEmitter();
 
 async function addRoom(room: Room) {
+	await room.initializeMusic();
 	rooms.push(room);
 	const epoch = await redisClient.incr(LOAD_EPOCH_KEY);
 	room.loadEpoch = epoch;

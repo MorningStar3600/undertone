@@ -1,3 +1,4 @@
+import type { MusicRoomActionInput, MusicRoomResult } from "ott-common/models/music-room";
 import type { OttRoomConnection } from "@/plugins/connection";
 import { type ClientMessageNotify, RoomRequestType } from "ott-common/models/messages";
 import type { ClientId, Role } from "ott-common/models/types";
@@ -14,6 +15,23 @@ class RoomApi {
 		this.connection = connection;
 	}
 
+	/** One existing OTT connection for music commands and private results. Caller
+	 * supplies correlationId/requestId (UUID recommended), and the latest sync revision. */
+	music(command: MusicRoomActionInput) {
+		this.connection.send({
+			action: "req",
+			request: { type: RoomRequestType.MusicRoomRequest, command },
+		});
+	}
+	onMusicResult(listener: (result: MusicRoomResult) => void): () => void {
+		const handler = (message: import("ott-common/models/messages").ServerMessage) => {
+			if (message.action === "music-result") {
+				listener(message.result);
+			}
+		};
+		this.connection.addMessageHandler("music-result", handler);
+		return () => this.connection.removeMessageHandler("music-result", handler);
+	}
 	/** Send a message to play the video. */
 	play() {
 		this.connection.send({

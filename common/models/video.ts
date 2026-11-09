@@ -28,4 +28,11 @@ export interface QueueItemExtras {
 }
 
 export type VideoAdd = VideoId & QueueItemExtras;
-export interface QueueItem extends Video, QueueItemExtras {}
+export interface QueueItem extends Video, QueueItemExtras {
+	/** Present only for music occurrences; legacy service/id queues remain valid. */
+	trackId?: string;
+	sourceId?: string;
+	entryId?: string;
+	contributorId?: string;
+	origin?: "automatic" | "manual" | "recommendation";
+}
