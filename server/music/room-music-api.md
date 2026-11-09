@@ -114,7 +114,13 @@ an anonymous browser after it discards that token. Guests can contribute manual
 public references, but have no account library/tags. A returning account retains
 its score within the durable room music session. Session UUIDs persist in SQL.
 Music joins derive account identity from token sessions, not supplied `ClientInfo`.
-WebSocket `req` cannot impersonate internal Join/Leave/UpdateUser events.
+Entering Music also reauthenticates every legacy participant from their token session
+and checks the caller's authenticated role before applying the mode change. Cached
+legacy account IDs never authorize access to another account's generation library.
+Room dispatch accepts only numeric enum discriminators; strings, fractions, unknown
+numbers and prototype property names are rejected before permission lookup/dispatch.
+WebSocket `req` cannot impersonate internal Join/Leave/UpdateUser events; legitimate
+typed internal status, join, leave and account-change routes remain available.
 
 ## Atomicity, playback and recovery
 
@@ -134,8 +140,18 @@ play commands and equivalent-source fallback reuse the same occurrence/playback 
 Fallback tries only trusted catalogue sources of the same already authorized track,
 preserving opaque playback extras; it changes `actualSourceId`, never creates another
 play. If no source resolves, an unstarted load ends as an error without a fake event.
+Automatic advancement retains the intended playing/paused state while trying failed
+heads (up to five head resolution attempts per call; subsequent Room updates continue
+a longer queue). An exhausted queue stops, without repeated provider calls on each tick.
+The next usable head starts once when playing was intended; paused loading stays free.
 Current playback is unaffected by moods, participant departure or manual `next`.
 Current source and timeline changes are persisted with the scheduler before publication.
+Play/pause/seek/speed intents derive position and start time from the latest committed
+timeline under the business mutex, after source I/O and revision checks. A concurrent
+seek survives retry, provider latency is not playback time, and a delayed play cannot
+start a replacement occurrence. User playback/skip commits recheck the captured
+connection's live membership, token session, mode and current role grants after I/O.
+Automatic updates have no user identity and only recheck the mode.
 
 The additional catalogue cleanup migration `20261109210000-redact-music-url-titles.js`
 from manager commit `4507e5b5` must also run. Room titles are taken from sanitized catalogue
@@ -178,6 +194,11 @@ uses PostgreSQL repeatable-read so tags and their invalidation version cannot be
 observed from different commits. SQLite uses the shared connection transaction mutex.
 Catalogue imports/annotation writes and room persistence share that mutex to avoid
 nested SQLite transactions. Existing catalogue APIs remain available.
+
+Catalogue fingerprints advance only with a successful commit of their corresponding
+refreshed scheduler state. Rejected confirmations, abandoned contexts and failed SQL
+writes cannot consume invalidation. Membership or annotation invalidation received
+during persistence keeps the context dirty for another refresh.
 
 Actual library/tag additions and removals increment the user's version in the same
 SQL transaction as the mutation. Favorites/no-ops never increment it. The existing
@@ -222,3 +243,25 @@ not available/exercised here. Yarn's native SQLite install could not fetch/build
 binary in the sandbox; tests used the matching existing local SQLite binary from
 the parent checkout, without any package/lockfile change. The two explicitly
 allowed manager fixes are included as cherry-picks; no UI commit was imported.
+
+## Room boundary hardening checks
+
+The boundary follow-up adds 36 regressions in `room-music-boundaries.spec.ts`:
+actual ClientManager forged/internal discriminators and private-library isolation;
+legacy identity reauthentication; legitimate typed internal routes; invalidation on
+rejected confirmations, rollback, arrivals and in-flight persistence; slow provider
+resolution with concurrent seek/speed; session/membership/grant/role/mode revocation;
+skip reauthorization; bounded failed-head/equivalent-source recovery, concurrent
+pause/replan, source availability changes and replacement-occurrence rejection.
+
+Validation uses test SQLite, mocked token sessions, Redis and providers. The ten
+server suites (Room music/boundaries, Room, RoomManager, ClientManager, scheduler,
+catalogue, music/room REST and storage) pass: 246 unique tests, including the final
+58-test Room music/boundary rerun. Common's 71 tests and the six existing client
+music protocol/store and RoomSettings tests pass. `tsc --noEmit` passes in common,
+server and client. Targeted Biome and ESLint pass; only the four existing template
+expression warnings in Room/ClientManager remain. Only `server/db/test.sqlite` was
+migrated, including catalogue, rooms and URL-title redaction. No migration/helper
+changes were needed. The matching SQLite 5.1.5 binary was reused from the parent
+checkout into ignored local `node_modules`; no dependency/lockfile changes.
+Live Redis, PostgreSQL, providers and browser/multi-device playback remain untested.

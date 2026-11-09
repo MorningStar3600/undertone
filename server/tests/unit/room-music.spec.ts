@@ -38,6 +38,13 @@ describe("Music Room protocol and durable transactions", () => {
 	const identity = "account:1";
 	beforeEach(async () => {
 		fixture = await createCatalogueFixture();
+		vi.spyOn(tokens, "getSessionInfo").mockImplementation(async token => ({
+			isLoggedIn: true,
+			user_id: token === "token-2" ? 2 : 1,
+		}));
+		vi.spyOn(usermanager, "getUser").mockImplementation(
+			async ({ id }) => ({ id, username: "fixture" }) as User,
+		);
 		store = new SqlMusicRoomStore(() => fixture.connection);
 		room = new Room(
 			{ name: "music-test", queueMode: QueueMode.Music },

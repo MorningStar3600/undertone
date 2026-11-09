@@ -242,6 +242,12 @@ export enum RoomRequestType {
 	MusicRoomRequest,
 }
 
+/** JSON discriminators must not use JavaScript's string/property coercion. */
+export const isRoomRequestType = (value: unknown): value is RoomRequestType =>
+	typeof value === "number" &&
+	Number.isInteger(value) &&
+	Object.values(RoomRequestType).includes(value);
+
 export interface RoomRequestBase {
 	type: RoomRequestType;
 }

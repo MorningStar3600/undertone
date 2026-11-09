@@ -8,6 +8,7 @@ import {
 	type ClientMessage,
 	type RoomRequest,
 	RoomRequestType,
+	isRoomRequestType,
 	type ServerMessage,
 	type ServerMessageSync,
 	type ServerMessageUser,
@@ -195,6 +196,9 @@ async function onClientMessage(client: Client, msg: ClientMessage) {
 			};
 			await makeRoomRequest(client, request);
 		} else if (msg.action === "req") {
+			if (!isRoomRequestType(msg.request?.type)) {
+				throw new OttException("Invalid room request type");
+			}
 			if (
 				[
 					RoomRequestType.JoinRequest,

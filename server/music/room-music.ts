@@ -69,6 +69,14 @@ const reduce = (
 ): MusicSchedulerTransition =>
 	transitionMusicScheduler(state, command, { expectedRevision: state.revision });
 
+type RefreshedContext = {
+	state: MusicSchedulerState;
+	versions: string;
+	identities: string[];
+	invalidation: number;
+};
+type Authorize = () => void | Promise<void>;
+
 /** Owns the entire read/transition/SQL commit/publication boundary. Provider calls
  * are outside lock; a revision/head check makes a stale resolution harmless. */
 export class RoomMusic {
@@ -80,6 +88,7 @@ export class RoomMusic {
 	private currentMoods: Mood[] = [];
 	private nextVersionCheck = 0;
 	private invalid = true;
+	private invalidation = 0;
 	constructor(
 		private roomId: string,
 		private people: () => string[],
@@ -119,6 +128,7 @@ export class RoomMusic {
 	invalidate(userId: number) {
 		if (this.versionAccounts().includes(userId)) {
 			this.invalid = true;
+			this.invalidation++;
 		}
 	}
 	private async initializeLocked() {
@@ -164,11 +174,11 @@ export class RoomMusic {
 		const snapshot = await this.catalogue.roomSnapshot([], [current.entry.trackId], [account]);
 		return snapshot.moods;
 	}
-	private versionAccounts(state = this.value?.state): number[] {
+	private versionAccounts(state = this.value?.state, people = this.people()): number[] {
 		return [
 			...new Set(
 				[
-					...this.people(),
+					...people,
 					...(state?.current ? [state.current.entry.contributorId] : []),
 					...(state?.queue.map(entry => entry.contributorId) ?? []),
 					...(state?.requests
@@ -183,9 +193,15 @@ export class RoomMusic {
 			),
 		];
 	}
-	private async commit(state: MusicSchedulerState, playback = this.value!.playback) {
+	private async commit(
+		state: MusicSchedulerState,
+		playback = this.value!.playback,
+		context?: RefreshedContext,
+		authorize?: Authorize,
+	) {
 		const next = { state, playback };
 		const currentMoods = await this.loadCurrentMoods(state);
+		await authorize?.();
 		try {
 			await this.store.save(next, this.value!.state.revision);
 		} catch (error) {
@@ -194,23 +210,30 @@ export class RoomMusic {
 		}
 		this.currentMoods = currentMoods;
 		this.value = next;
+		if (context) {
+			this.versions = context.versions;
+			this.invalid =
+				context.invalidation !== this.invalidation ||
+				JSON.stringify(context.identities) !== JSON.stringify([...new Set(this.people())]);
+		}
 		await this.publish(next, this.publicState!);
 	}
 	private async context(
 		state: MusicSchedulerState,
 		preferences?: RoomMoodPreference[],
-	): Promise<MusicSchedulerState> {
+	): Promise<RefreshedContext> {
+		const invalidation = this.invalidation;
 		const ids = [...new Set(this.people())];
-		const participants =
-			preferences ??
-			ids.map(
-				participantId =>
-					state.participants.find(p => p.participantId === participantId) ?? {
-						participantId,
-						includeMoodIds: [],
-						excludeMoodIds: [],
-					},
-			);
+		const participants = ids.map(
+			participantId =>
+				(preferences ?? state.participants).find(
+					p => p.participantId === participantId,
+				) ?? {
+					participantId,
+					includeMoodIds: [],
+					excludeMoodIds: [],
+				},
+		);
 		const accounts = participants
 			.map(p => accountId(p.participantId))
 			.filter((id): id is number => id !== undefined);
@@ -226,7 +249,7 @@ export class RoomMusic {
 				...occurrences.map(e => e.trackId),
 				...(state.current ? [state.current.entry.trackId] : []),
 			],
-			this.versionAccounts(),
+			this.versionAccounts(state, ids),
 		);
 		const candidate = (
 			trackId: string,
@@ -271,12 +294,12 @@ export class RoomMusic {
 			occurrenceCandidates,
 			now: Date.now(),
 		});
-		const relevantAccounts = new Set(this.versionAccounts(result.state));
-		this.versions = snapshot.versions
+		const relevantAccounts = new Set(this.versionAccounts(result.state, ids));
+		const versions = snapshot.versions
 			.split(",")
 			.filter(part => relevantAccounts.has(Number(part.split(":")[0])))
 			.join(",");
-		return result.state;
+		return { state: result.state, versions, identities: ids, invalidation };
 	}
 	async refresh(force = false) {
 		await this.lock.protect(async () => {
@@ -291,9 +314,8 @@ export class RoomMusic {
 				this.invalid ||
 				(await this.catalogue.roomVersions(accounts)) !== this.versions
 			) {
-				const state = await this.context(this.value!.state);
-				await this.commit(state);
-				this.invalid = false;
+				const context = await this.context(this.value!.state);
+				await this.commit(context.state, undefined, context);
 			}
 			this.nextVersionCheck = now + 5000;
 		});
@@ -301,7 +323,7 @@ export class RoomMusic {
 	async execute(
 		action: MusicRoomAction,
 		identity: string,
-		authorize?: () => void,
+		authorize?: Authorize,
 	): Promise<MusicRoomResult> {
 		// Resolve provider imports outside the room mutex. Authorization is performed by Room first.
 		let resolved: Awaited<ReturnType<MusicCatalogue["resolveTrack"]>> | undefined;
@@ -314,7 +336,7 @@ export class RoomMusic {
 			if (!this.people().includes(identity)) {
 				throw new MusicRoomException("Join the room before issuing music commands");
 			}
-			authorize?.();
+			await authorize?.();
 			const initial = this.value!.state;
 			const result = (status: string): MusicRoomResult => ({
 				correlationId: action.correlationId,
@@ -349,7 +371,8 @@ export class RoomMusic {
 			if (ownRequest && ownRequest.candidate.contributorId !== identity) {
 				throw new MusicRoomException("Music request belongs to another participant");
 			}
-			let state = await this.context(initial);
+			let context = await this.context(initial);
+			let state = context.state;
 			const now = Date.now();
 			let command: MusicSchedulerCommand;
 			switch (action.action) {
@@ -363,7 +386,8 @@ export class RoomMusic {
 								}
 							: p,
 					);
-					state = await this.context(state, participants);
+					context = await this.context(state, participants);
+					state = context.state;
 					command = { type: "replan", content: action.content, now };
 					break;
 				}
@@ -454,9 +478,7 @@ export class RoomMusic {
 			}
 			const transition = reduce(state, command);
 			// Context refresh is itself meaningful and published even if the intention now conflicts.
-			authorize?.();
-			await this.commit(transition.state);
-			this.invalid = false;
+			await this.commit(transition.state, undefined, context, authorize);
 			const request =
 				"requestId" in action
 					? transition.state.requests.find(r => r.requestId === action.requestId)
@@ -534,10 +556,14 @@ export class RoomMusic {
 			throw new MusicRoomException("No usable music source");
 		}
 	}
-	async setPlayback(patch: Partial<MusicRoomPlayback>) {
+	async setPlayback(patch: Partial<MusicRoomPlayback>, authorize?: Authorize) {
 		await this.initialize();
+		const playbackId = this.value!.state.current?.playbackId;
 		for (let attempt = 0; attempt < 5; attempt++) {
 			const before = this.state!;
+			if (before.current?.playbackId !== playbackId) {
+				throw new MusicRoomException("Music occurrence changed during source resolution");
+			}
 			const current =
 				patch.isPlaying &&
 				before.current &&
@@ -558,7 +584,7 @@ export class RoomMusic {
 					return false;
 				}
 				let state = this.value!.state;
-				let playback = { ...this.value!.playback, ...patch };
+				let playback = this.value!.playback;
 				if (current) {
 					const snapshot = await this.catalogue.roomSnapshot([], [current.entry.trackId]);
 					const source = snapshot.sources.find(
@@ -605,7 +631,26 @@ export class RoomMusic {
 				if (state === this.value!.state) {
 					state = { ...state, revision: state.revision + 1 };
 				}
-				await this.commit(state, playback);
+				// Apply the intent to the latest timeline after provider I/O/revision checks.
+				const now = Date.now();
+				const previous = this.value!.playback;
+				const position =
+					previous.playbackPosition +
+					(previous.isPlaying && previous.playbackStart
+						? (Math.max(0, now - Date.parse(previous.playbackStart)) / 1000) *
+							previous.playbackSpeed
+						: 0);
+				playback = {
+					...playback,
+					...patch,
+					playbackPosition: failed ? 0 : (patch.playbackPosition ?? position),
+					isPlaying: !failed && (patch.isPlaying ?? previous.isPlaying),
+					playbackStart:
+						!failed && (patch.isPlaying ?? previous.isPlaying)
+							? new Date(now).toISOString()
+							: null,
+				};
+				await this.commit(state, playback, undefined, authorize);
 				return true;
 			});
 			if (applied) {
@@ -617,17 +662,17 @@ export class RoomMusic {
 		}
 		throw new MusicRoomException("Music playback changed during source resolution; retry");
 	}
-	async advance(reason: "finished" | "skipped" = "finished") {
+	async advance(reason: "finished" | "skipped" = "finished", authorize?: Authorize) {
 		await this.advanceLock.protect(async () => {
 			this.isAdvancing = true;
 			try {
-				await this.advanceLocked(reason);
+				await this.advanceLocked(reason, authorize);
 			} finally {
 				this.isAdvancing = false;
 			}
 		});
 	}
-	private async advanceLocked(reason: "finished" | "skipped") {
+	private async advanceLocked(reason: "finished" | "skipped", authorize?: Authorize) {
 		await this.refresh();
 		await this.lock.protect(async () => {
 			const current = this.value!.state.current;
@@ -648,6 +693,8 @@ export class RoomMusic {
 					playbackPosition: 0,
 					playbackStart: null,
 				},
+				undefined,
+				authorize,
 			);
 		});
 		// Concurrent requests/starts can change the head while a provider is resolving.
@@ -669,18 +716,26 @@ export class RoomMusic {
 				}
 				const accounts = this.versionAccounts();
 				if ((await this.catalogue.roomVersions(accounts)) !== this.versions) {
-					await this.commit(await this.context(this.value!.state));
+					const context = await this.context(this.value!.state);
+					await this.commit(context.state, undefined, context, authorize);
 					return false;
 				}
 				let state = this.value!.state;
 				if (head) {
+					if (resolved) {
+						const snapshot = await this.catalogue.roomSnapshot([], [head.trackId]);
+						const source = snapshot.sources.find(
+							source => source.id === resolved.candidate.sourceId,
+						);
+						failed = !source || source.availability === "unavailable";
+					}
 					const playbackId = randomUUID();
 					state = reduce(state, { type: "load-next", playbackId, now: Date.now() }).state;
 					if (resolved || failed) {
 						state = reduce(state, {
 							type: "update-source",
 							entryId: head.entryId,
-							candidate: resolved?.candidate ?? { ...head, sourceUsable: false },
+							candidate: { ...(resolved?.candidate ?? head), sourceUsable: !failed },
 							now: Date.now(),
 						}).state;
 					}
@@ -707,13 +762,22 @@ export class RoomMusic {
 					currentSource: failed ? null : (resolved?.video ?? null),
 					playbackPosition: resolved?.video.startAt ?? 0,
 					playbackSpeed: 1,
-					playbackStart: new Date().toISOString(),
-					isPlaying: !!resolved && !failed && this.value!.playback.isPlaying,
+					playbackStart:
+						resolved && this.value!.playback.isPlaying
+							? new Date().toISOString()
+							: null,
+					isPlaying:
+						this.value!.playback.isPlaying &&
+						(!!resolved || (failed && state.queue.length > 0)),
 				};
-				await this.commit(state, playback);
+				await this.commit(state, playback, undefined, authorize);
 				return true;
 			});
 			if (applied) {
+				// Bounded recovery; subsequent Room updates can continue a long queue.
+				if (failed && this.value!.state.queue.length > 0 && attempt < 4) {
+					continue;
+				}
 				return;
 			}
 		}

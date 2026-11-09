@@ -36,7 +36,7 @@ import type {
 	KickRequest,
 	UpdateQueueItemRequest,
 } from "ott-common/models/messages.js";
-import { RoomRequestType } from "ott-common/models/messages.js";
+import { RoomRequestType, isRoomRequestType } from "ott-common/models/messages.js";
 import _ from "lodash";
 import InfoExtract from "./infoextractor.js";
 import usermanager from "./usermanager.js";
@@ -120,7 +120,7 @@ export class RoomUser {
 		if (info.user_id) {
 			this.user_id = info.user_id;
 			this.user = await usermanager.getUser({ id: info.user_id });
-		} else if (info.username) {
+		} else if (info.username !== undefined) {
 			this.unregisteredUsername = info.username;
 			this.user_id = undefined;
 			this.user = null;
@@ -312,6 +312,37 @@ export class Room implements RoomState {
 		if (this.queueMode === QueueMode.Music) {
 			throw new MusicRoomException("Use occurrence-based music commands in Music mode");
 		}
+	}
+	private requireMusicMode = (): void => {
+		if (this.queueMode !== QueueMode.Music) {
+			throw new MusicRoomException("Music mode changed during source resolution");
+		}
+	};
+	/** Capture the connection, then check its live session/role at the commit boundary. */
+	private musicPlaybackAuthorization(context: RoomRequestContext, permission: string) {
+		const user = context.clientId ? this.getUser(context.clientId) : undefined;
+		if (!user) {
+			throw new MusicRoomException("Join the room before controlling music playback");
+		}
+		const identity = musicIdentity(user),
+			token = user.token;
+		return async () => {
+			const session = await tokens.getSessionInfo(token);
+			this.requireMusicMode();
+			if (
+				this.getUser(user.id) !== user ||
+				user.token !== token ||
+				(context.auth && context.auth.token !== token) ||
+				musicIdentity(user) !== identity ||
+				musicIdentity({
+					token,
+					user_id: session.isLoggedIn ? session.user_id : undefined,
+				}) !== identity
+			) {
+				throw new MusicRoomException("Music playback membership or session changed");
+			}
+			this.grants.check(this.getRoleFromSession(session), permission);
+		};
 	}
 	public async musicRequest(
 		request: MusicRoomRequest,
@@ -717,7 +748,7 @@ export class Room implements RoomState {
 
 	async dequeueNext() {
 		if (this.queueMode === QueueMode.Music) {
-			await this.musicEngine.advance();
+			await this.musicEngine.advance("finished", this.requireMusicMode);
 			this.votesToSkip.clear();
 			this.markDirty("votesToSkip");
 			return;
@@ -1290,6 +1321,9 @@ export class Room implements RoomState {
 	}
 
 	public async processRequest(request: RoomRequest, context: RoomRequestContext): Promise<void> {
+		if (!isRoomRequestType(request?.type)) {
+			throw new OttException("Invalid room request type");
+		}
 		counterRoomRequests.labels({ type: RoomRequestType[request.type] }).inc();
 		const permissions = new Map([
 			[RoomRequestType.PlaybackRequest, "playback.play-pause"],
@@ -1367,11 +1401,7 @@ export class Room implements RoomState {
 
 	public async play(): Promise<void> {
 		if (this.queueMode === QueueMode.Music) {
-			await this.musicEngine.setPlayback({
-				isPlaying: true,
-				playbackStart: new Date().toISOString(),
-				playbackPosition: this.realPlaybackPosition,
-			});
+			await this.musicEngine.setPlayback({ isPlaying: true }, this.requireMusicMode);
 			return;
 		}
 		if (this.isPlaying) {
@@ -1385,11 +1415,7 @@ export class Room implements RoomState {
 
 	public async pause(): Promise<void> {
 		if (this.queueMode === QueueMode.Music) {
-			await this.musicEngine.setPlayback({
-				isPlaying: false,
-				playbackPosition: this.realPlaybackPosition,
-				playbackStart: null,
-			});
+			await this.musicEngine.setPlayback({ isPlaying: false }, this.requireMusicMode);
 			return;
 		}
 		if (!this.isPlaying) {
@@ -1406,7 +1432,12 @@ export class Room implements RoomState {
 	 * Play or pause the video, depending on the desired state. Handles PlaybackRequest.
 	 */
 	public async playback(request: PlaybackRequest, context: RoomRequestContext): Promise<void> {
-		if (request.state) {
+		if (this.queueMode === QueueMode.Music) {
+			await this.musicEngine.setPlayback(
+				{ isPlaying: request.state },
+				this.musicPlaybackAuthorization(context, "playback.play-pause"),
+			);
+		} else if (request.state) {
 			await this.play();
 		} else {
 			await this.pause();
@@ -1449,7 +1480,10 @@ export class Room implements RoomState {
 			const prevPosition = this.realPlaybackPosition;
 			counterMediaSkipped.labels({ service: this.currentSource.service }).inc();
 			if (this.queueMode === QueueMode.Music) {
-				await this.musicEngine.advance("skipped");
+				await this.musicEngine.advance(
+					"skipped",
+					this.musicPlaybackAuthorization(context, "playback.skip"),
+				);
 				this.votesToSkip.clear();
 				this.markDirty("votesToSkip");
 			} else {
@@ -1481,10 +1515,12 @@ export class Room implements RoomState {
 		}
 		const prev = this.realPlaybackPosition;
 		if (this.queueMode === QueueMode.Music) {
-			await this.musicEngine.setPlayback({
-				playbackPosition: request.value,
-				playbackStart: this.isPlaying ? new Date().toISOString() : null,
-			});
+			await this.musicEngine.setPlayback(
+				{
+					playbackPosition: request.value,
+				},
+				this.musicPlaybackAuthorization(context, "playback.seek"),
+			);
 		} else {
 			this.seekRaw(request.value);
 		}
@@ -1874,6 +1910,23 @@ export class Room implements RoomState {
 		request: ApplySettingsRequest,
 		context: RoomRequestContext,
 	): Promise<void> {
+		if (request.settings.queueMode === QueueMode.Music && this.queueMode !== QueueMode.Music) {
+			// Legacy cached ClientInfo is not an authority for account libraries or ownership.
+			for (const user of this.realusers) {
+				const session = await tokens.getSessionInfo(user.token);
+				await user.updateInfo({
+					id: user.id,
+					...(session.isLoggedIn
+						? { user_id: session.user_id }
+						: { username: session.username }),
+				});
+			}
+			if (context.auth) {
+				context = { ...context, role: await this.getRoleFromToken(context.auth.token) };
+			} else if (context.clientId) {
+				context = { ...context, role: this.getRole(this.getUser(context.clientId)) };
+			}
+		}
 		const propsToPerms: Record<keyof Omit<RoomSettings, "grants">, string> = {
 			title: "configure-room.set-title",
 			description: "configure-room.set-description",
@@ -2077,11 +2130,12 @@ export class Room implements RoomState {
 		context: RoomRequestContext,
 	): Promise<void> {
 		if (this.queueMode === QueueMode.Music) {
-			await this.musicEngine.setPlayback({
-				playbackPosition: this.realPlaybackPosition,
-				playbackSpeed: request.speed,
-				playbackStart: this.isPlaying ? new Date().toISOString() : null,
-			});
+			await this.musicEngine.setPlayback(
+				{
+					playbackSpeed: request.speed,
+				},
+				this.musicPlaybackAuthorization(context, "playback.speed"),
+			);
 			return;
 		}
 		this.flushPlaybackPosition();
