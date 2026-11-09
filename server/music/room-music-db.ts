@@ -30,24 +30,28 @@ async function cleanFailedSqliteCommit(sequelize: Sequelize, connection: Databas
 // Writers acquire IMMEDIATE across processes and retry the entire rolled-back
 // transaction, preserving the catalogue fix from 4507e5b5.
 const locks = new WeakMap<Sequelize, Mutex>();
-export function musicTransaction<T>(
+export async function musicTransaction<T>(
 	connection: Sequelize,
 	operation: (transaction: Transaction) => Promise<T>,
 	consistentRead = false,
+	queueTimeout?: number,
 ): Promise<T> {
 	let lock = locks.get(connection);
 	if (!lock) {
 		lock = new Mutex();
 		locks.set(connection, lock);
 	}
-	return lock.protect(async () => {
+	if (!(await lock.lock(queueTimeout))) {
+		throw new Error("Music transaction queue timeout");
+	}
+	try {
 		if (connection.getDialect() !== "sqlite") {
-			return consistentRead
+			return await (consistentRead
 				? connection.transaction(
 						{ isolationLevel: Transaction.ISOLATION_LEVELS.REPEATABLE_READ },
 						operation,
 					)
-				: connection.transaction(operation);
+				: connection.transaction(operation));
 		}
 		for (let attempt = 0; ; attempt++) {
 			let committing: Database | undefined;
@@ -76,5 +80,7 @@ export function musicTransaction<T>(
 				await delay(25 * 2 ** attempt);
 			}
 		}
-	});
+	} finally {
+		lock.unlock();
+	}
 }

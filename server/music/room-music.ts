@@ -253,12 +253,16 @@ export class RoomMusic {
 		playback = this.value!.playback,
 		context?: RefreshedContext,
 		authorize?: Authorize,
+		timeline?: (now: number) => DurableMusicRoom,
 	) {
-		const next = { state, playback };
+		let next = { state, playback };
 		const currentMoods = await this.loadCurrentMoods(state);
 		await authorize?.();
 		try {
-			await this.store.save(next, this.value!.state.revision);
+			await this.store.save(next, this.value!.state.revision, {
+				authorize,
+				finalize: timeline ? () => (next = timeline(Date.now())) : undefined,
+			});
 		} catch (error) {
 			this.invalid = true;
 			throw error;
@@ -660,8 +664,6 @@ export class RoomMusic {
 				if (this.value!.state.revision !== before.revision) {
 					return false;
 				}
-				let state = this.value!.state;
-				let playback = this.value!.playback;
 				if (current) {
 					const snapshot = await this.catalogue.roomSnapshot([], [current.entry.trackId]);
 					const source = snapshot.sources.find(
@@ -669,65 +671,67 @@ export class RoomMusic {
 							source.id === (resolved?.candidate.sourceId ?? current.entry.sourceId),
 					);
 					failed = failed || !source || source.availability === "unavailable";
-					state = reduce(state, {
-						type: "update-source",
-						entryId: current.entry.entryId,
-						candidate: {
-							...(resolved?.candidate ?? current.entry),
-							sourceUsable: !failed,
-						},
-						now: Date.now(),
-					}).state;
-					if (failed) {
+				}
+				// Rebuild from the committed timeline, never from an earlier speculative start.
+				// The store calls this again after acquiring SQL ownership and doing staged I/O.
+				const timeline = (now: number): DurableMusicRoom => {
+					let state = this.value!.state;
+					let playback = this.value!.playback;
+					if (current) {
 						state = reduce(state, {
-							type: "ended",
-							playbackId: current.playbackId,
-							reason: "error",
-							now: Date.now(),
+							type: "update-source",
+							entryId: current.entry.entryId,
+							candidate: {
+								...(resolved?.candidate ?? current.entry),
+								sourceUsable: !failed,
+							},
+							now,
 						}).state;
-						state = { ...state, current: undefined };
-						playback = {
-							...playback,
-							currentSource: null,
-							isPlaying: false,
-							playbackPosition: 0,
-							playbackStart: null,
-						};
-					} else {
-						if (!current.started) {
+						if (failed) {
 							state = reduce(state, {
-								type: "started",
+								type: "ended",
 								playbackId: current.playbackId,
-								now: Date.now(),
+								reason: "error",
+								now,
 							}).state;
-							state = reduce(state, { type: "replan", now: Date.now() }).state;
+							state = { ...state, current: undefined };
+							playback = { ...playback, currentSource: null };
+						} else {
+							if (!current.started) {
+								state = reduce(state, {
+									type: "started",
+									playbackId: current.playbackId,
+									now,
+								}).state;
+								state = reduce(state, { type: "replan", now }).state;
+							}
+							playback = { ...playback, currentSource: resolved!.video };
 						}
-						playback = { ...playback, currentSource: resolved!.video };
 					}
-				}
-				if (state === this.value!.state) {
-					state = { ...state, revision: state.revision + 1 };
-				}
-				// Apply the intent to the latest timeline after provider I/O/revision checks.
-				const now = Date.now();
-				const previous = this.value!.playback;
-				const position =
-					previous.playbackPosition +
-					(previous.isPlaying && previous.playbackStart
-						? (Math.max(0, now - Date.parse(previous.playbackStart)) / 1000) *
-							previous.playbackSpeed
-						: 0);
-				playback = {
-					...playback,
-					...patch,
-					playbackPosition: failed ? 0 : (patch.playbackPosition ?? position),
-					isPlaying: !failed && (patch.isPlaying ?? previous.isPlaying),
-					playbackStart:
-						!failed && (patch.isPlaying ?? previous.isPlaying)
-							? new Date(now).toISOString()
-							: null,
+					if (state === this.value!.state) {
+						state = { ...state, revision: state.revision + 1 };
+					}
+					const previous = this.value!.playback;
+					const position =
+						previous.playbackPosition +
+						(previous.isPlaying && previous.playbackStart
+							? (Math.max(0, now - Date.parse(previous.playbackStart)) / 1000) *
+								previous.playbackSpeed
+							: 0);
+					const isPlaying = !failed && (patch.isPlaying ?? previous.isPlaying);
+					return {
+						state,
+						playback: {
+							...playback,
+							...patch,
+							playbackPosition: failed ? 0 : (patch.playbackPosition ?? position),
+							isPlaying,
+							playbackStart: isPlaying ? new Date(now).toISOString() : null,
+						},
+					};
 				};
-				await this.commit(state, playback, undefined, authorize);
+				const draft = timeline(Date.now());
+				await this.commit(draft.state, draft.playback, undefined, authorize, timeline);
 				return true;
 			});
 			if (applied) {
@@ -740,39 +744,49 @@ export class RoomMusic {
 		throw new MusicRoomException("Music playback changed during source resolution; retry");
 	}
 	async advance(reason: "finished" | "skipped" = "finished", authorize?: Authorize) {
+		const playbackId = this.value?.state.current?.playbackId;
 		await this.advanceLock.protect(async () => {
 			this.isAdvancing = true;
 			try {
-				await this.advanceLocked(reason, authorize);
+				await this.advanceLocked(reason, authorize, playbackId);
 			} finally {
 				this.isAdvancing = false;
 			}
 		});
 	}
-	private async advanceLocked(reason: "finished" | "skipped", authorize?: Authorize) {
+	private async advanceLocked(
+		reason: "finished" | "skipped",
+		authorize?: Authorize,
+		playbackId?: string,
+	) {
 		await this.refresh();
 		await this.lock.protect(async () => {
 			const current = this.value!.state.current;
+			if (authorize && current?.playbackId !== playbackId) {
+				throw new MusicRoomException("Music occurrence changed during source resolution");
+			}
 			if (!current) {
 				return;
 			}
-			const ended = reduce(this.value!.state, {
-				type: "ended",
-				playbackId: current.playbackId,
-				reason,
-				now: Date.now(),
-			}).state;
-			await this.commit(
-				{ ...ended, current: undefined },
-				{
-					...this.value!.playback,
-					currentSource: null,
-					playbackPosition: 0,
-					playbackStart: null,
-				},
-				undefined,
-				authorize,
-			);
+			const timeline = (now: number): DurableMusicRoom => {
+				const ended = reduce(this.value!.state, {
+					type: "ended",
+					playbackId: current.playbackId,
+					reason,
+					now,
+				}).state;
+				return {
+					state: { ...ended, current: undefined },
+					playback: {
+						...this.value!.playback,
+						currentSource: null,
+						playbackPosition: 0,
+						playbackStart: null,
+					},
+				};
+			};
+			const draft = timeline(Date.now());
+			await this.commit(draft.state, draft.playback, undefined, authorize, timeline);
 		});
 		// Concurrent requests/starts can change the head while a provider is resolving.
 		for (let attempt = 0; attempt < 5; attempt++) {
@@ -797,57 +811,64 @@ export class RoomMusic {
 					await this.commit(context.state, undefined, context, authorize);
 					return false;
 				}
-				let state = this.value!.state;
-				if (head) {
-					if (resolved) {
-						const snapshot = await this.catalogue.roomSnapshot([], [head.trackId]);
-						const source = snapshot.sources.find(
-							source => source.id === resolved.candidate.sourceId,
-						);
-						failed = !source || source.availability === "unavailable";
-					}
-					const playbackId = randomUUID();
-					state = reduce(state, { type: "load-next", playbackId, now: Date.now() }).state;
-					if (resolved || failed) {
-						state = reduce(state, {
-							type: "update-source",
-							entryId: head.entryId,
-							candidate: { ...(resolved?.candidate ?? head), sourceUsable: !failed },
-							now: Date.now(),
-						}).state;
-					}
-					if (failed) {
-						state = reduce(state, {
-							type: "ended",
-							playbackId,
-							reason: "error",
-							now: Date.now(),
-						}).state;
-					} else if (this.value!.playback.isPlaying) {
-						state = reduce(state, {
-							type: "started",
-							playbackId,
-							now: Date.now(),
-						}).state;
-						state = reduce(state, { type: "replan", now: Date.now() }).state;
-					}
-				} else {
-					state = { ...state, current: undefined };
+				if (head && resolved) {
+					const snapshot = await this.catalogue.roomSnapshot([], [head.trackId]);
+					const source = snapshot.sources.find(
+						source => source.id === resolved.candidate.sourceId,
+					);
+					failed = !source || source.availability === "unavailable";
 				}
-				const playback = {
-					...this.value!.playback,
-					currentSource: failed ? null : (resolved?.video ?? null),
-					playbackPosition: resolved?.video.startAt ?? 0,
-					playbackSpeed: 1,
-					playbackStart:
-						resolved && this.value!.playback.isPlaying
-							? new Date().toISOString()
-							: null,
-					isPlaying:
-						this.value!.playback.isPlaying &&
-						(!!resolved || (failed && state.queue.length > 0)),
+				const playbackId = randomUUID();
+				const timeline = (now: number): DurableMusicRoom => {
+					let state = this.value!.state;
+					if (head) {
+						state = reduce(state, { type: "load-next", playbackId, now }).state;
+						if (resolved || failed) {
+							state = reduce(state, {
+								type: "update-source",
+								entryId: head.entryId,
+								candidate: {
+									...(resolved?.candidate ?? head),
+									sourceUsable: !failed,
+								},
+								now,
+							}).state;
+						}
+						if (failed) {
+							state = reduce(state, {
+								type: "ended",
+								playbackId,
+								reason: "error",
+								now,
+							}).state;
+						} else if (this.value!.playback.isPlaying) {
+							state = reduce(state, {
+								type: "started",
+								playbackId,
+								now,
+							}).state;
+							state = reduce(state, { type: "replan", now }).state;
+						}
+					} else {
+						state = { ...state, current: undefined };
+					}
+					const playback = {
+						...this.value!.playback,
+						currentSource: failed ? null : (resolved?.video ?? null),
+						playbackPosition: !failed ? (resolved?.video.startAt ?? 0) : 0,
+						playbackSpeed: 1,
+						playbackStart:
+							!failed && resolved && this.value!.playback.isPlaying
+								? new Date(now).toISOString()
+								: null,
+						isPlaying:
+							this.value!.playback.isPlaying &&
+							((!!resolved && !failed) || (failed && state.queue.length > 0)),
+					};
+					return { state, playback };
 				};
-				await this.commit(state, playback, undefined, authorize);
+				const draft = timeline(Date.now());
+				await this.commit(draft.state, draft.playback, undefined, authorize, timeline);
 				return true;
 			});
 			if (applied) {

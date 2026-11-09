@@ -295,3 +295,50 @@ callback after redisSnapshot. Room supplies getUserInfo display names and musicI
 guest-conflict/confirmation regression cover this path.
 No changes to commit, setPlayback, advance, context, authorization, SQLite transactions
 or scheduler semantics are included here. Independent integrated review is required.
+
+## Persistence authorization and timeline boundary
+
+`MusicRoomStore.save(value, expectedRevision, hooks?)` accepts internal commit hooks.
+Implementations must await `hooks.authorize` on every transaction attempt after
+acquisition, and again after staging the snapshot CAS, normalized events and scores.
+The second successful check is the intent's linearization point. All preceding SQL
+writes remain reversible; rejection rolls back the entire transaction and RoomMusic
+publishes nothing and retains its previous committed value. A revocation observed
+before that point cancels the intent; a later revocation does not retroactively undo
+an already authorized intent. No provider or catalogue I/O runs under these hooks.
+
+For playback, the store then calls synchronous, retryable `hooks.finalize`. RoomMusic
+rebuilds the timeline and scheduler timestamps from its committed state at that
+instant, after provider resolution, mood reads, authorization, writer acquisition
+and staged SQL waits. The finalized snapshot and any changed event/score rows are
+validated and written within the same transaction. A finalizer cannot change room,
+revision, or normalized event/score keys. The same final value becomes
+Room's timeline only after SQL COMMIT succeeds. Pause, seek, speed, start and end
+use this boundary; repeated starts still debit the same occurrence once. The final
+timestamp necessarily precedes the short final SQL writes and COMMIT acknowledgement.
+COMMIT/acknowledgement latency is not a separate playback-clock correction.
+
+Room saves wait at most ten seconds to acquire the shared transaction queue; a
+timed-out waiter is removed and never runs later. SQLite retains IMMEDIATE writes,
+failed-COMMIT cleanup and four whole-transaction attempts. PostgreSQL saves set
+transaction-local five-second lock and ten-second statement timeouts, so a row/CAS
+wait cannot bypass a later authorization check. Token-session lookup latency still
+depends on the authentication adapter. These are per-wait bounds, not a single
+end-to-end deadline across all rows, retries and session lookups.
+
+Music votes authenticate before insertion or toggling. Their private records bind
+the connection object, token-derived identity, role, inherited grant mask and current
+playback ID. Quorum validation fetches sessions, then checks current membership and
+grants after asynchronous validation; it prunes stale votes before counting them.
+An invalid session cannot reduce the existing eligible-member threshold. A delayed
+vote never transfers to another occurrence. Guests with valid sessions and inherited
+skip grants can vote. Legacy modes retain their existing vote behavior. Entering or
+updating Music from a logged-out session clears cached account/user objects even if
+that session omits its guest username; the existing guest display name is the fallback.
+
+The follow-up `room-music-persistence.spec.ts` covers real SQLite writer contention,
+revocation/cancellation/logout/departure, SQL rollback and retries, bounded waiters,
+independent timeline delays, late source exhaustion, guest identity and stale votes.
+The PostgreSQL CAS-wait check is an adapter simulation, not a live PostgreSQL test.
+Constructor, public DTO, request-page and projection wiring are separate integration
+work and are unchanged by this persistence callback contract.

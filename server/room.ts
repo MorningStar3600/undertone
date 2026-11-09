@@ -1,3 +1,4 @@
+import { Mutex } from "@divine/synchronization";
 import type { MusicCatalogue } from "./music/catalogue.js";
 import type { MusicRoomStore } from "./music/room-music-storage.js";
 import { RoomMusic, musicIdentity } from "./music/room-music.js";
@@ -128,6 +129,15 @@ export class RoomUser {
 		if (info.status) {
 			this.playerStatus = info.status;
 		}
+	}
+	public async updateSession(session: SessionInfo, status?: PlayerStatus): Promise<void> {
+		await this.updateInfo({
+			id: this.id,
+			...(session.isLoggedIn
+				? { user_id: session.user_id }
+				: { username: session.username ?? this.unregisteredUsername }),
+			status,
+		});
 	}
 }
 
@@ -324,7 +334,7 @@ export class Room implements RoomState {
 		}
 	};
 	/** Capture the connection, then check its live session/role at the commit boundary. */
-	private musicPlaybackAuthorization(context: RoomRequestContext, permission: string) {
+	private musicPlaybackAuthorization(context: RoomRequestContext, permission?: string) {
 		const user = context.clientId ? this.getUser(context.clientId) : undefined;
 		if (!user) {
 			throw new MusicRoomException("Join the room before controlling music playback");
@@ -346,7 +356,12 @@ export class Room implements RoomState {
 			) {
 				throw new MusicRoomException("Music playback membership or session changed");
 			}
-			this.grants.check(this.getRoleFromSession(session), permission);
+			if (permission) {
+				this.grants.check(
+					session.isLoggedIn ? this.getRoleFromSession(session) : Role.UnregisteredUser,
+					permission,
+				);
+			}
 		};
 	}
 	public async musicRequest(
@@ -417,7 +432,9 @@ export class Room implements RoomState {
 		) {
 			this.grants.check(context.role, "manage-queue.order");
 		}
-		const authorize = () => {
+		const authenticate = this.musicPlaybackAuthorization(context);
+		const authorize = async () => {
+			await authenticate();
 			if (this.queueMode !== QueueMode.Music || this.getUser(user.id) !== user) {
 				throw new MusicRoomException("Music room membership changed");
 			}
@@ -478,6 +495,18 @@ export class Room implements RoomState {
 	votes: Map<string, Set<ClientId>> = new Map();
 	_videoSegments: Segment[] = [];
 	votesToSkip: Set<string> = new Set();
+	private musicSkipLock = new Mutex();
+	private musicSkipVotes = new Map<
+		ClientId,
+		{
+			user: RoomUser;
+			identity: string;
+			token: AuthToken;
+			role: Role;
+			mask: GrantMask;
+			playbackId: string;
+		}
+	>();
 
 	_dirty: Set<keyof RoomStateSyncable> = new Set();
 	log: winston.Logger;
@@ -1450,11 +1479,142 @@ export class Room implements RoomState {
 		await this.publishRoomEvent(request, context);
 	}
 
+	/** Validate sessions in parallel, then inspect membership/roles synchronously after all I/O. */
+	private async musicVoteQuorum(
+		playbackId: string,
+		authorize?: () => Promise<void>,
+	): Promise<boolean> {
+		const people = this.realusers.map(user => ({ user, token: user.token }));
+		const sessions = await Promise.all(
+			people.map(async ({ token }) => {
+				try {
+					return await tokens.getSessionInfo(token);
+				} catch {
+					return undefined;
+				}
+			}),
+		);
+		await authorize?.();
+		this.requireMusicMode();
+		// Invalid sessions cannot lower the threshold for the remaining voters.
+		const eligible = countEligibleVoters(
+			this.realusers.map(user => this.getUserInfo(user.id)),
+			this.grants,
+		);
+		const valid = new Set<ClientId>();
+		for (const [index, { user, token }] of people.entries()) {
+			const session = sessions[index];
+			if (!session || this.getUser(user.id) !== user || user.token !== token) {
+				continue;
+			}
+			const identity = musicIdentity({
+				token,
+				user_id: session.isLoggedIn ? session.user_id : undefined,
+			});
+			const role = session.isLoggedIn
+				? this.getRoleFromSession(session)
+				: Role.UnregisteredUser;
+			if (identity !== musicIdentity(user) || !this.grants.granted(role, "playback.skip")) {
+				continue;
+			}
+			const vote = this.musicSkipVotes.get(user.id);
+			if (
+				vote &&
+				this.votesToSkip.has(user.id) &&
+				vote.user === user &&
+				vote.token === token &&
+				vote.identity === identity &&
+				vote.role === role &&
+				vote.mask === this.grants.getMask(role) &&
+				vote.playbackId === playbackId
+			) {
+				valid.add(user.id);
+			}
+		}
+		for (const id of this.votesToSkip) {
+			if (!valid.has(id)) {
+				this.votesToSkip.delete(id);
+				this.musicSkipVotes.delete(id);
+				this.markDirty("votesToSkip");
+			}
+		}
+		return eligible > 0 && valid.size >= voteSkipThreshold(eligible);
+	}
+	private async skipMusic(request: SkipRequest, context: RoomRequestContext): Promise<void> {
+		const playbackId = this.music?.current?.playbackId;
+		const authorize = this.musicPlaybackAuthorization(context, "playback.skip");
+		await this.musicSkipLock.protect(async () => {
+			try {
+				await authorize();
+			} catch (error) {
+				if (context.clientId && this.votesToSkip.delete(context.clientId)) {
+					this.musicSkipVotes.delete(context.clientId);
+					this.markDirty("votesToSkip");
+				}
+				throw error;
+			}
+			if (
+				!this.currentSource ||
+				!playbackId ||
+				this.music?.current?.playbackId !== playbackId
+			) {
+				throw new MusicRoomException("Music occurrence changed during vote validation");
+			}
+			const user = this.getUser(context.clientId!)!;
+			if (this.enableVoteSkip) {
+				await this.musicVoteQuorum(playbackId);
+				await authorize();
+				if (this.music?.current?.playbackId !== playbackId) {
+					throw new MusicRoomException("Music occurrence changed during vote validation");
+				}
+				if (this.votesToSkip.delete(user.id)) {
+					this.musicSkipVotes.delete(user.id);
+				} else {
+					const role = this.getRole(user);
+					this.musicSkipVotes.set(user.id, {
+						user,
+						identity: musicIdentity(user),
+						token: user.token,
+						role,
+						mask: this.grants.getMask(role),
+						playbackId,
+					});
+					this.votesToSkip.add(user.id);
+				}
+				this.markDirty("votesToSkip");
+				if (!(await this.musicVoteQuorum(playbackId))) {
+					return;
+				}
+			}
+			const voting = this.enableVoteSkip;
+			const guard = async () => {
+				await authorize();
+				if (
+					voting &&
+					(!this.enableVoteSkip || !(await this.musicVoteQuorum(playbackId, authorize)))
+				) {
+					throw new MusicRoomException("Music skip quorum changed");
+				}
+			};
+			const current = this.currentSource,
+				prevPosition = this.realPlaybackPosition;
+			await this.musicEngine.advance("skipped", guard);
+			this.votesToSkip.clear();
+			this.musicSkipVotes.clear();
+			this.markDirty("votesToSkip");
+			counterMediaSkipped.labels({ service: current.service }).inc();
+			await this.publishRoomEvent(request, context, { video: current, prevPosition });
+			this.videoSegments = [];
+		});
+	}
 	public async skip(request: SkipRequest, context: RoomRequestContext): Promise<void> {
 		if (!this.currentSource) {
 			return;
 		}
-
+		if (this.queueMode === QueueMode.Music) {
+			await this.skipMusic(request, context);
+			return;
+		}
 		let shouldSkip = false;
 		if (this.enableVoteSkip) {
 			if (context.clientId) {
@@ -1484,16 +1644,7 @@ export class Room implements RoomState {
 			const current = this.currentSource;
 			const prevPosition = this.realPlaybackPosition;
 			counterMediaSkipped.labels({ service: this.currentSource.service }).inc();
-			if (this.queueMode === QueueMode.Music) {
-				await this.musicEngine.advance(
-					"skipped",
-					this.musicPlaybackAuthorization(context, "playback.skip"),
-				);
-				this.votesToSkip.clear();
-				this.markDirty("votesToSkip");
-			} else {
-				await this.dequeueNext();
-			}
+			await this.dequeueNext();
 			await this.publishRoomEvent(request, context, { video: current, prevPosition });
 			this.videoSegments = [];
 		}
@@ -1654,13 +1805,7 @@ export class Room implements RoomState {
 				throw new MusicRoomException("Connection identity mismatch");
 			}
 			const session = await tokens.getSessionInfo(context.auth.token);
-			await user.updateInfo({
-				id: request.info.id,
-				...(session.isLoggedIn
-					? { user_id: session.user_id }
-					: { username: session.username }),
-				status: request.info.status,
-			});
+			await user.updateSession(session, request.info.status);
 		} else {
 			await user.updateInfo(request.info);
 		}
@@ -1688,6 +1833,7 @@ export class Room implements RoomState {
 
 		if (this.enableVoteSkip) {
 			this.votesToSkip.delete(context.clientId);
+			this.musicSkipVotes.delete(context.clientId);
 			this.markDirty("votesToSkip");
 		}
 
@@ -1720,13 +1866,10 @@ export class Room implements RoomState {
 					const previousIdentity = musicIdentity(person),
 						previousName = person.username;
 					const session = await tokens.getSessionInfo(person.token);
-					await person.updateInfo({
-						id: person.id,
-						status: request.info.status,
-						...(session.isLoggedIn
-							? { user_id: session.user_id }
-							: { username: session.username }),
-					});
+					await person.updateSession(session, request.info.status);
+					this.musicSkipVotes.delete(person.id);
+					this.votesToSkip.delete(person.id);
+					this.markDirty("votesToSkip");
 					if (previousIdentity !== musicIdentity(person)) {
 						await this.musicEngine.refresh(true);
 					} else if (previousName !== person.username) {
@@ -1919,12 +2062,7 @@ export class Room implements RoomState {
 			// Legacy cached ClientInfo is not an authority for account libraries or ownership.
 			for (const user of this.realusers) {
 				const session = await tokens.getSessionInfo(user.token);
-				await user.updateInfo({
-					id: user.id,
-					...(session.isLoggedIn
-						? { user_id: session.user_id }
-						: { username: session.username }),
-				});
+				await user.updateSession(session);
 			}
 			if (context.auth) {
 				context = { ...context, role: await this.getRoleFromToken(context.auth.token) };
