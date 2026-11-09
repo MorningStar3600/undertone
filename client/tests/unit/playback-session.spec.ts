@@ -1,6 +1,6 @@
 /* eslint vitest/no-conditional-in-test: "off" */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OttRoomConnectionMock } from "@/plugins/connection";
+import { OttRoomConnectionMock, type LegacyPlaybackSync } from "@/plugins/connection";
 import { createPlaybackSession } from "@/playback/playback-session";
 import { createPlayerSurfaces, type CapturedPlayer } from "@/playback/player-surface";
 import { useRoomApi } from "@/util/roomapi";
@@ -37,21 +37,26 @@ const flush = async () => {
 		await Promise.resolve();
 	}
 };
-function setup(early = false) {
+function setup(early = false, earlySync?: LegacyPlaybackSync) {
 	vi.useFakeTimers();
 	let time = 0;
 	const connection = new OttRoomConnectionMock();
+	if (earlySync) {
+		connection.mockReceive(earlySync);
+	}
 	if (early) {
 		connection.mockReceive(capability);
 	}
 	const surfaces = createPlayerSurfaces();
 	const onState = vi.fn();
+	const onLegacyState = vi.fn();
 	const allowed = vi.fn(() => true);
 	const session = createPlaybackSession({
 		connection,
 		now: () => time,
 		createAdapter: surfaces.createAdapter,
 		onState,
+		onLegacyState,
 		allowed,
 	});
 	cleanups.push(session.dispose);
@@ -121,6 +126,7 @@ function setup(early = false) {
 		connection,
 		surfaces,
 		onState,
+		onLegacyState,
 		session,
 		api,
 		allowed,
@@ -140,8 +146,10 @@ afterEach(() => {
 });
 
 describe("client playback subscription and captured provider integration", () => {
-	it("keeps legacy requests on servers without capability", () => {
-		const { api, connection } = setup();
+	it("keeps legacy requests on servers without capability after authenticated negotiation", async () => {
+		const { api, connection, tick } = setup();
+		connection.mockReceive({ action: "sync" });
+		await tick(1_000);
 		api.play();
 		api.seek(3);
 		api.skip();
@@ -620,5 +628,284 @@ describe("client playback subscription and captured provider integration", () =>
 		s.event({ ...snapshot.events[0], type: "seek", positionSeconds: 99 });
 		s.snapshot(snapshot);
 		expect(s.session.controller.getStatus().code).toBe("recovering");
+	});
+});
+
+const legacy: LegacyPlaybackSync = {
+	action: "sync",
+	currentSource: { service: "youtube", id: "legacy-new", length: 180 },
+	isPlaying: true,
+	playbackPosition: 3,
+	playbackSpeed: 1,
+};
+function lastCommand(s: ReturnType<typeof setup>) {
+	const message = s.connection.sent.findLast(m => m.action === "playback-command");
+	if (message?.action !== "playback-command") {
+		throw new Error("Missing command");
+	}
+	return message.command;
+}
+
+describe("generation-scoped capability negotiation", () => {
+	it("buffers a full reconnect sync and merges partial playback fields before legacy projection", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		s.connection.mockLifecycle();
+		s.connection.mockReset();
+		s.connection.mockReceive(legacy);
+		s.connection.mockReceive({ action: "sync", isPlaying: false, playbackPosition: 14 });
+		await s.tick(999);
+		s.api.play();
+		expect(s.connection.sent).toEqual([]);
+		expect(s.onLegacyState).not.toHaveBeenCalled();
+		expect(s.session.established).toBe(false);
+		expect(s.onState).toHaveBeenLastCalledWith(null, null, true);
+		await s.tick(1);
+		expect(s.onLegacyState).toHaveBeenCalledOnce();
+		expect(s.onLegacyState).toHaveBeenCalledWith({
+			...legacy,
+			isPlaying: false,
+			playbackPosition: 14,
+		});
+		expect(s.onState).toHaveBeenLastCalledWith(null, null, false);
+		expect(s.session.ownsPlayback).toBe(false);
+		s.api.play();
+		s.api.seek(8);
+		s.api.skip();
+		expect(s.connection.sent.map(m => m.action)).toEqual(["req", "req", "req"]);
+	});
+	it("uses cached authenticated sync when Room mounts after the legacy server replied", async () => {
+		const s = setup(false, legacy);
+		await s.tick(1_000);
+		expect(s.onLegacyState).toHaveBeenCalledWith(legacy);
+		expect(s.session.ownsPlayback).toBe(false);
+	});
+	it("never falls back merely because disconnected, reauthenticated, or silent", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		s.connection.mockLifecycle();
+		s.connection.mockReset();
+		await s.tick(30_000);
+		s.api.skip();
+		expect(s.onLegacyState).not.toHaveBeenCalled();
+		expect(s.session.ownsPlayback).toBe(true);
+		expect(s.connection.sent).toEqual([]);
+	});
+	it("valid capability before the deadline cancels fallback and holds for a valid requested snapshot", async () => {
+		const s = setup(false, legacy);
+		await s.tick(999);
+		s.connection.mockReceive(capability);
+		await s.tick(20_000);
+		expect(s.onLegacyState).not.toHaveBeenCalled();
+		expect(s.session.established).toBe(false);
+		expect(s.session.ownsPlayback).toBe(true);
+		s.calibrate();
+		s.snapshot();
+		expect(s.session.established).toBe(true);
+	});
+	it("late capability detaches legacy authority and requires a new snapshot and clock", async () => {
+		const s = setup(false, legacy);
+		await s.tick(1_000);
+		expect(s.session.ownsPlayback).toBe(false);
+		s.connection.mockReceive(capability);
+		expect(s.onState).toHaveBeenLastCalledWith(null, null, true);
+		s.connection.mockReset();
+		s.api.skip();
+		expect(s.connection.sent).toEqual([]);
+		// Re-advertising capability does not manufacture a second subscription.
+		s.connection.mockReceive(capability);
+		expect(s.connection.sent).toEqual([]);
+		await s.tick(5_000);
+		s.snapshot();
+		expect(s.surfaces.surface.value).toBeNull();
+		s.calibrate();
+		await s.tick();
+		expect(s.surfaces.surface.value?.source.value).toEqual(item);
+	});
+	it("malformed capability does not prevent bounded legacy negotiation", async () => {
+		const s = setup(false, legacy);
+		s.connection.mockReceive({ ...capability, extra: true } as unknown as typeof capability);
+		expect(s.connection.playbackCapability).toBe(false);
+		await s.tick(1_000);
+		expect(s.session.ownsPlayback).toBe(false);
+		expect(s.onLegacyState).toHaveBeenCalledWith(legacy);
+	});
+	it("does not downgrade a recovering modern generation to stale legacy sync", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		s.connection.mockReceive(legacy);
+		s.event({
+			epoch: "epoch",
+			sequence: 3,
+			occurrenceId: 1,
+			effectiveAtMs: 1_000,
+			type: "play",
+		});
+		await s.tick(20_000);
+		expect(s.session.ownsPlayback).toBe(true);
+		expect(s.onLegacyState).not.toHaveBeenCalled();
+		expect(s.surfaces.surface.value).toBeNull();
+	});
+	it("cancels a pending fallback on repeated auth and never merges the prior generation", async () => {
+		const s = setup(false, legacy);
+		await s.tick(500);
+		s.connection.mockLifecycle();
+		await s.tick(1_000);
+		expect(s.onLegacyState).not.toHaveBeenCalled();
+		s.connection.mockReceive({ action: "sync", currentSource: null });
+		await s.tick(500);
+		s.connection.mockLifecycle();
+		s.connection.mockReceive({ action: "sync", playbackPosition: 2 });
+		await s.tick(999);
+		expect(s.onLegacyState).not.toHaveBeenCalled();
+		await s.tick(1);
+		expect(s.onLegacyState).toHaveBeenCalledOnce();
+		expect(s.onLegacyState).toHaveBeenCalledWith({
+			action: "sync",
+			playbackPosition: 2,
+		});
+	});
+	it("cancels fallback and every listener on disposal", async () => {
+		const s = setup(false, legacy);
+		s.session.dispose();
+		expect(vi.getTimerCount()).toBe(0);
+		s.connection.mockReceive(legacy);
+		s.connection.mockReceive(capability);
+		await s.tick(2_000);
+		expect(s.onLegacyState).not.toHaveBeenCalled();
+		expect(s.connection.sent).toEqual([]);
+	});
+});
+
+describe("pending-only next intentions", () => {
+	it("never lets a prior occurrence's result release a new pending next", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		s.api.skip();
+		const first = lastCommand(s);
+		s.event(
+			{
+				type: "load",
+				epoch: "epoch",
+				sequence: 2,
+				occurrenceId: 2,
+				effectiveAtMs: 1_000,
+				media,
+				positionSeconds: 0,
+				isPlaying: false,
+				rate: 1,
+			},
+			attachment(2, 2),
+		);
+		s.api.skip();
+		const second = lastCommand(s);
+		expect(second.occurrenceId).toBe(2);
+		s.connection.mockReceive({
+			action: "playback-result",
+			result: {
+				requestId: first.requestId,
+				epoch: "epoch",
+				sequence: 2,
+				status: "rejected",
+				code: "stale-occurrence",
+			},
+		});
+		s.api.skip();
+		expect(lastCommand(s)).toEqual(second);
+		expect(s.connection.sent.filter(m => m.action === "playback-command")).toHaveLength(2);
+		expect(s.session.controller.getStatus().code).not.toBe("recovering");
+	});
+	it.each(["applied", "rejected"] as const)(
+		"releases a correlated %s next so deliberate actions get fresh IDs",
+		async status => {
+			const s = setup(true);
+			s.calibrate();
+			s.snapshot();
+			s.api.skip();
+			const first = lastCommand(s);
+			s.api.skip();
+			expect(s.connection.sent.filter(m => m.action === "playback-command")).toHaveLength(1);
+			s.connection.mockReceive({
+				action: "playback-result",
+				result: { requestId: first.requestId, epoch: "epoch", sequence: 1, status },
+			});
+			s.api.skip();
+			const second = lastCommand(s);
+			expect(second.requestId).not.toBe(first.requestId);
+			// A late duplicate result must not release the newer pending action.
+			s.connection.mockReceive({
+				action: "playback-result",
+				result: { requestId: first.requestId, epoch: "epoch", sequence: 1, status },
+			});
+			s.api.skip();
+			expect(s.connection.sent.filter(m => m.action === "playback-command")).toHaveLength(2);
+		},
+	);
+	it("expires pending next, recovers, and permits a deliberate retry without automatic command replay", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		s.api.skip();
+		const first = lastCommand(s);
+		await s.tick(16_000);
+		expect(s.connection.sent.filter(m => m.action === "playback-command")).toHaveLength(1);
+		s.calibrate();
+		s.snapshot();
+		await s.tick();
+		s.bind();
+		await flush();
+		s.api.skip();
+		expect(lastCommand(s).requestId).not.toBe(first.requestId);
+		s.connection.mockReceive({
+			action: "playback-result",
+			result: { requestId: first.requestId, epoch: "epoch", sequence: 1, status: "applied" },
+		});
+		s.api.skip();
+		expect(s.connection.sent.filter(m => m.action === "playback-command")).toHaveLength(2);
+	});
+	it("clears pending next during recovery and scopes replacement actions by generation and occurrence", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		s.api.skip();
+		const first = lastCommand(s);
+		s.event({
+			epoch: "epoch",
+			sequence: 3,
+			occurrenceId: 1,
+			effectiveAtMs: 1_000,
+			type: "play",
+		});
+		await s.tick(500);
+		s.snapshot();
+		await s.tick();
+		s.bind();
+		await flush();
+		s.api.skip();
+		expect(lastCommand(s).requestId).not.toBe(first.requestId);
+		s.connection.mockLifecycle();
+		s.connection.mockReceive(capability);
+		s.calibrate();
+		s.snapshot(timeline(2, 2), attachment(2, 2));
+		s.api.skip();
+		const latest = lastCommand(s);
+		expect(latest.occurrenceId).toBe(2);
+		s.connection.mockReceive({
+			action: "playback-result",
+			result: {
+				requestId: first.requestId,
+				epoch: "old",
+				sequence: 1,
+				status: "rejected",
+				code: "stale-epoch",
+			},
+		});
+		s.api.skip();
+		expect(lastCommand(s)).toEqual(latest);
+		expect(s.session.controller.getStatus().code).not.toBe("recovering");
 	});
 });

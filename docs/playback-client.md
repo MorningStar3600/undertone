@@ -10,7 +10,8 @@ Common/server code and the pure controller/clock are unchanged by this client in
 `plugins/connection.ts` caches a valid capability only within the authenticated socket lifetime.
 Open/close/message/error callbacks capture their socket and generation. Socket replacement,
 disconnect, close and every outgoing auth (including an identical token) clear capability and notify
-owned `onLifecycle` listeners. Registration returns an unsubscribe; at most 64 listeners are allowed,
+owned `onLifecycle` listeners. It also caches only the current generation's merged legacy playback
+sync fields, so authentication evidence received before Room mounts is retained. Registration returns an unsubscribe; at most 64 listeners are allowed,
 and listener exceptions cannot interrupt other listeners. The mock supplies `mockLifecycle()`.
 
 `createPlaybackSession` installs every handler before inspecting cached capability or subscribing.
@@ -30,9 +31,22 @@ The current server compacts effective events immediately and sends one active at
 events are parsed by the core; rendering starts at the snapshot horizon. Snapshots requiring
 unavailable future source mappings fail closed and resubscribe. This integration
 does not invent mappings for a future scheduling protocol. Queue, users, Music admission, mix/moods,
-library and other room fields continue through existing sync. After a valid requested snapshot,
-`room.playbackEstablished` filters legacy source/position/rate/play fields, including across reconnect
-until the fresh capability/snapshot arrives. A server with no capability retains legacy playback.
+library and other room fields continue through existing sync. Each generation begins negotiating:
+`ownsPlayback` and `room.playbackEstablished` hold legacy rendering/commands, clear the old source,
+and filter legacy source/position/rate/play fields. `session.established` separately indicates that
+this generation has installed a valid requested timeline snapshot; it resets on every lifecycle change.
+
+A valid room sync is authentication evidence (the server sends sync only after authentication).
+Its first arrival starts a one-second capability deadline, while the session buffers and merges only
+that generation's legacy playback fields. Disconnect, open, outgoing auth, or silence alone cannot
+start fallback. Without a valid capability by the deadline, ownership returns to legacy and Room
+projects the merged fields through `room/sync`, restoring both player and existing request controls.
+This applies on first connection and reconnect. There is no temporary legacy autoplay before the
+deadline. Invalid capability envelopes cannot extend it. A valid capability, including one cached
+before Room mounts or arriving after legacy fallback, clears the legacy buffer, holds rendering and
+commands, and requests a fresh nonce-correlated snapshot and clock. Once modern is selected, snapshot
+timeouts or recovery never downgrade to legacy within that generation. Auth, room/connection changes
+and disposal cancel pending fallback and clear all generation-owned state.
 
 ## Clock and commands
 
@@ -48,7 +62,11 @@ keyboard and Media Session. Each intention receives a unique request ID and the 
 epoch/occurrence. Permission checks remain local and server-authoritative. Clear, recovery and an
 unready clock cannot target an old occurrence. Pending results are bounded to 64, expire after fifteen
 seconds, are discarded on occurrence/generation change and recover on correlated stale results.
-Repeated next votes are suppressed for the same occurrence. Commands are never automatically retried.
+Concurrent next clicks are suppressed only while a next command is pending for the same epoch and
+occurrence. A correlated applied or rejected result releases that command; a later intentional
+vote/unvote or retry receives a fresh request ID. Late results cannot release a newer pending next.
+Timeouts and recovery discard pending commands and hold further actions until authority recovers.
+Commands are never automatically retried, and transport retries must retain the original request ID.
 New admission/playNow operations still use their existing room/Music interfaces.
 
 ## Captured provider surfaces
@@ -84,6 +102,8 @@ disposed on Room teardown. ServerMessageHandler removes only its own handlers.
 
 `client/tests/playback.config.mjs` bypasses application configuration and env loading. Focused tests
 exercise the actual session/Room/OmniPlayer/YouTube component wiring with mock transport, clock and SDK,
+including fake-timer negotiation, legacy reconnect projection, delayed capability, repeated auth,
+old socket callbacks, intentional vote/unvote and rejected/timed-out next retries,
 plus captured mock providers for interleavings and cancellation. Existing Room, YouTube, bottom
 controls, rate, layout and local-media regressions are included. Run from the repository root:
 

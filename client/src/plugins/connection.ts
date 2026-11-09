@@ -4,12 +4,15 @@ import type {
 	ClientMessageAuthenticate,
 	ServerMessage,
 	ServerMessageActionType,
+	ServerMessageSync,
 } from "ott-common/models/messages";
 import type { AuthToken, OttWebsocketError } from "ott-common/models/types";
 
 export interface OttRoomConnection {
 	/** Cached only for the current authenticated socket, including before Room mounts. */
 	playbackCapability?: boolean;
+	/** Authenticated sync evidence and playback fields from only the current generation. */
+	playbackSync?: LegacyPlaybackSync;
 	onLifecycle?(handler: () => void): () => void;
 	active: Ref<boolean>;
 	connected: Ref<boolean>;
@@ -25,6 +28,28 @@ export interface OttRoomConnection {
 		handler: (msg: ServerMessage) => void,
 	): void;
 	clearAllMessageHandlers(): void;
+}
+
+export type LegacyPlaybackSync = Pick<
+	ServerMessageSync,
+	"action" | "currentSource" | "isPlaying" | "playbackPosition" | "playbackSpeed"
+>;
+
+function cachePlaybackSync(previous: LegacyPlaybackSync | undefined, message: ServerMessageSync) {
+	const sync: LegacyPlaybackSync = { ...previous, action: "sync" };
+	if ("currentSource" in message) {
+		sync.currentSource = message.currentSource;
+	}
+	if ("isPlaying" in message) {
+		sync.isPlaying = message.isPlaying;
+	}
+	if ("playbackPosition" in message) {
+		sync.playbackPosition = message.playbackPosition;
+	}
+	if ("playbackSpeed" in message) {
+		sync.playbackSpeed = message.playbackSpeed;
+	}
+	return sync;
 }
 
 export const connectionInjectKey: InjectionKey<OttRoomConnection> = Symbol("ott:connection");
@@ -69,6 +94,7 @@ function getReconnectDelayMs(
 
 export class OttRoomConnectionReal implements OttRoomConnection {
 	playbackCapability = false;
+	playbackSync?: LegacyPlaybackSync;
 	private generation = 0;
 	private lifecycle = new Set<() => void>();
 	onLifecycle(handler: () => void) {
@@ -80,6 +106,7 @@ export class OttRoomConnectionReal implements OttRoomConnection {
 	}
 	private resetPlayback() {
 		this.playbackCapability = false;
+		this.playbackSync = undefined;
 		for (const handler of [...this.lifecycle]) {
 			try {
 				handler();
@@ -278,6 +305,9 @@ export class OttRoomConnectionReal implements OttRoomConnection {
 		if (!msg || typeof msg !== "object" || typeof msg.action !== "string") {
 			return;
 		}
+		if (msg.action === "sync") {
+			this.playbackSync = cachePlaybackSync(this.playbackSync, msg);
+		}
 		if (
 			msg.action === "playback-capabilities" &&
 			msg.version === 1 &&
@@ -333,6 +363,7 @@ export default OttRoomConnectionPlugin;
 
 export class OttRoomConnectionMock implements OttRoomConnection {
 	playbackCapability = false;
+	playbackSync?: LegacyPlaybackSync;
 	private lifecycle = new Set<() => void>();
 	onLifecycle(handler: () => void) {
 		this.lifecycle.add(handler);
@@ -340,6 +371,7 @@ export class OttRoomConnectionMock implements OttRoomConnection {
 	}
 	mockLifecycle() {
 		this.playbackCapability = false;
+		this.playbackSync = undefined;
 		for (const handler of [...this.lifecycle]) {
 			handler();
 		}
@@ -356,10 +388,14 @@ export class OttRoomConnectionMock implements OttRoomConnection {
 	}
 
 	public mockReceive(msg: ServerMessage) {
+		if (msg.action === "sync") {
+			this.playbackSync = cachePlaybackSync(this.playbackSync, msg);
+		}
 		if (
 			msg.action === "playback-capabilities" &&
 			msg.version === 1 &&
-			msg.recovery === "snapshot"
+			msg.recovery === "snapshot" &&
+			Object.keys(msg).length === 3
 		) {
 			this.playbackCapability = true;
 		}

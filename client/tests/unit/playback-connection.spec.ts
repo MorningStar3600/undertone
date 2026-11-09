@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OttRoomConnectionReal } from "@/plugins/connection";
+import { createPlaybackSession } from "@/playback/playback-session";
+import { createPlayerSurfaces } from "@/playback/player-surface";
 
 class Socket {
 	static instances: Socket[] = [];
@@ -25,6 +27,90 @@ afterEach(() => {
 	Socket.instances = [];
 });
 describe("socket generation ownership", () => {
+	it("ignores old-socket auth evidence and merges only the new socket's sync before fallback", async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal("WebSocket", Socket);
+		const connection = new OttRoomConnectionReal();
+		const onLegacyState = vi.fn();
+		const session = createPlaybackSession({
+			connection,
+			now: () => Date.now(),
+			onState: vi.fn(),
+			onLegacyState,
+			allowed: () => true,
+			createAdapter: createPlayerSurfaces().createAdapter,
+		});
+		connection.connect("first");
+		const first = Socket.instances[0];
+		first.emit("open");
+		const legacy = {
+			action: "sync",
+			currentSource: { service: "youtube", id: "old" },
+			isPlaying: true,
+			playbackPosition: 3,
+			playbackSpeed: 1,
+		};
+		first.emit("message", { data: JSON.stringify(legacy) });
+		await vi.advanceTimersByTimeAsync(500);
+		connection.reconnect();
+		const second = Socket.instances[1];
+		second.emit("open");
+		first.emit("message", { data: JSON.stringify(legacy) });
+		await vi.advanceTimersByTimeAsync(1_500);
+		expect(connection.playbackSync).toBeUndefined();
+		expect(onLegacyState).not.toHaveBeenCalled();
+		second.emit("message", {
+			data: JSON.stringify({ ...legacy, currentSource: { service: "youtube", id: "fresh" } }),
+		});
+		second.emit("message", {
+			data: JSON.stringify({ action: "sync", playbackPosition: 9, isPlaying: false }),
+		});
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(onLegacyState).toHaveBeenCalledOnce();
+		expect(onLegacyState).toHaveBeenCalledWith({
+			...legacy,
+			currentSource: { service: "youtube", id: "fresh" },
+			playbackPosition: 9,
+			isPlaying: false,
+		});
+		connection.disconnect();
+		session.dispose();
+		expect(connection.playbackSync).toBeUndefined();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+	it("cancels fallback and clears auth evidence on repeated same-token auth and disconnect", async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal("WebSocket", Socket);
+		const connection = new OttRoomConnectionReal();
+		connection.connect("room");
+		const socket = Socket.instances[0];
+		socket.emit("open");
+		socket.emit("message", { data: JSON.stringify({ action: "sync", currentSource: null }) });
+		const onLegacyState = vi.fn();
+		const session = createPlaybackSession({
+			connection,
+			now: () => Date.now(),
+			onState: vi.fn(),
+			onLegacyState,
+			allowed: () => true,
+			createAdapter: createPlayerSurfaces().createAdapter,
+		});
+		await vi.advanceTimersByTimeAsync(500);
+		connection.send({ action: "auth", token: "same-token" });
+		expect(connection.playbackSync).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(onLegacyState).not.toHaveBeenCalled();
+		socket.emit("message", { data: JSON.stringify({ action: "sync", currentSource: null }) });
+		connection.send({ action: "auth", token: "same-token" });
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(onLegacyState).not.toHaveBeenCalled();
+		socket.emit("message", { data: JSON.stringify({ action: "sync", currentSource: null }) });
+		connection.disconnect();
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(onLegacyState).not.toHaveBeenCalled();
+		session.dispose();
+		expect(vi.getTimerCount()).toBe(0);
+	});
 	it("ignores stale open/close/message/error after replacement and resets capability on same-token reauth", () => {
 		vi.useFakeTimers();
 		vi.stubGlobal("WebSocket", Socket);

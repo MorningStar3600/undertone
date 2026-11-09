@@ -14,7 +14,7 @@ import {
 import { PlaybackCommandSchema, type PlaybackAttachment } from "ott-common/playback/transport.js";
 import type { QueueItem } from "ott-common/models/video";
 import type { ServerMessage, ServerMessageActionType } from "ott-common/models/messages";
-import type { OttRoomConnection } from "@/plugins/connection";
+import type { LegacyPlaybackSync, OttRoomConnection } from "@/plugins/connection";
 import { createServerClock } from "./server-clock";
 import {
 	createPlaybackController,
@@ -32,7 +32,9 @@ export interface PlaybackSessionOptions {
 	connection: OttRoomConnection;
 	now(): number;
 	createAdapter(context: PlaybackAdapterContext): PlaybackAdapter<QueueItem>;
-	onState(state: PlaybackState | null, item: QueueItem | null, established: boolean): void;
+	/** Authority includes negotiation/recovery, even before a timeline has been established. */
+	onState(state: PlaybackState | null, item: QueueItem | null, ownsPlayback: boolean): void;
+	onLegacyState?(sync: LegacyPlaybackSync): void;
 	onStatus?(status: PlaybackControllerStatus): void;
 	allowed(grant: PermissionName): boolean;
 }
@@ -149,6 +151,15 @@ const endTime = (timeline: PlaybackTimeline) =>
 	timeline.events.at(-1)?.effectiveAtMs ?? timeline.baseline.serverTimeMs;
 const identity = (epoch: string, occurrence: number, id: string) => `${epoch}/${occurrence}/${id}`;
 const sessions = new WeakMap<OttRoomConnection, PlaybackSession>();
+// Sync is authenticated room evidence; disconnect/open/outgoing auth alone start no deadline.
+const CAPABILITY_WAIT_MS = 1_000;
+const legacySchema = z.object({
+	action: z.literal("sync"),
+	currentSource: itemSchema.nullable().optional(),
+	isPlaying: z.boolean().optional(),
+	playbackPosition: z.number().finite().nonnegative().optional(),
+	playbackSpeed: z.number().finite().positive().optional(),
+});
 export const getPlaybackSession = (connection: OttRoomConnection) => sessions.get(connection);
 export type PlaybackSession = ReturnType<typeof createPlaybackSession>;
 
@@ -159,6 +170,9 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 	const sessionId = crypto.randomUUID();
 	let timeline: PlaybackTimeline | null = null;
 	let established = false;
+	let mode: "negotiating" | "legacy" | "modern" = "negotiating";
+	let legacySync: LegacyPlaybackSync = { action: "sync" };
+	let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
 	let capable = false;
 	let disposed = false;
 	let generation = 0;
@@ -172,8 +186,10 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 	let buffer: unknown[] = [];
 	const attachments = new Map<string, PlaybackAttachment>();
 	const receipts = new Map<string, string>();
-	const pending = new Map<string, { epoch: string; occurrenceId: number; at: number }>();
-	const nextVotes = new Set<string>();
+	const pending = new Map<
+		string,
+		{ epoch: string; occurrenceId: number; at: number; command: PlaybackIntention["command"] }
+	>();
 	const unsubs: (() => void)[] = [];
 
 	function send(message: Parameters<OttRoomConnection["send"]>[0]) {
@@ -226,6 +242,7 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 			return;
 		}
 		nonce = null;
+		pending.clear();
 		// Invalid input latches controller recovery and synchronously disposes its surface.
 		if (controller.getStatus().code !== "recovering") {
 			controller.acceptEvent(null);
@@ -318,20 +335,7 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 			return;
 		}
 		options.onState(state, item ?? null, true);
-		for (const [id, intention] of pending) {
-			if (
-				!state ||
-				intention.epoch !== timeline.epoch ||
-				intention.occurrenceId !== state.occurrenceId
-			) {
-				pending.delete(id);
-			}
-		}
-		for (const key of nextVotes) {
-			if (!state || key !== identity(timeline.epoch, state.occurrenceId, "next")) {
-				nextVotes.delete(key);
-			}
-		}
+		prunePending(state);
 		timeline = compactPlaybackTimeline(timeline, time);
 		const keep = new Set<string>();
 		if (state) {
@@ -345,6 +349,17 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		for (const key of attachments.keys()) {
 			if (!keep.has(key)) {
 				attachments.delete(key);
+			}
+		}
+	}
+	function prunePending(state: PlaybackState | null) {
+		for (const [id, intention] of pending) {
+			if (
+				!state ||
+				intention.epoch !== timeline?.epoch ||
+				intention.occurrenceId !== state.occurrenceId
+			) {
+				pending.delete(id);
 			}
 		}
 	}
@@ -398,6 +413,42 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		connection.addMessageHandler(action, handler);
 		unsubs.push(() => connection.removeMessageHandler(action, handler));
 	}
+	function bufferLegacy(message: unknown) {
+		if (disposed || mode !== "negotiating") {
+			return;
+		}
+		const parsed = legacySchema.safeParse(message);
+		if (!parsed.success) {
+			return;
+		}
+		legacySync = { ...legacySync, ...parsed.data } as LegacyPlaybackSync;
+		if (fallbackTimer) {
+			return;
+		}
+		const currentGeneration = generation;
+		fallbackTimer = setTimeout(() => {
+			fallbackTimer = undefined;
+			if (disposed || mode !== "negotiating" || generation !== currentGeneration) {
+				return;
+			}
+			mode = "legacy";
+			established = false;
+			options.onState(null, null, false);
+			options.onLegacyState?.(legacySync);
+			legacySync = { action: "sync" };
+		}, CAPABILITY_WAIT_MS);
+	}
+	function selectModern() {
+		clearTimeout(fallbackTimer);
+		fallbackTimer = undefined;
+		legacySync = { action: "sync" };
+		mode = "modern";
+		capable = true;
+		// Also detach a legacy surface after late capability, before awaiting its fresh snapshot.
+		options.onState(null, null, true);
+		requestSnapshot();
+	}
+	listen("sync", bufferLegacy);
 	listen("playback-capabilities", message => {
 		if (
 			message.action !== "playback-capabilities" ||
@@ -408,8 +459,7 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		) {
 			return;
 		}
-		capable = true;
-		requestSnapshot();
+		selectModern();
 	});
 	listen("playback-event", message => {
 		if (!capable || disposed) {
@@ -531,6 +581,11 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 	});
 	function reset() {
 		++generation;
+		established = false;
+		mode = "negotiating";
+		clearTimeout(fallbackTimer);
+		fallbackTimer = undefined;
+		legacySync = { action: "sync" };
 		capable = false;
 		nonce = null;
 		timeline = null;
@@ -538,19 +593,17 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		attachments.clear();
 		receipts.clear();
 		pending.clear();
-		nextVotes.clear();
 		sentTimes = [];
 		lastProbe = -Infinity;
+		lastTick = now();
 		clearTimeout(retryTimer);
 		retryTimer = undefined;
 		attempts = 0;
 		clock.reset();
 		controller.dispose();
 		controller = makeController();
-		// Once selected, retain fail-closed ownership through reconnect until its new snapshot.
-		if (established) {
-			options.onState(null, null, true);
-		}
+		// Hold rendering and commands until this generation negotiates its own authority.
+		options.onState(null, null, true);
 	}
 	const unsubLifecycle = connection.onLifecycle?.(reset);
 	if (unsubLifecycle) {
@@ -575,6 +628,9 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		}
 	}, 250);
 	function resume() {
+		if (disposed) {
+			return;
+		}
 		clock.reset();
 		controller.tick();
 		lastProbe = -Infinity;
@@ -584,12 +640,15 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		get established() {
 			return established;
 		},
+		get ownsPlayback() {
+			return mode !== "legacy";
+		},
 		get controller() {
 			return controller;
 		},
 		resume,
 		command(intention: PlaybackIntention) {
-			if (!established) {
+			if (mode === "legacy" && !disposed) {
 				return false;
 			}
 			if (intention.command === "play") {
@@ -608,6 +667,8 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 				timeline,
 				Math.max(timeline.baseline.serverTimeMs, Math.floor(estimate.serverNowMs)),
 			).state;
+			// A scheduled occurrence can become effective between projection ticks.
+			prunePending(state);
 			const grant =
 				intention.command === "seek"
 					? "playback.seek"
@@ -619,8 +680,15 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 			if (!state || !options.allowed(grant) || pending.size >= 64) {
 				return true;
 			}
-			const voteKey = identity(timeline.epoch, state.occurrenceId, "next");
-			if (intention.command === "next" && nextVotes.has(voteKey)) {
+			if (
+				intention.command === "next" &&
+				[...pending.values()].some(
+					value =>
+						value.command === "next" &&
+						value.epoch === timeline?.epoch &&
+						value.occurrenceId === state.occurrenceId,
+				)
+			) {
 				return true;
 			}
 			const command = PlaybackCommandSchema.safeParse({
@@ -634,11 +702,10 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 					epoch: timeline.epoch,
 					occurrenceId: state.occurrenceId,
 					at: now(),
+					command: intention.command,
 				});
 				if (!send({ action: "playback-command", command: command.data })) {
 					pending.delete(command.data.requestId);
-				} else if (intention.command === "next") {
-					nextVotes.add(voteKey);
 				}
 			}
 			return true;
@@ -648,8 +715,14 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 				return;
 			}
 			disposed = true;
+			established = false;
+			capable = false;
+			nonce = null;
+			timeline = null;
+			clock.reset();
 			clearInterval(interval);
 			clearTimeout(retryTimer);
+			clearTimeout(fallbackTimer);
 			for (const unsub of unsubs) {
 				unsub();
 			}
@@ -658,6 +731,7 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 			receipts.clear();
 			pending.clear();
 			buffer = [];
+			legacySync = { action: "sync" };
 			if (sessions.get(connection) === session) {
 				sessions.delete(connection);
 			}
@@ -665,9 +739,11 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		},
 	};
 	sessions.set(connection, session);
+	options.onState(null, null, true);
 	if (connection.playbackCapability) {
-		capable = true;
-		requestSnapshot();
+		selectModern();
+	} else if (connection.playbackSync) {
+		bufferLegacy(connection.playbackSync);
 	}
 	return session;
 }

@@ -469,6 +469,9 @@ export default defineComponent({
 					playbackSpeed: state?.rate ?? 1,
 				});
 			},
+			onLegacyState(sync) {
+				store.dispatch("room/sync", sync);
+			},
 			onStatus(status) {
 				playbackStatus.value = status.code;
 				mediaPlaybackBlocked.value = status.code === "autoplay-blocked";
@@ -506,7 +509,7 @@ export default defineComponent({
 		watch(
 			() => store.state.settings.nativeYoutubeControls,
 			() => {
-				if (playback.established) {
+				if (playback.ownsPlayback) {
 					playback.resume();
 				}
 			},
@@ -625,7 +628,7 @@ export default defineComponent({
 					const interval = setInterval(() => {
 						if (
 							roomDisposed ||
-							playback.established ||
+							playback.ownsPlayback ||
 							(player.isPlayerPresent() && player.apiReady.value)
 						) {
 							finish();
@@ -645,7 +648,7 @@ export default defineComponent({
 
 		async function onSyncMsg(msg: ServerMessageSync) {
 			rewriteUrlToRoomName();
-			if (playback.established) {
+			if (playback.ownsPlayback) {
 				return;
 			}
 			if (msg.isPlaying !== undefined && !mediaPlaybackBlocked.value) {
@@ -716,11 +719,11 @@ export default defineComponent({
 		// Indicates that starting playback is blocked by the browser. This usually means that the user needs
 		// to interact with the page before playback can start. This is because browsers block autoplaying videos.
 		async function applyIsPlaying(playing: boolean): Promise<void> {
-			if (roomDisposed || playback.established) {
+			if (roomDisposed || playback.ownsPlayback) {
 				return;
 			}
 			await waitForPlayer();
-			if (roomDisposed || playback.established) {
+			if (roomDisposed || playback.ownsPlayback) {
 				return;
 			}
 			if (!player.isPlayerPresent() || !player.apiReady.value) {
@@ -744,7 +747,7 @@ export default defineComponent({
 		}
 
 		function onClickUnblockPlayback(): void {
-			if (playback.established) {
+			if (playback.ownsPlayback) {
 				playback.controller.userActivated();
 				return;
 			}
@@ -757,7 +760,7 @@ export default defineComponent({
 		}
 
 		async function onPlaybackChange(changeTo: boolean) {
-			if (playback.established) {
+			if (playback.ownsPlayback) {
 				return;
 			}
 			console.debug(`onPlaybackChange: ${changeTo}`);
@@ -768,7 +771,7 @@ export default defineComponent({
 			await applyIsPlaying(store.state.room.isPlaying);
 		}
 		function onPlayerReady() {
-			if (playback.established) {
+			if (playback.ownsPlayback) {
 				return;
 			}
 			if (
@@ -783,7 +786,7 @@ export default defineComponent({
 		// player, landing it cued at position 0). Re-apply both here rather than waiting for the
 		// timestamp watcher, which never fires while the room is paused.
 		async function onPlayerReadyApplyRoomState() {
-			if (playback.established) {
+			if (playback.ownsPlayback) {
 				return;
 			}
 			player?.setPosition(truePosition.value);

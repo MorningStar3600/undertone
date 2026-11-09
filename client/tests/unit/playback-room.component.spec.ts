@@ -7,6 +7,11 @@ import { OttRoomConnectionMock, connectionInjectKey } from "@/plugins/connection
 import { OttSfx } from "@/plugins/sfx";
 import { getSdk } from "@/util/playerHelper";
 import { Grants } from "ott-common/permissions";
+import {
+	RoomRequestType,
+	type ClientMessage,
+	type ServerMessage,
+} from "ott-common/models/messages";
 import { getPlaybackSession } from "@/playback/playback-session";
 import { mountComponent } from "./component-test-utils";
 
@@ -52,6 +57,19 @@ function mockApi(events: Events) {
 	};
 }
 const capability = { action: "playback-capabilities", version: 1, recovery: "snapshot" } as const;
+function sentMessage<Action extends ClientMessage["action"]>(
+	connection: OttRoomConnectionMock,
+	action: Action,
+) {
+	const message = connection.sent.findLast(
+		(message): message is Extract<ClientMessage, { action: Action }> =>
+			message.action === action,
+	);
+	if (!message) {
+		throw new Error(`Missing ${action}`);
+	}
+	return message;
+}
 async function mountRoom(playing = false) {
 	const connection = new OttRoomConnectionMock();
 	connection.mockReceive(capability);
@@ -66,7 +84,7 @@ async function mountRoom(playing = false) {
 	const mounted = mountComponent(Room, {
 		global: { provide: { [connectionInjectKey as symbol]: connection } },
 	});
-	mounted.store.commit("room/SYNC", { grants: new Grants(), playbackEstablished: false });
+	mounted.store.commit("room/SYNC", { grants: new Grants() });
 	await mounted.router.push("/room/foo");
 	await mounted.router.isReady();
 	await flushPromises();
@@ -84,7 +102,7 @@ async function mountRoom(playing = false) {
 	if (subscribe.action !== "playback-subscribe") {
 		throw new Error("Missing subscription");
 	}
-	connection.mockReceive({
+	const snapshot = {
 		action: "playback-snapshot",
 		nonce: subscribe.nonce,
 		timeline: {
@@ -117,7 +135,8 @@ async function mountRoom(playing = false) {
 				title: "A public video",
 			},
 		},
-	});
+	} satisfies ServerMessage;
+	connection.mockReceive(snapshot);
 	await flushPromises();
 	await mounted.wrapper.vm.$nextTick();
 	await flushPromises();
@@ -126,7 +145,7 @@ async function mountRoom(playing = false) {
 	provider.events.onReady();
 	provider.events.onStateChange({ data: 5 });
 	await flushPromises();
-	return { ...mounted, connection, provider, handlers };
+	return { ...mounted, connection, provider, handlers, snapshot };
 }
 describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
 	it("shows the authoritative rate applied to the captured provider", async () => {
@@ -216,7 +235,157 @@ describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
 	});
 	afterEach(() => {
 		vi.unstubAllGlobals();
+		vi.useRealTimers();
 	});
+	it("permits intentional vote-unvote after completion while suppressing pending duplicates", async () => {
+		const s = await mountRoom();
+		s.store.commit("room/SYNC", { enableVoteSkip: true, votesToSkip: new Set() });
+		s.store.commit("users/SET_YOU", { info: { id: "session-client" } });
+		s.connection.mockReset();
+		const skip = s.wrapper.get('[data-cy="playback-skip"]');
+		await skip.trigger("click");
+		await skip.trigger("click");
+		const first = sentMessage(s.connection, "playback-command");
+		expect(s.connection.sent).toHaveLength(1);
+		s.connection.mockReceive({
+			action: "playback-result",
+			result: {
+				requestId: first.command.requestId,
+				epoch: "epoch",
+				sequence: 1,
+				status: "applied",
+			},
+		});
+		s.connection.mockReceive({ action: "sync", votesToSkip: [s.store.state.users.you.id] });
+		await flushPromises();
+		expect(skip.attributes("aria-pressed")).toBe("true");
+		await skip.trigger("click");
+		const commands = s.connection.sent.filter(m => m.action === "playback-command");
+		expect(commands).toHaveLength(2);
+		expect(commands[1].command.requestId).not.toBe(first.command.requestId);
+		s.connection.mockReceive({
+			action: "playback-result",
+			result: {
+				requestId: commands[1].command.requestId,
+				epoch: "epoch",
+				sequence: 1,
+				status: "applied",
+			},
+		});
+		s.connection.mockReceive({ action: "sync", votesToSkip: [] });
+		await flushPromises();
+		expect(skip.attributes("aria-pressed")).toBe("false");
+		await skip.trigger("click");
+		expect(s.connection.sent.filter(m => m.action === "playback-command")).toHaveLength(3);
+	});
+	it("allows the Room skip button to retry a rejected vote", async () => {
+		const s = await mountRoom();
+		s.store.commit("room/SYNC", { enableVoteSkip: true, votesToSkip: new Set() });
+		s.connection.mockReset();
+		const skip = s.wrapper.get('[data-cy="playback-skip"]');
+		await skip.trigger("click");
+		const first = sentMessage(s.connection, "playback-command");
+		s.connection.mockReceive({
+			action: "playback-result",
+			result: {
+				requestId: first.command.requestId,
+				epoch: "epoch",
+				sequence: 1,
+				status: "rejected",
+				code: "unauthorized",
+			},
+		});
+		await skip.trigger("click");
+		const commands = s.connection.sent.filter(m => m.action === "playback-command");
+		expect(commands).toHaveLength(2);
+		expect(commands[1].command.requestId).not.toBe(first.command.requestId);
+		expect(skip.attributes("aria-pressed")).toBe("false");
+	});
+	it("projects a new legacy generation's full sync plus partial updates before restoring buttons", async () => {
+		const s = await mountRoom();
+		vi.useFakeTimers();
+		s.connection.mockLifecycle();
+		s.connection.mockReset();
+		s.connection.mockReceive({
+			action: "sync",
+			name: "foo",
+			currentSource: { service: "youtube", id: "legacy-video", length: 200 },
+			isPlaying: true,
+			playbackPosition: 9,
+			playbackSpeed: 1,
+		});
+		s.connection.mockReceive({
+			action: "sync",
+			isPlaying: false,
+			playbackPosition: 17,
+			playbackSpeed: 2,
+		});
+		await s.wrapper.vm.$nextTick();
+		expect(s.wrapper.findComponent(OmniPlayer).exists()).toBe(false);
+		await s.wrapper.get('[data-cy="playback-toggle"]').trigger("click");
+		expect(s.connection.sent).toEqual([]);
+		await vi.advanceTimersByTimeAsync(1_000);
+		await flushPromises();
+		expect(s.store.state.room).toMatchObject({
+			playbackEstablished: false,
+			currentSource: { id: "legacy-video" },
+			isPlaying: false,
+			playbackPosition: 17,
+			playbackSpeed: 2,
+		});
+		expect(s.wrapper.findComponent(OmniPlayer).exists()).toBe(true);
+		await s.wrapper.get('[data-cy="playback-toggle"]').trigger("click");
+		expect(s.connection.sent).toContainEqual({
+			action: "req",
+			request: { type: RoomRequestType.PlaybackRequest, state: true },
+		});
+	});
+	it.each([false, true])(
+		"waits for a fresh modern snapshot when capability arrives after fallback: %s",
+		async late => {
+			const s = await mountRoom();
+			vi.useFakeTimers();
+			s.connection.mockLifecycle();
+			s.connection.mockReset();
+			s.connection.mockReceive({
+				action: "sync",
+				name: "foo",
+				currentSource: { service: "youtube", id: "legacy-new", length: 200 },
+				isPlaying: true,
+				playbackPosition: 19,
+				playbackSpeed: 2,
+			});
+			await vi.advanceTimersByTimeAsync(late ? 1_000 : 999);
+			await flushPromises();
+			expect(s.store.state.room.currentSource?.id).toBe(late ? "legacy-new" : undefined);
+			s.connection.mockReceive(capability);
+			await flushPromises();
+			expect(s.store.state.room.currentSource).toBeNull();
+			expect(s.wrapper.findComponent(OmniPlayer).exists()).toBe(false);
+			await s.wrapper.get('[data-cy="playback-toggle"]').trigger("click");
+			expect(s.connection.sent.filter(m => m.action === "req")).toEqual([]);
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(s.store.state.room.currentSource).toBeNull();
+			const subscribe = sentMessage(s.connection, "playback-subscribe");
+			const probe = sentMessage(s.connection, "clock-probe");
+			// Prior generation's valid envelope cannot re-establish rendering.
+			s.connection.mockReceive(s.snapshot);
+			expect(s.store.state.room.currentSource).toBeNull();
+			s.connection.mockReceive({
+				action: "clock-reply",
+				generation: probe.generation,
+				nonce: probe.nonce,
+				serverReceiveMs: 1_000,
+				serverSendMs: 1_000,
+			});
+			s.connection.mockReceive({ ...s.snapshot, nonce: subscribe.nonce });
+			await flushPromises();
+			expect(s.store.state.room.currentSource?.id).toBe("public-youtube");
+			expect(s.wrapper.findComponent(OmniPlayer).exists()).toBe(true);
+			expect(s.store.state.room.playbackEstablished).toBe(true);
+			expect(s.provider.api.playVideo).not.toHaveBeenCalled();
+		},
+	);
 	it("mounts from early capability using the real provider id, cues paused without autoplay and ignores legacy rendering sync", async () => {
 		const s = await mountRoom();
 		expect(s.provider.api.cueVideoById).toHaveBeenCalledWith("public-youtube");
@@ -329,5 +498,33 @@ describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
 		expect(s.connection.playbackCapability).toBe(false);
 		s.handlers.get("play")?.({ action: "play" });
 		expect(s.connection.sent).toEqual([]);
+	});
+	it("cancels a pending legacy fallback when navigating to another room", async () => {
+		const s = await mountRoom();
+		vi.useFakeTimers();
+		s.connection.mockLifecycle();
+		s.connection.mockReceive({
+			action: "sync",
+			name: "foo",
+			currentSource: { service: "youtube", id: "prior-room" },
+			isPlaying: true,
+			playbackPosition: 99,
+			playbackSpeed: 2,
+		});
+		await vi.advanceTimersByTimeAsync(500);
+		await s.router.push("/room/another");
+		await s.wrapper.vm.$nextTick();
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(s.store.state.room.currentSource).toBeNull();
+		expect(s.store.state.room.playbackEstablished).toBe(true);
+		s.connection.mockReceive({ action: "sync", name: "another", currentSource: null });
+		await vi.advanceTimersByTimeAsync(1_000);
+		expect(s.store.state.room).toMatchObject({
+			playbackEstablished: false,
+			currentSource: null,
+			isPlaying: false,
+			playbackPosition: 0,
+			playbackSpeed: 1,
+		});
 	});
 });

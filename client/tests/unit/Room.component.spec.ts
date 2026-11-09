@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import RoomSidePanel from "@/components/RoomSidePanel.vue";
 import { chatDraft } from "@/components/chat-state";
 import Room from "@/views/Room.vue";
@@ -22,6 +22,9 @@ async function mountRoom() {
 	await mounted.router.push("/room/foo");
 	await mounted.router.isReady();
 	await mounted.wrapper.vm.$nextTick();
+	// These layout/chat cases run on an authenticated legacy server after negotiation.
+	mounted.connection.mockReceive({ action: "sync", currentSource: null });
+	await vi.advanceTimersByTimeAsync(1_000);
 	return mounted;
 }
 
@@ -36,6 +39,7 @@ async function settle(wrapper: { vm: { $nextTick: () => Promise<void> } }) {
 
 describe("Room chat", () => {
 	beforeEach(() => {
+		vi.useFakeTimers();
 		chatDraft.value = "";
 		// The room fetches its sound effects on mount; there's no server to serve them here.
 		vi.spyOn(OttSfx.prototype, "loadSfx").mockResolvedValue();
@@ -57,6 +61,9 @@ describe("Room chat", () => {
 				removeEventListener: () => undefined,
 			})),
 		);
+	});
+	afterEach(() => {
+		vi.useRealTimers();
 	});
 
 	it("keeps the T shortcut working after moving chat into the video", async () => {
