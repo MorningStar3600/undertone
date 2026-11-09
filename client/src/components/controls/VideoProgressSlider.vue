@@ -1,16 +1,21 @@
 <template>
 	<vue-slider
+		:key="`${store.state.room.currentSource?.service}:${store.state.room.currentSource?.id}:${normalisedVideoLength}`"
 		id="videoSlider"
 		:interval="0.1"
 		:lazy="true"
-		:model-value="currentPosition"
+		:model-value="sliderValue"
 		:max="normalisedVideoLength"
 		:tooltip-formatter="sliderTooltipFormatter"
-		:disabled="
-			store.state.room.currentSource?.length === undefined || !granted('playback.seek')
-		"
+		:disabled="!canSeek"
+		:dot-attrs="{
+			'aria-label': $t('room.playback-position'),
+			'aria-valuetext': secondsToTimestamp(currentPosition),
+		}"
 		:process="getSliderProcesses"
 		@change="sliderChange"
+		@mousemove="updateSeekPreview"
+		@mouseleave="resetSeekPreview"
 		:drag-on-click="true"
 		tooltip="none"
 		:duration="0"
@@ -28,7 +33,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, type Ref, onMounted, onUpdated, computed } from "vue";
+import { ref, type Ref, computed } from "vue";
 import VueSlider from "vue-slider-component";
 import { useStore } from "@/store";
 import { secondsToTimestamp } from "@/util/timestamp";
@@ -38,7 +43,7 @@ import "vue-slider-component/theme/default.css";
 import "./slider-tweaks.scss";
 import { useGrants } from "../composables/grants";
 
-withDefaults(
+const props = withDefaults(
 	defineProps<{
 		currentPosition?: number;
 	}>(),
@@ -50,6 +55,12 @@ withDefaults(
 const store = useStore();
 const roomapi = useRoomApi(useConnection());
 const granted = useGrants();
+const canSeek = computed(
+	() =>
+		Number.isFinite(store.state.room.currentSource?.length) &&
+		(store.state.room.currentSource?.length ?? 0) > 0 &&
+		granted("playback.seek"),
+);
 
 /**
  * vue-slider-component requires (props.max - props.min) to be divisible by props.interval.
@@ -58,18 +69,26 @@ const granted = useGrants();
  * The video length is then used by the slider to define the maximum value (props.max).
  */
 const normalisedVideoLength = computed((): number => {
-	if (store.state.room.currentSource?.length) {
+	if (
+		Number.isFinite(store.state.room.currentSource?.length) &&
+		(store.state.room.currentSource?.length ?? 0) > 0
+	) {
 		const videoLength = store.state.room.currentSource.length;
 		return Math.round(videoLength * 10) / 10;
 	} else {
 		return 0;
 	}
 });
+const sliderValue = computed(() =>
+	Math.max(0, Math.min(props.currentPosition, normalisedVideoLength.value)),
+);
 
 const sliderTooltipFormatter = ref(secondsToTimestamp);
 
 function sliderChange(value: number) {
-	roomapi.seek(value);
+	if (canSeek.value && Number.isFinite(value)) {
+		roomapi.seek(Math.max(0, Math.min(value, store.state.room.currentSource?.length ?? 0)));
+	}
 }
 
 /**
@@ -168,30 +187,11 @@ function resetSeekPreview() {
 	seekPreviewPercent.value = null;
 	railHovered.value = false;
 }
-
-onMounted(() => {
-	const slider = document.getElementById("videoSlider");
-	if (!slider) {
-		return;
-	}
-	slider.addEventListener("mousemove", updateSeekPreview);
-	slider.addEventListener("mouseleave", resetSeekPreview);
-});
-
-onUpdated(() => {
-	const slider = document.getElementById("videoSlider");
-	if (!slider) {
-		return;
-	}
-	slider.removeEventListener("mousemove", updateSeekPreview);
-	slider.removeEventListener("mouseleave", resetSeekPreview);
-	slider.addEventListener("mousemove", updateSeekPreview);
-	slider.addEventListener("mouseleave", resetSeekPreview);
-});
 </script>
 
 <style lang="scss" scoped>
 #seek-preview {
+	z-index: 50;
 	position: fixed;
 	background-color: rgba(0, 0, 0, 0.6);
 	color: white;
@@ -201,6 +201,15 @@ onUpdated(() => {
 	padding: 2px 6px;
 	text-align: center;
 	pointer-events: none;
+}
+
+#videoSlider {
+	margin-block: 10px;
+}
+
+#videoSlider :deep(.vue-slider-dot-handle-focus) {
+	outline: 2px solid var(--ring);
+	outline-offset: 3px;
 }
 
 .hide {

@@ -136,7 +136,7 @@ export function mountComponent(
 	};
 	wrappers.push(hostWrapper);
 
-	return { wrapper, store, connection, router };
+	return { wrapper, store, connection, router, unmount: () => hostWrapper.unmount() };
 }
 
 export async function flush() {

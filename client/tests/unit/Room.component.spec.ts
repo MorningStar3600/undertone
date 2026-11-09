@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import RoomSidePanel from "@/components/RoomSidePanel.vue";
 import { chatDraft } from "@/components/chat-state";
 import Room from "@/views/Room.vue";
+import OmniPlayer from "@/components/players/OmniPlayer.vue";
+import VideoControls from "@/components/controls/VideoControls.vue";
 import { OttSfx } from "@/plugins/sfx";
 import { ChatPlacement } from "@/stores/settings";
 import { mountComponent } from "./component-test-utils";
@@ -120,5 +122,33 @@ describe("Room chat", () => {
 
 		const input = wrapper.get('[data-cy="chat-input"]').element as HTMLInputElement;
 		expect(input.value).toBe("half a thought");
+	});
+
+	it("keeps one source player and one dock through panel, tab and fullscreen changes", async () => {
+		const { wrapper, store } = await mountRoom();
+		const source = wrapper.getComponent(OmniPlayer).vm;
+		const transport = wrapper.getComponent(VideoControls).vm;
+		await wrapper.get('button[aria-label="More player controls"]').trigger("click");
+		await wrapper.get('[role="tab"][aria-label="Add"]').trigger("click");
+		store.state.fullscreen = true;
+		await settle(wrapper);
+		expect(wrapper.findAllComponents(OmniPlayer)).toHaveLength(1);
+		expect(wrapper.getComponent(OmniPlayer).vm).toBe(source);
+		expect(wrapper.getComponent(VideoControls).vm).toBe(transport);
+		expect(wrapper.findAll('[data-cy="room-player-dock"]')).toHaveLength(1);
+		expect(wrapper.get('[data-cy="playback-skip"]').isVisible()).toBe(true);
+		expect(wrapper.get('[data-cy="volume-slider"]').isVisible()).toBe(true);
+	});
+
+	it("lets focused transport and volume widgets own their keyboard events", async () => {
+		const { wrapper, connection } = await mountRoom();
+		connection.mockReset();
+		await wrapper
+			.get('[data-cy="playback-toggle"]')
+			.trigger("keydown", { code: "Space", key: " " });
+		await wrapper
+			.get('[data-cy="volume-slider"]')
+			.trigger("keydown", { code: "ArrowRight", key: "ArrowRight" });
+		expect(connection.sent).toEqual([]);
 	});
 });

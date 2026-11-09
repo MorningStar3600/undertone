@@ -1,23 +1,27 @@
 <template>
-	<div class="flex items-center">
+	<div class="flex min-w-0 items-center gap-1">
 		<Button
 			variant="ghost"
-			size="icon"
+			size="icon-lg"
 			class="media-control"
-			:aria-label="$t('room.mute-volume')"
+			:aria-label="$t(volume.isMuted.value ? 'room.unmute-volume' : 'room.mute-volume')"
+			:title="$t(volume.isMuted.value ? 'room.unmute-volume' : 'room.mute-volume')"
+			:aria-pressed="volume.isMuted.value"
 			@click="toggleMute"
 		>
-			<Icon :icon="volumeIcon" class="size-5" />
+			<Icon :icon="volumeIcon" />
 		</Button>
 		<div class="volume">
-			<Slider
-				class="min-h-8"
-				:model-value="[volume.volume.value]"
-				:min="0"
-				:max="100"
-				:step="1"
+			<input
+				type="range"
+				class="min-h-11 w-full cursor-pointer accent-primary focus-visible:outline-2 focus-visible:outline-ring"
+				:value="volume.volume.value"
+				min="0"
+				max="100"
+				step="1"
 				data-cy="volume-slider"
-				@update:model-value="v => changed(v?.[0] ?? 0)"
+				:aria-label="$t('room.personal-volume')"
+				@input="changed(Number(($event.target as HTMLInputElement).value))"
 			/>
 		</div>
 	</div>
@@ -26,8 +30,7 @@
 <script lang="ts" setup>
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
-import { Slider } from "@/components/ui/slider";
-import { computed } from "vue";
+import { computed, nextTick } from "vue";
 import { useVolume } from "../composables";
 import { mdiVolumeHigh, mdiVolumeMedium, mdiVolumeLow, mdiVolumeOff } from "@mdi/js";
 
@@ -49,7 +52,13 @@ const volumeIcon = computed(() => {
 	}
 });
 
-function changed(value: number) {
+async function changed(value: number) {
+	// useVolume restores the previous value when unmuting. Let that restoration
+	// finish before applying the user's new level.
+	if (volume.isMuted.value && value > 0) {
+		volume.isMuted.value = false;
+		await nextTick();
+	}
 	emit("update:volume", value);
 	volume.volume.value = value;
 }
@@ -65,14 +74,8 @@ function toggleMute() {
 }
 
 .volume {
-	width: 150px;
-	margin-left: 10px;
-	margin-right: 20px;
-}
-
-@media (max-width: 960px) {
-	.volume {
-		width: 100px;
-	}
+	flex: 1;
+	min-width: 44px;
+	max-width: 150px;
 }
 </style>

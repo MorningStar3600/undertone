@@ -1,8 +1,8 @@
 <template>
-	<div>
+	<RoomPlayerLayout :fullscreen="store.state.fullscreen">
 		<!-- HACK: For some reason, safari really doesn't like typescript enums. As a result, we are forced to not use the enums, and use their literal values instead. -->
 		<div
-			class="group/room p-4 max-xl:p-0 data-[fullscreen=true]:p-0 data-[layout=theater]:p-0"
+			class="room-content group/room p-4 max-xl:p-0 data-[fullscreen=true]:p-0 data-[layout=theater]:p-0"
 			:data-fullscreen="store.state.fullscreen"
 			:data-layout="store.state.settings.roomLayout"
 			v-if="!showDisconnectedOverlay"
@@ -12,7 +12,7 @@
 				v-if="!store.state.fullscreen"
 			>
 				<h1
-					class="relative pl-4 font-display text-foreground text-2xl before:absolute before:left-0 before:inset-y-[0.1em] before:w-1 before:bg-primary before:shadow-[0_0_12px_var(--primary)] before:content-['']"
+					class="relative min-w-0 max-w-full break-words pl-4 font-display text-foreground text-2xl before:absolute before:left-0 before:inset-y-[0.1em] before:w-1 before:bg-primary before:shadow-[0_0_12px_var(--primary)] before:content-['']"
 				>
 					{{
 						store.state.room.title !== ""
@@ -51,16 +51,9 @@
 					<span id="connectStatus" class="ml-1 label-mono">{{ connectionStatus }}</span>
 				</div>
 			</div>
-			<div
-				class="grid w-full grid-cols-[minmax(0,1fr)_auto] grid-rows-[minmax(400px,70vh)] max-lg:grid-cols-1 group-data-[fullscreen=true]/room:m-0 group-data-[fullscreen=true]/room:block group-data-[fullscreen=true]/room:h-screen group-data-[fullscreen=true]/room:max-h-screen group-data-[fullscreen=true]/room:w-screen group-data-[fullscreen=true]/room:aspect-[inherit] group-data-[layout=theater]/room:grid-rows-[minmax(400px,85vh)]"
-			>
-				<div
-					class="relative z-31 flex h-full flex-col group-data-[fullscreen=true]/room:max-h-screen group-data-[fullscreen=true]/room:w-full! group-data-[fullscreen=true]/room:p-0"
-				>
-					<div
-						class="size-full group-data-[fullscreen=true]/room:h-screen"
-						ref="playerContainer"
-					>
+			<div class="room-media-grid">
+				<div class="relative z-31 min-h-0 min-w-0">
+					<div class="relative size-full">
 						<OmniPlayer
 							:source="store.state.room.currentSource"
 							@apiready="onPlayerApiReady"
@@ -68,11 +61,6 @@
 							@paused="onPlaybackChange(false)"
 							@ready="onPlayerReady"
 						/>
-						<div
-							id="mouse-event-swallower"
-							class="absolute top-0 size-full"
-							:class="{ hidden: controlsVisible }"
-						></div>
 						<div
 							class="pointer-events-none absolute bottom-20 right-0 h-[70%] min-h-17.5 w-100 px-2.5 py-1.25 max-lg:w-62.5"
 							v-if="showInVideoChat"
@@ -89,13 +77,6 @@
 							</Button>
 						</div>
 					</div>
-					<VideoControls
-						:slider-position="sliderPosition"
-						:true-position="truePosition"
-						:controls-visible="controlsVisible"
-						:key="currentSource?.id"
-						:mode="controlsMode"
-					/>
 				</div>
 				<div
 					v-if="showChatPanel"
@@ -142,15 +123,18 @@
 					</div>
 				</div>
 			</div>
-			<div class="my-2.5">
+			<div class="my-2.5" v-show="!store.state.fullscreen">
 				<RestoreQueue />
-				<VoteSkip />
 			</div>
-			<div class="flex w-full max-lg:flex-col">
-				<div class="w-3/5 grow max-lg:w-full">
+			<div class="flex min-w-0 w-full max-lg:flex-col" v-show="!store.state.fullscreen">
+				<div class="min-w-0 w-3/5 grow max-lg:w-full">
 					<Tabs v-model="queueTab" class="overflow-visible">
 						<TabsList class="w-full">
-							<TabsTrigger value="queue" class="flex-1 gap-2">
+							<TabsTrigger
+								value="queue"
+								class="flex-1 gap-2"
+								:aria-label="$t('room.tabs.queue')"
+							>
 								<Icon :icon="mdiFormatListBulleted" class="size-4" />
 								<span class="mx-2 max-lg:hidden">{{ $t("room.tabs.queue") }}</span>
 								<Badge variant="secondary" class="ml-1">
@@ -161,11 +145,19 @@
 									}}
 								</Badge>
 							</TabsTrigger>
-							<TabsTrigger value="add" class="flex-1 gap-2">
+							<TabsTrigger
+								value="add"
+								class="flex-1 gap-2"
+								:aria-label="$t('common.add')"
+							>
 								<Icon :icon="mdiPlus" class="size-4" />
 								<span class="mx-2 max-lg:hidden">{{ $t("common.add") }}</span>
 							</TabsTrigger>
-							<TabsTrigger value="settings" class="flex-1 gap-2">
+							<TabsTrigger
+								value="settings"
+								class="flex-1 gap-2"
+								:aria-label="$t('room.tabs.settings')"
+							>
 								<Icon :icon="mdiWrench" class="size-4" />
 								<span class="mx-2 max-lg:hidden">{{
 									$t("room.tabs.settings")
@@ -227,11 +219,6 @@
 								</div>
 								<div>Is Mobile: {{ isMobile }}</div>
 								<div>Device Orientation: {{ orientation }}</div>
-								<div>
-									Video controls: timeoutId:
-									{{ videoControlsHideTimeout }} visible:
-									{{ controlsVisible }}
-								</div>
 								<div class="mt-2 flex gap-2">
 									<Button
 										size="sm"
@@ -278,7 +265,14 @@
 		<ServerMessageHandler />
 		<WorkaroundPlaybackStatusUpdater />
 		<WorkaroundUserStateNotifier />
-	</div>
+		<template #player>
+			<VideoControls
+				v-if="!showDisconnectedOverlay"
+				:slider-position="sliderPosition"
+				:true-position="truePosition"
+			/>
+		</template>
+	</RoomPlayerLayout>
 </template>
 
 <script lang="ts">
@@ -316,7 +310,6 @@ import {
 	onUnmounted,
 	nextTick,
 	provide,
-	useTemplateRef,
 } from "vue";
 import AddPreview from "@/components/AddPreview.vue";
 import { calculateCurrentPosition } from "ott-common/timestamp";
@@ -341,11 +334,11 @@ import { useStore } from "@/store";
 import { useI18n } from "vue-i18n";
 import { useRouter, useRoute } from "vue-router";
 import type { ServerMessageSync } from "ott-common/models/messages";
-import { useScreenOrientation, useMouseInElement } from "@vueuse/core";
+import { useScreenOrientation } from "@vueuse/core";
 import { KeyboardShortcuts, RoomKeyboardShortcutsKey } from "@/util/keyboard-shortcuts";
 import VideoControls from "@/components/controls/VideoControls.vue";
 import RestoreQueue from "@/components/RestoreQueue.vue";
-import VoteSkip from "@/components/VoteSkip.vue";
+import RoomPlayerLayout from "@/components/RoomPlayerLayout.vue";
 import { waitForToken } from "@/util/token";
 import { useSfx } from "@/plugins/sfx";
 import { secondsToTimestamp } from "@/util/timestamp";
@@ -355,7 +348,6 @@ import { isOfficialSite } from "@/util/misc";
 import { Visibility } from "ott-common/models/types";
 import { ChatPlacement, DEFAULT_CHAT_PANEL_WIDTH } from "@/stores/settings";
 
-const VIDEO_CONTROLS_HIDE_TIMEOUT = 3000;
 const QUEUE_TABS = ["queue", "add", "settings"] as const;
 const CHAT_PANEL_MIN_WIDTH = 280;
 
@@ -382,7 +374,7 @@ export default defineComponent({
 		WorkaroundPlaybackStatusUpdater,
 		WorkaroundUserStateNotifier,
 		RestoreQueue,
-		VoteSkip,
+		RoomPlayerLayout,
 		Badge,
 		Button,
 		Card,
@@ -406,50 +398,6 @@ export default defineComponent({
 		const { t } = useI18n();
 		const router = useRouter();
 		const route = useRoute();
-
-		// video control visibility
-		const controlsVisible = ref(true);
-		const videoControlsHideTimeout = ref<ReturnType<typeof setTimeout> | null>(null);
-		const playerContainer = useTemplateRef<HTMLDivElement>("playerContainer");
-		const mouse = useMouseInElement(playerContainer);
-		const isIframeBasedPlayer = ref(false);
-
-		function setVideoControlsVisibility(visible: boolean) {
-			controlsVisible.value = visible;
-			if (videoControlsHideTimeout.value) {
-				clearTimeout(videoControlsHideTimeout.value);
-				videoControlsHideTimeout.value = null;
-			}
-		}
-		/**
-		 * Show the video controls, then hide them after `VIDEO_CONTROLS_HIDE_TIMEOUT` milliseconds.
-		 */
-		function activateVideoControls() {
-			setVideoControlsVisibility(true);
-			if (controlsMode.value !== "outside-video") {
-				videoControlsHideTimeout.value = setTimeout(() => {
-					setVideoControlsVisibility(false);
-				}, VIDEO_CONTROLS_HIDE_TIMEOUT);
-			}
-		}
-
-		watch([mouse.x, mouse.y], () => {
-			if (!store.state.room.isPlaying) {
-				setVideoControlsVisibility(true);
-				return;
-			}
-
-			// For non-iframe players, only show controls when mouse is inside the player
-			if (!isIframeBasedPlayer.value && mouse.isOutside.value) {
-				return;
-			}
-
-			activateVideoControls();
-		});
-
-		const controlsMode = computed(() =>
-			currentSource.value?.service === "youtube" ? "outside-video" : "in-video",
-		);
 
 		// actively calculate the current position of the video
 		const truePosition = ref(0);
@@ -669,11 +617,6 @@ export default defineComponent({
 
 		async function onPlaybackChange(changeTo: boolean) {
 			console.debug(`onPlaybackChange: ${changeTo}`);
-			if (!changeTo) {
-				setVideoControlsVisibility(true);
-			} else {
-				activateVideoControls();
-			}
 			if (changeTo === store.state.room.isPlaying) {
 				return;
 			}
@@ -687,8 +630,6 @@ export default defineComponent({
 			) {
 				onPlayerReadyApplyRoomState();
 			}
-			isIframeBasedPlayer.value = !!playerContainer.value?.querySelector("iframe");
-			console.log("isIframeBasedPlayer:", isIframeBasedPlayer.value);
 		}
 		// Iframe-based players can (re)enter the ready state without having the room's current
 		// position/play state applied yet (e.g. YouTube's native-controls toggle remounts the
@@ -804,6 +745,16 @@ export default defineComponent({
 			debugMode.value = !debugMode.value;
 		});
 		function onKeyDown(e: KeyboardEvent) {
+			// Focused widgets own Space and arrow keys; do not issue a second command.
+			if (
+				e.defaultPrevented ||
+				(e.target instanceof Element &&
+					e.target.closest(
+						'button, a, input, textarea, select, [role="slider"], [role="tab"], [role="menuitem"], [contenteditable="true"]',
+					))
+			) {
+				return;
+			}
 			shortcuts.handleKeyDown(e);
 		}
 		provide(RoomKeyboardShortcutsKey, shortcuts);
@@ -906,10 +857,6 @@ export default defineComponent({
 			granted,
 			isOfficialSite,
 
-			controlsVisible,
-			videoControlsHideTimeout,
-			controlsMode,
-
 			truePosition,
 			sliderPosition,
 
@@ -968,3 +915,29 @@ export default defineComponent({
 	},
 });
 </script>
+
+<style scoped>
+.room-media-grid {
+	display: grid;
+	width: 100%;
+	min-width: 0;
+	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-rows: minmax(400px, 70vh);
+}
+.room-content[data-layout="theater"] .room-media-grid {
+	grid-template-rows: minmax(400px, 85vh);
+}
+@media (max-width: 1023px) {
+	/* Keep a real source surface, including YouTube's 200px minimum height. */
+	.room-media-grid,
+	.room-content[data-layout="theater"] .room-media-grid {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-rows: max(200px, min(50dvh, 56.25vw)) auto;
+	}
+}
+.room-content[data-fullscreen="true"] .room-media-grid {
+	height: calc(var(--room-viewport-height, 100dvh) - var(--room-player-height, 160px));
+	grid-template-columns: minmax(0, 1fr);
+	grid-template-rows: minmax(0, 1fr);
+}
+</style>
