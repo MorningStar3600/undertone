@@ -15,8 +15,10 @@ import { musicImportModels } from "../../models/music-imports.js";
 import { createMusicModels } from "../../models/music.js";
 import { MusicCatalogue, subscribeCatalogueChanges } from "../../music/catalogue.js";
 import type { CollectionPage } from "../../serviceadapter.js";
-import { DEFAULT_MOODS } from "ott-common/models/music.js";
+import { DEFAULT_MOODS, type CatalogueChange } from "ott-common/models/music.js";
 import { createImportWorker } from "../../music/import-worker.js";
+import { RoomMusic } from "../../music/room-music.js";
+import { SqlMusicRoomStore } from "../../music/room-music-storage.js";
 
 vi.mock("../../infoextractor.js", () => ({ default: {} }));
 const PRIVATE_REPORT_FIELDS = /private URL|providerId|cursor|leaseToken|key/;
@@ -67,6 +69,101 @@ describe("durable playlist reference imports", () => {
 		vi.restoreAllMocks();
 	});
 	const register = () => ({ reference: { service: "youtube", id: "PLexample" } });
+	it.each(["metadata", "availability"])(
+		"refreshes every owner's room after shared %s changes",
+		async change => {
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const track = await f.catalogue.addLibraryTrack(2, {
+				reference: { service: "youtube", id: "recording-a" },
+			});
+			await f.models.TrackSource.update(
+				{ availability: change === "availability" ? "unavailable" : "available" },
+				{ where: { trackId: track.id } },
+			);
+			const room = new RoomMusic(
+				"other-owner",
+				() => ["account:2"],
+				async () => undefined,
+				f.catalogue,
+				new SqlMusicRoomStore(() => f.connection),
+			);
+			await room.refresh(true);
+			const before = await f.catalogue.roomVersions([2]);
+			const updated = page(["recording-a"]);
+			updated.entries[0].video.title = change === "metadata" ? "Updated title" : "Same title";
+			updated.entries[0].video.thumbnail = "https://media.example/cover.jpg";
+			fetchPage.mockResolvedValue(updated);
+			const source = await imports.create(1, register());
+			await imports.run(1, source.id);
+			const notices: CatalogueChange[] = [];
+			const stop = subscribeCatalogueChanges(event => {
+				notices.push(event);
+			});
+			try {
+				await imports.step();
+				expect(await f.catalogue.roomVersions([2])).not.toBe(before);
+				expect(notices).toContainEqual({
+					kind: "metadata",
+					userId: 2,
+					trackId: track.id,
+					action: "updated",
+				});
+				expect(notices).toContainEqual({
+					kind: "library",
+					userId: 1,
+					trackId: track.id,
+					action: "added",
+				});
+				expect(notices).toHaveLength(2);
+				// No local notification subscription: another monolith observes the durable version.
+				now += 6000;
+				await room.refresh();
+				expect(room.state!.candidates).toHaveLength(1);
+				expect(room.state!.candidates[0].mediaRef).toMatchObject({
+					title: updated.entries[0].video.title,
+				});
+				const versions = await f.catalogue.roomVersions([1, 2]);
+				notices.length = 0;
+				await imports.run(1, source.id);
+				await imports.step();
+				expect(await f.catalogue.roomVersions([1, 2])).toBe(versions);
+				expect(notices).toHaveLength(0);
+			} finally {
+				stop();
+			}
+		},
+	);
+	it("rolls back shared metadata and all owner versions before notifying a committed retry", async () => {
+		const track = await f.catalogue.addLibraryTrack(2, {
+			reference: { service: "youtube", id: "recording-a" },
+		});
+		const before = await f.catalogue.roomVersions([1, 2]);
+		const updated = page(["recording-a"]);
+		updated.entries[0].video.title = "Updated title";
+		fetchPage.mockResolvedValue(updated);
+		const source = await imports.create(1, register());
+		await imports.run(1, source.id);
+		vi.spyOn(musicImportModels(f.connection).Provenance, "upsert").mockRejectedValueOnce(
+			new Error("rollback page"),
+		);
+		const notices: CatalogueChange[] = [];
+		const stop = subscribeCatalogueChanges(event => {
+			notices.push(event);
+		});
+		try {
+			await imports.step();
+			expect(await f.catalogue.roomVersions([1, 2])).toBe(before);
+			expect((await f.catalogue.getTrack(track.id)).title).toBe("Same title");
+			expect(notices).toHaveLength(0);
+			now += IMPORT_LEASE;
+			await imports.step();
+			expect(await f.catalogue.roomVersions([1, 2])).not.toBe(before);
+			expect((await f.catalogue.getTrack(track.id)).title).toBe("Updated title");
+			expect(notices.map(event => event.userId).sort()).toEqual([1, 2]);
+		} finally {
+			stop();
+		}
+	});
 	it("starts idle, paginates beyond fifty, deduplicates reruns and retains disappeared tracks and annotations", async () => {
 		expect(await imports.step()).toBe(false);
 		expect(fetchPage).not.toHaveBeenCalled();

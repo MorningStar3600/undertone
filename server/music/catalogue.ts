@@ -373,20 +373,28 @@ export class MusicCatalogue {
 	) {
 		const added: string[] = [];
 		const trackIds: string[] = [];
+		const changedTracks = new Set<string>();
 		for (const { reference, video } of entries) {
 			MusicReferenceSchema.parse(reference);
 			const { track, source } = await this.storeResolved(reference, video, transaction);
 			trackIds.push(track.id);
-			await this.models().Track.update(
-				{
-					title: safeTrackTitle(video.title),
-					artworkUrl: safeArtwork(video.thumbnail),
-					...(Number.isFinite(video.length) && video.length! >= 0
-						? { duration: video.length }
-						: {}),
-				},
-				{ where: { id: track.id }, transaction },
-			);
+			const metadata = {
+				title: safeTrackTitle(video.title),
+				artworkUrl: safeArtwork(video.thumbnail),
+				duration:
+					Number.isFinite(video.length) && video.length! >= 0
+						? video.length!
+						: track.duration,
+			};
+			if (
+				metadata.title !== track.title ||
+				metadata.artworkUrl !== track.artworkUrl ||
+				metadata.duration !== track.duration ||
+				source.availability !== "available"
+			) {
+				changedTracks.add(track.id);
+			}
+			await this.models().Track.update(metadata, { where: { id: track.id }, transaction });
 			await this.models().TrackSource.update(
 				{ availability: "available" },
 				{ where: { id: source.id }, transaction },
@@ -400,14 +408,45 @@ export class MusicCatalogue {
 				added.push(track.id);
 			}
 		}
-		if (entries.length) {
-			await this.invalidateRoomUser(userId, transaction);
+		const changes = new Map<string, CatalogueChange>();
+		for (const trackId of added) {
+			changes.set(`${userId}:${trackId}`, {
+				kind: "library",
+				userId,
+				trackId,
+				action: "added",
+			});
 		}
-		return { added, trackIds };
+		if (changedTracks.size) {
+			const owners = await this.models().UserLibraryTrack.findAll({
+				attributes: ["userId", "trackId"],
+				where: { trackId: { [Op.in]: [...changedTracks] } },
+				transaction,
+			});
+			for (const owner of owners) {
+				const { userId: affectedUserId, trackId } = owner.get();
+				const key = `${affectedUserId}:${trackId}`;
+				if (!changes.has(key)) {
+					changes.set(key, {
+						kind: "metadata",
+						userId: affectedUserId,
+						trackId,
+						action: "updated",
+					});
+				}
+			}
+		}
+		// Capture recipients and versions in the same transaction as the shared metadata.
+		for (const affectedUserId of [
+			...new Set([...changes.values()].map(change => change.userId)),
+		].sort((a, b) => a - b)) {
+			await this.invalidateRoomUser(affectedUserId, transaction);
+		}
+		return { added, trackIds, changes: [...changes.values()] };
 	}
-	async notifyImported(userId: number, trackIds: string[]) {
-		for (const trackId of new Set(trackIds)) {
-			await notify({ kind: "library", userId, trackId, action: "added" });
+	async notifyImported(changes: CatalogueChange[]) {
+		for (const change of changes) {
+			await notify(change);
 		}
 	}
 

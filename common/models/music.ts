@@ -136,6 +136,7 @@ export interface MusicQueueItem extends QueueItem {
 }
 
 export type CatalogueChange =
+	| { kind: "metadata"; userId: number; trackId: TrackId; action: "updated" }
 	| { kind: "library"; userId: number; trackId: TrackId; action: "added" | "removed" }
 	| {
 			kind: "annotation";

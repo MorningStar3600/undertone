@@ -99,7 +99,9 @@ are exported from `server/models/music.ts` for isolated tests. Normal applicatio
   needed: `MusicQueueItem` is a compatible subtype for the integrator to use.
 - `subscribeCatalogueChanges` receives committed, actual changes:
   `{ kind: "library", userId, trackId, action: "added" | "removed" }` or
-  `{ kind: "annotation", userId, trackId, moodId, action }`. Listeners run after the DB transaction
+  `{ kind: "annotation", userId, trackId, moodId, action }`. Shared metadata imports also emit
+  `{ kind: "metadata", userId, trackId, action: "updated" }` for every affected library owner.
+  Listeners run after the DB transaction
   and outside the writer mutex, may return a promise, and are isolated from write responses if they
   throw. Favorites and repeated no-ops emit nothing. The future Room integrator should invalidate
   affected candidates and serialize replanning from this hook. It is process-local; cross-monolith

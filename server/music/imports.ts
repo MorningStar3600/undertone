@@ -446,7 +446,7 @@ export class MusicImports {
 		if (signal.aborted) {
 			return true;
 		}
-		let imported: string[];
+		let imported: Awaited<ReturnType<MusicCatalogue["importReferences"]>>["changes"];
 		try {
 			imported = await this.write(async transaction => {
 				const current = await this.source(source.userId, source.id, transaction);
@@ -511,7 +511,7 @@ export class MusicImports {
 						{ transaction },
 					);
 				}
-				return result.trackIds;
+				return result.changes;
 			});
 		} catch {
 			// A rolled-back page keeps its cursor. Persist bounded storage retries if SQL is available.
@@ -520,7 +520,7 @@ export class MusicImports {
 			}
 			return true;
 		}
-		await this.catalogue.notifyImported(source.userId, imported);
+		await this.catalogue.notifyImported(imported);
 		return true;
 	}
 	private async fail(

@@ -70,6 +70,10 @@ replays that page idempotently. Room notifications happen after commit. Imported
 source-derived, never title-derived. Provenance is retained independently of personal
 library membership. Available entries refresh public metadata; private/deleted/live or
 unplayable entries increment unavailable counts without deleting previously known data.
+When shared track metadata or source availability changes, the same transaction advances
+every affected library owner's version. Postcommit `metadata` notifications carry those
+owners and track IDs; a new membership uses its existing `library/added` notification.
+Unchanged replay pages do not advance catalogue versions or emit redundant notifications.
 
 Five consecutive provider/storage failures use delays of 30s, 60s, 120s, 240s, then fail with saved
 progress (maximum computed backoff 1h). Manual retry resets the consecutive retry budget,
