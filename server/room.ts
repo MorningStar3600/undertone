@@ -131,12 +131,11 @@ export class RoomUser {
 			this.playerStatus = info.status;
 		}
 		if (info.user_id) {
-			this.user_id = info.user_id;
-			if (this.user?.id !== info.user_id) {
-				this.user = null;
-			}
 			const user = await usermanager.getUser({ id: info.user_id });
 			if (revision === this.infoRevision) {
+				// Publish account identity and its display record together. A tentative
+				// identity must not hide the change from a superseding status refresh.
+				this.user_id = info.user_id;
 				this.user = user;
 			}
 		} else if (info.username !== undefined) {

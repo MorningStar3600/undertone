@@ -534,6 +534,55 @@ describe("Music authorization inside persistence", () => {
 			{ type: RoomRequestType.SkipRequest },
 			{ clientId: id, token },
 		);
+	it("reconciles a switch to an existing participant when a status update supersedes it", async () => {
+		await addVoters();
+		await fixture.catalogue.addLibraryTrack(2, {
+			reference: { service: "youtube", id: "other" },
+		});
+		await room.musicEngine.refresh(true);
+		const held = gate();
+		vi.mocked(tokens.getSessionInfo).mockResolvedValue({ isLoggedIn: true, user_id: 2 });
+		vi.mocked(usermanager.getUser).mockImplementationOnce(async () => {
+			held.enter();
+			await held.waiting;
+			return { id: 2, username: "two" } as User;
+		});
+		const update = (status: PlayerStatus) =>
+			room.processUnauthorizedRequest(
+				{
+					type: RoomRequestType.UpdateUser,
+					info: { id: "tab1", status },
+				},
+				{ clientId: "tab1", token: "member" },
+			);
+		const delayed = update(PlayerStatus.buffering);
+		await held.entered;
+		expect(room.getUser("tab1")!.user_id).toBe(1);
+		await update(PlayerStatus.ready);
+		held.release();
+		await delayed;
+		expect(room.music!.participants.map(p => p.participantId)).toEqual(["account:2"]);
+		expect((await store.load(room.name))!.state.participants.map(p => p.participantId)).toEqual(
+			["account:2"],
+		);
+		expect(room.musicState!.candidates.every(c => c.contributorId === "account:2")).toBe(true);
+		await room.dequeueNext();
+		await room.play();
+		expect(room.musicState!.queue.every(e => e.contributorId === "account:2")).toBe(true);
+	});
+	it("detects changed membership despite unchanged catalogue keys and an active poll throttle", async () => {
+		await addVoters();
+		await room.musicEngine.refresh(true);
+		const versions = await fixture.catalogue.roomVersions([1, 2]);
+		await room.getUser("tab1")!.updateSession({ isLoggedIn: true, user_id: 2 });
+		expect(await fixture.catalogue.roomVersions([1, 2])).toBe(versions);
+		await room.musicEngine.refresh();
+		expect(room.music!.participants.map(p => p.participantId)).toEqual(["account:2"]);
+		expect(room.musicState!.candidates).toEqual([]);
+		const snapshot = vi.spyOn(fixture.catalogue, "roomSnapshot");
+		await room.musicEngine.refresh();
+		expect(snapshot).not.toHaveBeenCalled();
+	});
 
 	it("preserves a valid skip vote through status and display-name refreshes", async () => {
 		await room.dequeueNext();

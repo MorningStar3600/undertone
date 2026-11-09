@@ -393,13 +393,19 @@ export class RoomMusic {
 		await this.lock.protect(async () => {
 			await this.initializeLocked();
 			const now = Date.now();
-			if (!force && !this.invalid && now < this.nextVersionCheck) {
+			// Membership is independent of catalogue versions: retained occurrences can
+			// keep the same account keys after a connection changes identity.
+			const identitiesChanged =
+				JSON.stringify([...new Set(this.people())].sort()) !==
+				JSON.stringify(this.value!.state.participants.map(p => p.participantId).sort());
+			if (!force && !this.invalid && !identitiesChanged && now < this.nextVersionCheck) {
 				return;
 			}
 			const accounts = this.versionAccounts();
 			if (
 				force ||
 				this.invalid ||
+				identitiesChanged ||
 				(await this.catalogue.roomVersions(accounts)) !== this.versions ||
 				(await this.catalogue.roomTrackVersions(this.occurrenceTrackIds())) !==
 					this.occurrenceVersions()

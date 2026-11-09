@@ -363,6 +363,10 @@ superseded updates also skip vote and Room refresh side effects. Music command g
 are checked against the live session role at every authorization boundary, independent
 of the cached display-user object. Status/name-only refreshes retain valid skip votes;
 identity, connection, role, grants or occurrence changes invalidate their binding.
+Account IDs and their display records become visible together after a current lookup.
+Room refresh also compares committed participants with live connection identities before
+the catalogue polling throttle, so superseded updates cannot leave departed libraries
+eligible merely because retained contributions keep the same version keys.
 
 The follow-up `room-music-persistence.spec.ts` covers real SQLite writer contention,
 revocation/cancellation/logout/departure, SQL rollback and retries, bounded waiters,
