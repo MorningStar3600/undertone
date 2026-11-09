@@ -62,6 +62,11 @@ export const recordPlaybackStarted = (
 		}
 		return history;
 	}
+	if (history.events.some(event => event.entry.entryId === entry.entryId)) {
+		throw new MusicSchedulingException(
+			"Occurrence already started under another playback identity",
+		);
+	}
 	const initialized = initializeContributor(history, entry.contributorId, []);
 	return {
 		...initialized,
@@ -105,7 +110,9 @@ export const recordPlaybackSource = (
 ): MusicPlaybackHistory => ({
 	...history,
 	events: history.events.map(event =>
-		event.playbackId === playbackId ? { ...event, actualSourceId: sourceId } : event,
+		event.playbackId === playbackId && event.endedAt === undefined
+			? { ...event, actualSourceId: sourceId }
+			: event,
 	),
 });
 

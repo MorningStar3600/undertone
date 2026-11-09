@@ -61,6 +61,91 @@ const loadAndStart = (state: MusicSchedulerState, playbackId: string): MusicSche
 };
 
 describe("music scheduler invariants", () => {
+	it("rejects a late source update after the current passage has ended", () => {
+		const started = loadAndStart(setup(["X"]), "p1");
+		const ended = apply(started, {
+			type: "ended",
+			playbackId: "p1",
+			reason: "finished",
+			now: 12,
+		});
+		const result = transitionMusicScheduler(
+			ended,
+			{
+				type: "update-source",
+				entryId: ended.current!.entry.entryId,
+				candidate: { ...ended.current!.entry, sourceId: "never-played" },
+				now: 13,
+			},
+			{ expectedRevision: ended.revision },
+		);
+		expect(result.status).toBe("not-found");
+		expect(result.state).toBe(ended);
+		expect(restoreMusicScheduler(serializeMusicScheduler(ended))).toEqual(ended);
+	});
+	it.each(["entryId", "trackId", "contributorId"] as const)(
+		"rejects restored current %s differing from its historical occurrence",
+		field => {
+			const started = loadAndStart(setup(["X"]), "p1");
+			const altered = structuredClone(started);
+			const replacements = {
+				entryId: altered.queue.shift()!.entryId,
+				trackId: "different",
+				contributorId: "different",
+			};
+			altered.current!.entry[field] = replacements[field];
+			expect(() => restoreMusicScheduler(altered)).toThrow("Inconsistent scheduler snapshot");
+		},
+	);
+	it("restores a valid source fallback without changing occurrence identity", () => {
+		const started = loadAndStart(setup(["X"]), "p1");
+		const fallback = apply(started, {
+			type: "update-source",
+			entryId: started.current!.entry.entryId,
+			candidate: { ...started.current!.entry, sourceId: "equivalent-source" },
+			now: 12,
+		});
+		expect(restoreMusicScheduler(serializeMusicScheduler(fallback))).toEqual(fallback);
+		expect(contributionScore(fallback.history, "X")).toBe(1);
+	});
+	it("rejects consumed occurrences in future queues or under new playback identities", () => {
+		const started = loadAndStart(setup(["X"]), "p1");
+		const ended = apply(started, {
+			type: "ended",
+			playbackId: "p1",
+			reason: "finished",
+			now: 12,
+		});
+		const requeued = structuredClone(ended);
+		delete requeued.current;
+		requeued.queue.push(structuredClone(ended.history.events[0].entry));
+		expect(() => restoreMusicScheduler(requeued)).toThrow("Inconsistent scheduler snapshot");
+		const reloaded = structuredClone(ended);
+		reloaded.current!.playbackId = "p2";
+		reloaded.current!.started = false;
+		reloaded.loadedPlaybackIds.push("p2");
+		expect(() => restoreMusicScheduler(reloaded)).toThrow("Inconsistent scheduler snapshot");
+		const doubleCounted = structuredClone(ended);
+		doubleCounted.history.events.push({
+			...structuredClone(ended.history.events[0]),
+			playbackId: "p2",
+		});
+		doubleCounted.loadedPlaybackIds.push("p2");
+		doubleCounted.history.scores[0].plays++;
+		expect(() => restoreMusicScheduler(doubleCounted)).toThrow(
+			"Inconsistent scheduler snapshot",
+		);
+	});
+	it("rejects an empty request ID before changing sequences or admitting an occurrence", () => {
+		const state = setup(["X"]);
+		const before = structuredClone(state);
+		expect(() => add(state, "", "X", "mix", candidate("X", "manual"))).toThrow();
+		expect(state).toEqual(before);
+		expect(serializeMusicScheduler(state)).toEqual(before);
+		const accepted = add(state, "valid", "X", "mix", candidate("X", "manual"));
+		expect(accepted.nextRequestSequence).toBe(before.nextRequestSequence + 1);
+		expect(serializeMusicScheduler(accepted)).toEqual(accepted);
+	});
 	it("makes recent tracks less likely, with positive return probability and no source reset", () => {
 		const state = setup(["X"]);
 		const old = { ...candidate("X", "old"), artistIds: [], styleIds: [] };

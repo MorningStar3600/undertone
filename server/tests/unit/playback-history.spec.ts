@@ -48,10 +48,23 @@ describe("music playback history", () => {
 			recordPlaybackStarted(started, "p", { ...entry, entryId: "different" }, 2),
 		).toThrow("identity reused");
 	});
+	it("does not rewrite the source of a finished passage", () => {
+		const started = recordPlaybackStarted(createPlaybackHistory("r", "s"), "p", entry, 1);
+		const ended = recordPlaybackEnded(started, "p", 2, "finished");
+		expect(recordPlaybackSource(ended, "p", "late-source")).toEqual(ended);
+	});
+	it("requires a new occurrence identity for an explicit repeat", () => {
+		const started = recordPlaybackStarted(createPlaybackHistory("r", "s"), "p", entry, 1);
+		expect(() => recordPlaybackStarted(started, "p2", entry, 2)).toThrow(
+			"Occurrence already started",
+		);
+		const repeated = recordPlaybackStarted(started, "p2", { ...entry, entryId: "repeat" }, 2);
+		expect(contributionScore(repeated, "X")).toBe(2);
+	});
 	it("separates arrival base from real plays, and preserves returner debt", () => {
 		let history = createPlaybackHistory("r", "s");
 		for (let i = 0; i < 5; i++) {
-			history = recordPlaybackStarted(history, `p${i}`, entry, i);
+			history = recordPlaybackStarted(history, `p${i}`, { ...entry, entryId: `e${i}` }, i);
 		}
 		history = initializeContributor(history, "Y", ["X"]);
 		expect(history.scores.find(s => s.contributorId === "Y")).toEqual({
@@ -64,7 +77,12 @@ describe("music playback history", () => {
 	});
 	it("uses track-level recency, regardless of source, and never permanently bans a track", () => {
 		const first = recordPlaybackStarted(createPlaybackHistory("r", "s"), "p1", entry, 1);
-		const second = recordPlaybackStarted(first, "p2", { ...entry, trackId: "other" }, 2);
+		const second = recordPlaybackStarted(
+			first,
+			"p2",
+			{ ...entry, entryId: "e2", trackId: "other" },
+			2,
+		);
 		expect(trackRecencyDistance(first, "t")).toBe(0);
 		expect(trackRecencyDistance(second, "t")).toBe(1);
 		expect(trackRecencyDistance(second, "never")).toBeUndefined();

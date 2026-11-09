@@ -467,6 +467,7 @@ export const transitionMusicScheduler = (
 			}
 			break;
 		case "request": {
+			id.parse(command.requestId);
 			const existing = state.requests.find(
 				request => request.requestId === command.requestId,
 			);
@@ -642,6 +643,13 @@ export const transitionMusicScheduler = (
 			break;
 		}
 		case "update-source": {
+			if (
+				state.history.events.some(
+					event => event.entry.entryId === command.entryId && event.endedAt !== undefined,
+				)
+			) {
+				return unchanged("not-found");
+			}
 			const entry =
 				state.current?.entry.entryId === command.entryId
 					? state.current.entry
@@ -811,6 +819,22 @@ export const restoreMusicScheduler = (serialized: unknown): MusicSchedulerState 
 		plays.set(event.entry.contributorId, (plays.get(event.entry.contributorId) ?? 0) + 1);
 	}
 	const scoreIds = new Set(state.history.scores.map(score => score.contributorId));
+	const consumedEntryIds = new Set([
+		...state.history.events.map(event => event.entry.entryId),
+		...state.requests
+			.filter(request => request.status === "consumed")
+			.map(request => request.entryId),
+	]);
+	const current = state.current;
+	const currentEvent = current
+		? state.history.events.find(event => event.playbackId === current.playbackId)
+		: undefined;
+	const sameOccurrence = (a: MusicQueueEntry, b: MusicQueueEntry): boolean =>
+		a.entryId === b.entryId &&
+		a.trackId === b.trackId &&
+		a.contributorId === b.contributorId &&
+		a.origin === b.origin &&
+		a.requestId === b.requestId;
 	const automaticEntries = [
 		...state.queue,
 		...(state.current ? [state.current.entry] : []),
@@ -841,6 +865,15 @@ export const restoreMusicScheduler = (serialized: unknown): MusicSchedulerState 
 		!unique(state.participantOrder) ||
 		!unique(state.participants.map(p => p.participantId)) ||
 		!unique(state.history.events.map(e => e.playbackId)) ||
+		!unique(state.history.events.map(e => e.entry.entryId)) ||
+		state.queue.some(entry => consumedEntryIds.has(entry.entryId)) ||
+		(current && currentEvent && !sameOccurrence(current.entry, currentEvent.entry)) ||
+		(current &&
+			state.history.events.some(
+				event =>
+					event.entry.entryId === current.entry.entryId &&
+					event.playbackId !== current.playbackId,
+			)) ||
 		!unique(state.loadedPlaybackIds) ||
 		!unique(state.history.scores.map(s => s.contributorId)) ||
 		state.history.scores.some(score => score.plays !== (plays.get(score.contributorId) ?? 0)) ||
