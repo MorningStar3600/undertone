@@ -296,6 +296,11 @@ export class Room implements RoomState {
 				this.musicDependencies.catalogue,
 				this.musicDependencies.store,
 				this.restoredMusicState,
+				() =>
+					this.realusers.map(user => ({
+						participantId: musicIdentity(user),
+						name: this.getUserInfo(user.id).name,
+					})),
 			);
 		}
 		return this._music;

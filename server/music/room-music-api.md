@@ -290,8 +290,8 @@ MusicReferenceSchema and performs the existing room ownership/grant checks.
 Catalogue sources remain keyed by stable provider identity, never stream URL or title.
 
 The final optional RoomMusic constructor argument is an authoritative display-name
-callback after redisSnapshot. The concurrent Room boundary lot owns Room.ts wiring
-via Room/getUserInfo and musicIdentity (guest public names included). Direct callback
-fixtures cover this lot; the manager must check the integrated real Room name path.
+callback after redisSnapshot. Room supplies getUserInfo display names and musicIdentity
+(guest public names included). Direct callback fixtures and an integrated Room private
+guest-conflict/confirmation regression cover this path.
 No changes to commit, setPlayback, advance, context, authorization, SQLite transactions
 or scheduler semantics are included here. Independent integrated review is required.

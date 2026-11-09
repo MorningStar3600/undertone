@@ -86,6 +86,79 @@ describe("Music Room protocol and durable transactions", () => {
 		);
 	const manual = async (id: string, intent = "mix") =>
 		execute({ action: "request", requestId: randomUUID(), reference: reference(id), intent });
+	it("supplies authoritative guest names through Room's real private confirmation path", async () => {
+		const author = new RoomUser("guest-author", "guest-author-token");
+		author.unregisteredUsername = "Guest requester";
+		const excluder = new RoomUser("guest-excluder", "guest-excluder-token");
+		excluder.unregisteredUsername = "Guest listener";
+		room.realusers.push(author, excluder);
+		vi.spyOn(tokens, "getSessionInfo").mockResolvedValue({
+			isLoggedIn: false,
+			username: author.username,
+		});
+		const mood = await fixture.catalogue.createMood(2, {
+			name: "Guest custom conflict",
+			iconKey: "moon",
+		});
+		const { track } = await fixture.catalogue.resolveTrack(reference("guest-real-room"));
+		await fixture.catalogue.setTrackMood(2, track.id, mood.id, true);
+		await room.musicEngine.refresh(true);
+		await execute(
+			{ action: "preferences", includeMoodIds: [], excludeMoodIds: [mood.id] },
+			musicIdentity(excluder),
+		);
+		const send = (action: Record<string, unknown>) =>
+			room.processUnauthorizedRequest(
+				{
+					type: RoomRequestType.MusicRoomRequest,
+					command: MusicRoomActionSchema.parse({
+						expectedRevision: room.music!.revision,
+						correlationId: randomUUID(),
+						...action,
+					}),
+				},
+				{ clientId: author.id, token: author.token },
+			);
+		await send({
+			action: "request",
+			requestId: "guest-real-request",
+			reference: reference("guest-real-room"),
+			intent: "mix",
+		});
+		expect(room.command).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				type: "send",
+				clientId: author.id,
+				message: expect.objectContaining({
+					action: "music-result",
+					result: expect.objectContaining({
+						status: "confirmation-required",
+						request: expect.objectContaining({
+							conflictMetadata: [
+								{
+									participantId: musicIdentity(excluder),
+									moodId: mood.id,
+									mood,
+									participantName: "Guest listener",
+								},
+							],
+						}),
+					}),
+				}),
+			}),
+		);
+		expect(room.music!.ruleMoods).toContainEqual(mood);
+		await send({
+			action: "confirm",
+			requestId: "guest-real-request",
+			trackId: track.id,
+			conflicts: [{ participantId: musicIdentity(excluder), moodId: mood.id }],
+		});
+		expect(
+			room.musicState!.requests.find(request => request.requestId === "guest-real-request")
+				?.status,
+		).toBe("admitted");
+	});
 	it("discovers old and off-page pending requests without leaking another author's history", async () => {
 		const early = await manual("early");
 		const { track } = await fixture.catalogue.resolveTrack(reference("early"));

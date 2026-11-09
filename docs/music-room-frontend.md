@@ -97,13 +97,12 @@ keyboard/safe-area behavior. No browser layout verification is implied by tests.
   directly in the bounded pending view. Cancellation, next-slot conflicts and
   requestId idempotence use the existing protocol.
 
-Integration handoff: RoomMusic accepts an optional final constructor callback
+RoomMusic accepts an optional final constructor callback
 `names: () => { participantId: string; name: string }[]`, after redisSnapshot.
-The concurrent Room boundary correction owns the Room.ts wiring: supply public
-authoritative names via Room/getUserInfo with musicIdentity, including guests.
-This implementation tests the callback directly; the integrated real Room name
-path still needs validation by the manager. No commit/playback/context/scheduler
-or authorization semantics are changed in this lot.
+Room supplies authoritative names via getUserInfo and musicIdentity, including guests.
+The integrated Room regression exercises a guest's private custom-mood conflict and
+confirmation through processUnauthorizedRequest. No commit/playback/context/scheduler
+or authorization semantics are changed by this name callback.
 
 Playlist library jobs are owned by a concurrent lot; recommendations and listening
 history browsing remain later lots.
@@ -136,7 +135,7 @@ pending requests, old requests invalidated now, private dispatch and account/gue
 isolation. The production build emits dependency pure-annotation and locale
 dynamic-import warnings; Vitest reports existing legacy component/Sass warnings.
 These are implementation checks, not independent review or live browser, provider,
-PostgreSQL or Redis validation. The Room name callback integration remains as above.
+PostgreSQL or Redis validation. The Room name callback integration is covered as above.
 
 Exact focused suites (pinned Yarn via `node .yarn/releases/yarn-4.1.0.cjs`):
 
