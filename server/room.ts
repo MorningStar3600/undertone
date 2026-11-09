@@ -98,6 +98,7 @@ export class RoomUser {
 	unregisteredUsername = "";
 	user: User | null;
 	playerStatus: PlayerStatus = PlayerStatus.none;
+	private infoRevision = 0;
 
 	constructor(id: ClientId, token: AuthToken) {
 		this.id = id;
@@ -118,26 +119,50 @@ export class RoomUser {
 	}
 
 	public async updateInfo(info: ClientInfo): Promise<void> {
+		const revision =
+			info.user_id || info.username !== undefined ? ++this.infoRevision : this.infoRevision;
+		await this.applyInfo(info, revision);
+	}
+	private async applyInfo(info: ClientInfo, revision: number): Promise<boolean> {
+		if (revision !== this.infoRevision) {
+			return false;
+		}
+		if (info.status !== undefined) {
+			this.playerStatus = info.status;
+		}
 		if (info.user_id) {
 			this.user_id = info.user_id;
-			this.user = await usermanager.getUser({ id: info.user_id });
+			if (this.user?.id !== info.user_id) {
+				this.user = null;
+			}
+			const user = await usermanager.getUser({ id: info.user_id });
+			if (revision === this.infoRevision) {
+				this.user = user;
+			}
 		} else if (info.username !== undefined) {
 			this.unregisteredUsername = info.username;
 			this.user_id = undefined;
 			this.user = null;
 		}
-		if (info.status) {
-			this.playerStatus = info.status;
-		}
+		return revision === this.infoRevision;
 	}
-	public async updateSession(session: SessionInfo, status?: PlayerStatus): Promise<void> {
-		await this.updateInfo({
-			id: this.id,
-			...(session.isLoggedIn
-				? { user_id: session.user_id }
-				: { username: session.username ?? this.unregisteredUsername }),
-			status,
-		});
+	public async updateSession(
+		pending: SessionInfo | Promise<SessionInfo>,
+		status?: PlayerStatus,
+	): Promise<boolean> {
+		// Reserve before session I/O as well as the account lookup: a newer logout wins.
+		const revision = ++this.infoRevision;
+		const session = await pending;
+		return this.applyInfo(
+			{
+				id: this.id,
+				...(session.isLoggedIn
+					? { user_id: session.user_id }
+					: { username: session.username ?? this.unregisteredUsername }),
+				status,
+			},
+			revision,
+		);
 	}
 }
 
@@ -334,7 +359,11 @@ export class Room implements RoomState {
 		}
 	};
 	/** Capture the connection, then check its live session/role at the commit boundary. */
-	private musicPlaybackAuthorization(context: RoomRequestContext, permission?: string) {
+	private musicPlaybackAuthorization(
+		context: RoomRequestContext,
+		permission?: string,
+		authorizeRole?: (role: Role) => void,
+	) {
 		const user = context.clientId ? this.getUser(context.clientId) : undefined;
 		if (!user) {
 			throw new MusicRoomException("Join the room before controlling music playback");
@@ -356,12 +385,13 @@ export class Room implements RoomState {
 			) {
 				throw new MusicRoomException("Music playback membership or session changed");
 			}
+			const role = session.isLoggedIn
+				? this.getRoleFromSession(session)
+				: Role.UnregisteredUser;
 			if (permission) {
-				this.grants.check(
-					session.isLoggedIn ? this.getRoleFromSession(session) : Role.UnregisteredUser,
-					permission,
-				);
+				this.grants.check(role, permission);
 			}
+			authorizeRole?.(role);
 		};
 	}
 	public async musicRequest(
@@ -432,13 +462,7 @@ export class Room implements RoomState {
 		) {
 			this.grants.check(context.role, "manage-queue.order");
 		}
-		const authenticate = this.musicPlaybackAuthorization(context);
-		const authorize = async () => {
-			await authenticate();
-			if (this.queueMode !== QueueMode.Music || this.getUser(user.id) !== user) {
-				throw new MusicRoomException("Music room membership changed");
-			}
-			const role = this.getRole(user);
+		const authorize = this.musicPlaybackAuthorization(context, undefined, role => {
 			const perm =
 				action.action === "request" || action.action === "confirm"
 					? "manage-queue.add"
@@ -460,7 +484,7 @@ export class Room implements RoomState {
 			) {
 				this.grants.check(role, "manage-queue.order");
 			}
-		};
+		});
 		const result = await this.musicEngine.execute(action, musicIdentity(user), authorize);
 		await this.command({
 			type: "send",
@@ -1804,8 +1828,10 @@ export class Room implements RoomState {
 			if (request.info.id !== context.clientId) {
 				throw new MusicRoomException("Connection identity mismatch");
 			}
-			const session = await tokens.getSessionInfo(context.auth.token);
-			await user.updateSession(session, request.info.status);
+			await user.updateSession(
+				tokens.getSessionInfo(context.auth.token),
+				request.info.status,
+			);
 		} else {
 			await user.updateInfo(request.info);
 		}
@@ -1865,12 +1891,33 @@ export class Room implements RoomState {
 					const person = this.realusers[i];
 					const previousIdentity = musicIdentity(person),
 						previousName = person.username;
-					const session = await tokens.getSessionInfo(person.token);
-					await person.updateSession(session, request.info.status);
-					this.musicSkipVotes.delete(person.id);
-					this.votesToSkip.delete(person.id);
-					this.markDirty("votesToSkip");
-					if (previousIdentity !== musicIdentity(person)) {
+					if (
+						!(await person.updateSession(
+							tokens.getSessionInfo(person.token),
+							request.info.status,
+						)) ||
+						this.getUser(person.id) !== person
+					) {
+						return;
+					}
+					const identityChanged = previousIdentity !== musicIdentity(person);
+					const vote = this.musicSkipVotes.get(person.id);
+					const role = this.getRole(person);
+					if (
+						identityChanged ||
+						(vote &&
+							(vote.user !== person ||
+								vote.token !== person.token ||
+								vote.identity !== musicIdentity(person) ||
+								vote.role !== role ||
+								vote.mask !== this.grants.getMask(role) ||
+								vote.playbackId !== this.music?.current?.playbackId))
+					) {
+						this.musicSkipVotes.delete(person.id);
+						this.votesToSkip.delete(person.id);
+						this.markDirty("votesToSkip");
+					}
+					if (identityChanged) {
 						await this.musicEngine.refresh(true);
 					} else if (previousName !== person.username) {
 						this.markDirty("music");
@@ -2061,8 +2108,7 @@ export class Room implements RoomState {
 		if (request.settings.queueMode === QueueMode.Music && this.queueMode !== QueueMode.Music) {
 			// Legacy cached ClientInfo is not an authority for account libraries or ownership.
 			for (const user of this.realusers) {
-				const session = await tokens.getSessionInfo(user.token);
-				await user.updateSession(session);
+				await user.updateSession(tokens.getSessionInfo(user.token));
 			}
 			if (context.auth) {
 				context = { ...context, role: await this.getRoleFromToken(context.auth.token) };

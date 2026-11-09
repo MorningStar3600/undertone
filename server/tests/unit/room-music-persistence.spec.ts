@@ -9,7 +9,7 @@ import { SqlMusicRoomStore } from "../../music/room-music-storage.js";
 import { musicTransaction } from "../../music/room-music-db.js";
 import { musicRoomModels } from "../../models/music-room.js";
 import { createCatalogueFixture } from "./music-test-helpers.js";
-import { QueueMode, Role } from "ott-common/models/types.js";
+import { PlayerStatus, QueueMode, Role } from "ott-common/models/types.js";
 import { RoomRequestType, type RoomRequest } from "ott-common/models/messages.js";
 import permissions from "ott-common/permissions.js";
 
@@ -407,6 +407,116 @@ describe("Music authorization inside persistence", () => {
 		expect(owner.user_id).toBe(2);
 		expect(owner.user!.id).toBe(2);
 	});
+	it.each(["account", "session"])(
+		"does not restore owner authority when an old %s lookup finishes after logout",
+		async stage => {
+			room.owner = { id: 1, username: "owner" } as User;
+			for (const role of [Role.UnregisteredUser, Role.RegisteredUser]) {
+				room.grants.setRoleGrants(role, 0);
+			}
+			const held = gate();
+			if (stage === "account") {
+				vi.mocked(usermanager.getUser).mockImplementationOnce(async () => {
+					held.enter();
+					await held.waiting;
+					return { id: 1, username: "old-owner" } as User;
+				});
+			} else {
+				vi.mocked(tokens.getSessionInfo).mockImplementationOnce(async () => {
+					held.enter();
+					await held.waiting;
+					return { isLoggedIn: true, user_id: 1 };
+				});
+			}
+			const delayed = room.updateUser(
+				{
+					type: RoomRequestType.UpdateUser,
+					info: { id: "tab1", status: PlayerStatus.ready },
+				},
+				context,
+			);
+			await held.entered;
+			vi.mocked(tokens.getSessionInfo).mockResolvedValue({
+				isLoggedIn: false,
+				username: "guest",
+			});
+			await room.updateUser(
+				{
+					type: RoomRequestType.UpdateUser,
+					info: { id: "tab1", status: PlayerStatus.buffering },
+				},
+				context,
+			);
+			held.release();
+			await delayed;
+			const user = room.getUser("tab1")!;
+			expect(user.user_id).toBeUndefined();
+			expect(user.user).toBeNull();
+			expect(user.playerStatus).toBe(PlayerStatus.buffering);
+			expect(room.getRole(user)).toBe(Role.UnregisteredUser);
+			const before = await store.load(room.name);
+			await expect(
+				room.processUnauthorizedRequest(
+					{
+						type: RoomRequestType.MusicRoomRequest,
+						command: {
+							action: "settings",
+							correlationId: "logout-race",
+							expectedRevision: room.music!.revision,
+							settings: { fairShare: !room.music!.settings.fairShare },
+						},
+					},
+					{ clientId: "tab1", token: "member" },
+				),
+			).rejects.toThrow();
+			expect(await store.load(room.name)).toEqual(before);
+		},
+	);
+	it("keeps a newer account and status when an older account lookup completes", async () => {
+		const user = room.getUser("tab1")!;
+		const held = gate();
+		vi.mocked(usermanager.getUser).mockImplementationOnce(async () => {
+			held.enter();
+			await held.waiting;
+			return { id: 1, username: "old" } as User;
+		});
+		const old = user.updateInfo({ id: user.id, user_id: 1, status: PlayerStatus.ready });
+		await held.entered;
+		await user.updateSession({ isLoggedIn: true, user_id: 2 }, PlayerStatus.buffering);
+		held.release();
+		await old;
+		expect(user.user_id).toBe(2);
+		expect(user.user!.id).toBe(2);
+		expect(user.playerStatus).toBe(PlayerStatus.buffering);
+	});
+	it("checks Music grants against the session even if the cached user object is inconsistent", async () => {
+		room.owner = { id: 1, username: "owner" } as User;
+		for (const role of [Role.UnregisteredUser, Role.RegisteredUser]) {
+			room.grants.setRoleGrants(role, 0);
+		}
+		const user = room.getUser("tab1")!;
+		user.user_id = undefined;
+		vi.mocked(tokens.getSessionInfo).mockResolvedValue({
+			isLoggedIn: false,
+			username: "guest",
+		});
+		const before = await store.load(room.name);
+		await expect(
+			room.processRequest(
+				{
+					type: RoomRequestType.MusicRoomRequest,
+					command: {
+						action: "settings",
+						correlationId: "stale-cache",
+						expectedRevision: room.music!.revision,
+						settings: { fairShare: false },
+					},
+				},
+				{ ...context, role: Role.Owner },
+			),
+		).rejects.toThrow();
+		expect(await store.load(room.name)).toEqual(before);
+	});
 	const addVoters = async () => {
 		for (const id of ["tab2", "tab3"]) {
 			const user = new RoomUser(id, id);
@@ -425,6 +535,25 @@ describe("Music authorization inside persistence", () => {
 			{ clientId: id, token },
 		);
 
+	it("preserves a valid skip vote through status and display-name refreshes", async () => {
+		await room.dequeueNext();
+		await room.play();
+		await addVoters();
+		const playbackId = room.music!.current!.playbackId;
+		await vote("tab1", "member");
+		vi.mocked(usermanager.getUser).mockImplementation(
+			async ({ id }) => ({ id, username: "renamed" }) as User,
+		);
+		for (const status of [PlayerStatus.ready, PlayerStatus.buffering]) {
+			await room.processUnauthorizedRequest(
+				{ type: RoomRequestType.UpdateUser, info: { id: "tab1", status } },
+				{ clientId: "tab1", token: "member" },
+			);
+			expect(room.votesToSkip.has("tab1")).toBe(true);
+		}
+		await vote("tab2");
+		expect(room.music!.current!.playbackId).not.toBe(playbackId);
+	});
 	it.each(["logout", "expired"])(
 		"rejects every %s vote before insertion or quorum evaluation",
 		async change => {

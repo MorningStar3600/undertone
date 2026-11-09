@@ -336,6 +336,13 @@ skip grants can vote. Legacy modes retain their existing vote behavior. Entering
 updating Music from a logged-out session clears cached account/user objects even if
 that session omits its guest username; the existing guest display name is the fallback.
 
+Session refreshes reserve an identity revision before session and account I/O. Older
+responses cannot restore an account after logout or overwrite a newer account/status;
+superseded updates also skip vote and Room refresh side effects. Music command grants
+are checked against the live session role at every authorization boundary, independent
+of the cached display-user object. Status/name-only refreshes retain valid skip votes;
+identity, connection, role, grants or occurrence changes invalidate their binding.
+
 The follow-up `room-music-persistence.spec.ts` covers real SQLite writer contention,
 revocation/cancellation/logout/departure, SQL rollback and retries, bounded waiters,
 independent timeline delays, late source exhaustion, guest identity and stale votes.
