@@ -44,6 +44,7 @@ async function load(rootId?: string) {
 				? `/local-media/roots/${encodeURIComponent(rootId)}/scan`
 				: "/local-media/status",
 			data: rootId ? {} : undefined,
+			headers: rootId ? { "X-Local-Media-Scan": "1" } : undefined,
 			signal: current.signal,
 		});
 		if (current.signal.aborted || version !== music.version.value) {

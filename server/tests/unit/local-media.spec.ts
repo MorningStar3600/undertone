@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { mkdir, mkdtemp, writeFile, unlink, rename, symlink, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, unlink, rename, symlink, rm, utimes } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Sequelize } from "sequelize";
 import express from "express";
@@ -93,7 +93,11 @@ describe("operator local audio", () => {
 				next();
 			})
 			.use(buildLocalMediaRouter(library, async () => true));
-		await request(app).post("/roots/fixture/scan").send({ directory, ownerId: 2 }).expect(400);
+		await request(app)
+			.post("/roots/fixture/scan")
+			.set("X-Local-Media-Scan", "1")
+			.send({ directory, ownerId: 2 })
+			.expect(400);
 		expect(await localMediaModels(f.connection).File.count()).toBe(0);
 	});
 	it("indexes idempotently without title merging, redacts paths, and invalidates only actual changes", async () => {
@@ -296,6 +300,85 @@ describe("operator local audio", () => {
 		allowed = true;
 		await request(app).get(`/${id}`).expect(404);
 		expect(await library.status(1)).toEqual({ enabled: false, reason: "balancer", roots: [] });
+	});
+	it.each(["GET", "HEAD", "range"])(
+		"rejects a file overwritten during authorization for %s",
+		async method => {
+			const path = join(directory, "audio.mp3");
+			await writeFile(path, "0123456789");
+			await library.scan(1, "fixture");
+			const id = (await file()).get().id;
+			const open = library.open.bind(library);
+			let closed = false;
+			vi.spyOn(library, "open").mockImplementation(async sourceId => {
+				const opened = await open(sourceId),
+					close = opened.handle.close.bind(opened.handle);
+				vi.spyOn(opened.handle, "close").mockImplementation(async () => {
+					await close();
+					closed = true;
+				});
+				return opened;
+			});
+			const app = express().use(
+				buildLocalMediaRouter(library, async () => {
+					// Same-sized replacement: mtime, rather than Content-Length, must invalidate it.
+					await writeFile(path, "abcdefghij");
+					await utimes(path, new Date(0), new Date(0));
+					return true;
+				}),
+			);
+			const pending =
+				method === "HEAD" ? request(app).head(`/${id}`) : request(app).get(`/${id}`);
+			// eslint-disable-next-line vitest/no-conditional-in-test -- Parameterized request setup; assertions are unconditional.
+			if (method === "range") {
+				pending.set("Range", "bytes=2-4");
+			}
+			const response = await pending.expect(404);
+			expect(response.headers["content-range"]).toBeUndefined();
+			expect(response.headers["content-length"]).not.toBe(method === "range" ? "3" : "10");
+			expect(response.text ?? "").toBe("");
+			await vi.waitFor(() => expect(closed).toBe(true));
+		},
+	);
+	it("finishes the indexed descriptor across atomic replacement and requires rescan for new opens", async () => {
+		const path = join(directory, "audio.mp3"),
+			replacement = join(directory, "replacement.tmp");
+		await writeFile(path, "0123456789");
+		await library.scan(1, "fixture");
+		const id = (await file()).get().id;
+		let replace = true;
+		let replacementBlocked = false;
+		const app = express().use(
+			buildLocalMediaRouter(library, async () => {
+				if (replace) {
+					replace = false;
+					await writeFile(replacement, "new recording");
+					try {
+						await rename(replacement, path);
+					} catch (error) {
+						if (
+							process.platform !== "win32" ||
+							(error as NodeJS.ErrnoException).code !== "EPERM"
+						) {
+							throw error;
+						}
+						// Windows can deny replacing an open file: ingestion must wait, never overwrite it.
+						replacementBlocked = true;
+					}
+				}
+				return true;
+			}),
+		);
+		expect((await request(app).get(`/${id}`).expect(200)).body.toString()).toBe("0123456789");
+		// eslint-disable-next-line vitest/no-conditional-in-test -- Windows may require ingestion to wait for the descriptor to close.
+		if (replacementBlocked) {
+			await vi.waitFor(async () => rename(replacement, path));
+		}
+		await request(app).get(`/${id}`).expect(404);
+		await library.scan(1, "fixture");
+		expect((await request(app).get(`/${id}`).expect(200)).body.toString()).toBe(
+			"new recording",
+		);
 	});
 	it("uses safe unknown probe metadata and keeps descriptor usable", async () => {
 		await writeFile(join(directory, "audio.mp3"), "not audio");

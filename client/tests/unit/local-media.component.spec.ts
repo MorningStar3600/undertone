@@ -49,6 +49,7 @@ describe("local library operator configuration UI", () => {
 				method: "POST",
 				url: "/local-media/roots/collection/scan",
 				data: {},
+				headers: { "X-Local-Media-Scan": "1" },
 				signal: expect.any(AbortSignal),
 			}),
 		);

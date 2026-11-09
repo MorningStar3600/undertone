@@ -1,12 +1,34 @@
 import express, { type Request } from "express";
+import { fstatSync } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { z, ZodError } from "zod";
 import { localMediaLibrary, type LocalMediaLibrary } from "../music/local-media.js";
-import { LocalMediaException } from "../music/local-media-files.js";
+import { LocalMediaException, sameFile } from "../music/local-media-files.js";
 import { authorizeLocalMedia } from "../music/local-media-access.js";
 import { consumeRateLimitPoints } from "../rate-limit.js";
 const BYTE_RANGE = /^bytes=(\d*)-(\d*)$/;
 const ROOT_ID = /^[a-zA-Z0-9_-]{1,64}$/;
+
+function permitsScan(req: Request): boolean {
+	// The custom header requires a CORS preflight; this endpoint grants no cross-origin access.
+	if (!req.is("application/json") || req.get("X-Local-Media-Scan") !== "1") {
+		return false;
+	}
+	const site = req.get("Sec-Fetch-Site");
+	if (site && site !== "same-origin") {
+		return false;
+	}
+	const origin = req.get("Origin");
+	if (origin !== undefined) {
+		try {
+			return origin === new URL(`${req.protocol}://${req.get("Host")}`).origin;
+		} catch {
+			return false;
+		}
+	}
+	// Non-browser clients can omit Origin, but must still send JSON and the custom header.
+	return true;
+}
 
 /** Single-range only: invalid, excessive and multipart requests receive 416. */
 export function mediaRange(
@@ -78,6 +100,10 @@ export function buildLocalMediaRouter(
 			res.sendStatus(401);
 			return;
 		}
+		if (!permitsScan(req)) {
+			res.sendStatus(403);
+			return;
+		}
 		try {
 			z.object({})
 				.strict()
@@ -115,6 +141,13 @@ export function buildLocalMediaRouter(
 			opened = await library.open(id);
 			// Last await before publishing bytes rechecks logout, leave and role changes.
 			if (!(await authorize(req, id, opened.ownerId))) {
+				throw new LocalMediaException();
+			}
+			// Authorization can wait while ingestion changes the file. Recheck synchronously
+			// so there is no further application await between authorization and headers.
+			// This is not a snapshot: published files must remain immutable during streaming.
+			const current = fstatSync(opened.handle.fd);
+			if (!current.isFile() || current.nlink > 1 || !sameFile(current, opened.info)) {
 				throw new LocalMediaException();
 			}
 			const size = opened.info.size;
