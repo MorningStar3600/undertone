@@ -16,6 +16,10 @@ Only the viewer's tags set `aria-pressed` and the scoped blue token. Unknown
 contributor vocabulary has an explicit unavailable state until public metadata
 is supplied or discovered. No contributor identity or private annotations are fetched.
 Library passes an empty contributor group and displays personal tags and favorites.
+While personal pages are incomplete, a missing ID has unknown selection: a question
+mark, no `aria-pressed`, and no toggle until the remaining pages are explicitly loaded.
+Loaded selected IDs remain known. `MoodPicker.selectionIncomplete` applies this rule
+to vocabulary buttons too; explicit creation-and-selection remains an idempotent add.
 
 `useMusic()` shares favorites and discovered vocabulary per existing Vuex store.
 It exposes `authorized`, `expired`, `version`, `moods`, `remember(moods)`,
@@ -36,7 +40,9 @@ Favorites, tags and library membership use separate endpoints.
 
 `useMusicPage<T>(session, path: () => string | null, pageSize = 20)` exposes
 `items`, `total`, `offset`, `limit`, `loading`, `error`, `hasMore`,
-`load(offset?, append?)`, `retry()` and `loadMore()`.
+`complete`, `load(offset?, append?)`, `retry()` and `loadMore()`.
+`complete` requires a successful load of the entire list, independently of the maximum
+page offset; an exhausted pagination limit does not prove that a missing ID is absent.
 Library and shared mood discovery use 20-item pages; annotations/favorites use
 100-item pages with explicit load-more buttons. No catalogue is silently drained.
 If a partially loaded tag/favorite list changes, its first page is refreshed to

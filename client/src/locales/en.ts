@@ -36,6 +36,9 @@ export default {
 		"contributor-moods": "Contributor's moods",
 		"personal-moods": "Your tags and favorite shortcuts",
 		"unknown-mood": "Mood details unavailable",
+		"selection-unknown": "Selection not loaded",
+		"selection-incomplete":
+			"Load the remaining pages to check moods marked with a question mark.",
 		discover: "Find or create a mood",
 		defaults: "Default moods",
 		search: "Find on this page",

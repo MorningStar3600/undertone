@@ -12,7 +12,14 @@ const { items, loading, error, hasMore } = music.favorites;
 const retryMood = ref<Mood | null>(null);
 const retryActive = ref(false);
 const pickerBusy = ref(false);
-async function toggle(mood: Mood, active = !items.value.some(m => m.id === mood.id)) {
+async function toggle(mood: Mood, active?: boolean) {
+	if (active === undefined) {
+		const selected = items.value.some(m => m.id === mood.id);
+		if (!selected && !music.favorites.complete.value) {
+			return;
+		}
+		active = !selected;
+	}
 	retryMood.value = mood;
 	retryActive.value = active;
 	await music.setFavorite(mood, active);
@@ -56,6 +63,7 @@ async function toggle(mood: Mood, active = !items.value.some(m => m.id === mood.
 		>
 		<MoodPicker
 			:selected-ids="items.map(m => m.id)"
+			:selection-incomplete="!music.favorites.complete.value"
 			:disabled="loading || !!error || music.favoritePending.size > 0"
 			@select="toggle"
 			@busy="pickerBusy = $event"

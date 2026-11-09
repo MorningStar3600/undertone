@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { moodIcons } from "./mood-icons";
 
-defineProps<{ mood: Mood; active: boolean; disabled?: boolean }>();
+defineProps<{ mood: Mood; active: boolean; unknown?: boolean; disabled?: boolean }>();
 defineEmits<{ toggle: [] }>();
 </script>
 
@@ -16,13 +16,17 @@ defineEmits<{ toggle: [] }>();
 				variant="outline"
 				size="icon-lg"
 				class="mood-button"
-				:aria-label="mood.name"
-				:aria-pressed="active"
-				:disabled="disabled"
+				:aria-label="unknown ? `${mood.name}: ${$t('music.selection-unknown')}` : mood.name"
+				:aria-pressed="unknown ? undefined : active"
+				:disabled="disabled || unknown"
+				:data-selection="unknown ? 'unknown' : active ? 'active' : 'inactive'"
 				:data-mood-id="mood.id"
 				@click="$emit('toggle')"
 			>
 				<component :is="moodIcons[mood.iconKey]" aria-hidden="true" />
+				<span v-if="unknown" class="absolute right-0 top-0 text-xs" aria-hidden="true"
+					>?</span
+				>
 			</Button>
 		</TooltipTrigger>
 		<TooltipContent>{{ mood.name }}</TooltipContent>
@@ -31,6 +35,7 @@ defineEmits<{ toggle: [] }>();
 
 <style scoped>
 .mood-button {
+	position: relative;
 	--music-active: oklch(0.7 0.16 250);
 }
 .mood-button[aria-pressed="true"] {

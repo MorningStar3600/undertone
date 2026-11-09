@@ -16,7 +16,11 @@ import MoodButton from "./MoodButton.vue";
 import MusicFeedback from "./MusicFeedback.vue";
 import MusicPagination from "./MusicPagination.vue";
 
-const props = defineProps<{ selectedIds: string[]; disabled?: boolean }>();
+const props = defineProps<{
+	selectedIds: string[];
+	selectionIncomplete?: boolean;
+	disabled?: boolean;
+}>();
 const emit = defineEmits<{ select: [mood: Mood, active?: boolean]; busy: [busy: boolean] }>();
 const music = useMusic();
 const page = useMusicPage<Mood>(music, () => "/moods");
@@ -50,6 +54,15 @@ const filtered = computed(() =>
 			.includes(query.value.normalize("NFKC").trim().toLowerCase()),
 	),
 );
+function select(mood: Mood) {
+	if (props.disabled || creating.value || !music.authorized.value) {
+		return;
+	}
+	if (props.selectionIncomplete && !props.selectedIds.includes(mood.id)) {
+		return;
+	}
+	emit("select", mood);
+}
 async function create() {
 	if (creating.value || props.disabled) {
 		return;
@@ -84,14 +97,18 @@ async function create() {
 <template>
 	<section class="flex min-w-0 flex-col gap-4" :aria-label="$t('music.discover')">
 		<p class="text-sm text-muted-foreground">{{ $t("music.defaults") }}</p>
+		<p v-if="selectionIncomplete" class="text-sm text-muted-foreground">
+			{{ $t("music.selection-incomplete") }}
+		</p>
 		<div class="flex flex-wrap gap-2">
 			<MoodButton
 				v-for="mood in DEFAULT_MOODS"
 				:key="mood.id"
 				:mood="mood"
 				:active="selectedIds.includes(mood.id)"
+				:unknown="selectionIncomplete && !selectedIds.includes(mood.id)"
 				:disabled="disabled || creating || !music.authorized.value"
-				@toggle="emit('select', mood)"
+				@toggle="select(mood)"
 			/>
 		</div>
 		<FieldGroup>
@@ -108,8 +125,9 @@ async function create() {
 				:key="mood.id"
 				:mood="mood"
 				:active="selectedIds.includes(mood.id)"
+				:unknown="selectionIncomplete && !selectedIds.includes(mood.id)"
 				:disabled="disabled || creating || !music.authorized.value"
-				@toggle="emit('select', mood)"
+				@toggle="select(mood)"
 			/>
 		</div>
 		<p v-if="!loading && !error && !filtered.length">{{ $t("music.no-moods") }}</p>

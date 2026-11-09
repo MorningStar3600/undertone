@@ -125,7 +125,7 @@ function createSession(store: Store<FullOTTStoreState>) {
 				return;
 			}
 			remember([mood]);
-			const hadMore = favorites.hasMore.value;
+			const hadMore = !favorites.complete.value;
 			const has = favorites.items.value.some(m => m.id === mood.id);
 			if (has !== active) {
 				favorites.items.value = active
@@ -203,6 +203,7 @@ export function useMusicPage<T>(
 	const offset = ref(0);
 	const limit = ref(pageSize);
 	const loading = ref(false);
+	const loaded = ref(false);
 	const error = ref<MusicError | null>(null);
 	let controller: AbortController | undefined;
 	let sequence = 0;
@@ -229,6 +230,7 @@ export function useMusicPage<T>(
 		loading.value = true;
 		error.value = null;
 		if (!append) {
+			loaded.value = false;
 			items.value = [];
 		}
 		try {
@@ -246,6 +248,7 @@ export function useMusicPage<T>(
 			total.value = page.total;
 			offset.value = page.offset;
 			limit.value = page.limit;
+			loaded.value = true;
 		} catch (failure) {
 			if (current === sequence && epoch === session.version.value) {
 				error.value = errorKind(failure);
@@ -262,6 +265,7 @@ export function useMusicPage<T>(
 			controller?.abort();
 			sequence++;
 			items.value = [];
+			loaded.value = false;
 			total.value = 0;
 			offset.value = 0;
 			loading.value = false;
@@ -279,6 +283,9 @@ export function useMusicPage<T>(
 	const hasMore = computed(
 		() => nextOffset.value < total.value && nextOffset.value <= MUSIC_MAX_OFFSET,
 	);
+	const complete = computed(
+		() => loaded.value && !loading.value && !error.value && items.value.length >= total.value,
+	);
 	return {
 		items,
 		total,
@@ -287,6 +294,7 @@ export function useMusicPage<T>(
 		loading,
 		error,
 		hasMore,
+		complete,
 		load,
 		retry: () => load(retryOffset, retryAppend),
 		loadMore: () => load(nextOffset.value, true),
@@ -335,7 +343,7 @@ export function useMusicAnnotations(trackId: Ref<string | null>) {
 				return;
 			}
 			music.remember([mood]);
-			const hadMore = page.hasMore.value;
+			const hadMore = !page.complete.value;
 			const has = page.items.value.some(m => m.id === mood.id);
 			if (has !== active) {
 				page.items.value = active

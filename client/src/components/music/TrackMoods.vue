@@ -53,7 +53,13 @@ const complement = computed(() => {
 const disabled = computed(
 	() => loading.value || !!loadError.value || pickerBusy.value || !music.authorized.value,
 );
-async function toggle(mood: Mood, active = !viewerIds.value.includes(mood.id)) {
+async function toggle(mood: Mood, active?: boolean) {
+	if (active === undefined) {
+		if (!viewerIds.value.includes(mood.id) && !page.complete.value) {
+			return;
+		}
+		active = !viewerIds.value.includes(mood.id);
+	}
 	retryMood.value = mood;
 	retryActive.value = active;
 	await setTag(mood, active);
@@ -65,6 +71,9 @@ async function toggle(mood: Mood, active = !viewerIds.value.includes(mood.id)) {
 		<MusicFeedback :loading="loading" :error="loadError" retry @retry="page.retry" />
 		<MusicFeedback :error="error" retry @retry="retryMood && toggle(retryMood, retryActive)" />
 		<p v-if="!music.authorized.value">{{ $t("music.sign-in") }}</p>
+		<p v-else-if="!page.complete.value" class="text-sm text-muted-foreground">
+			{{ $t("music.selection-incomplete") }}
+		</p>
 		<div
 			v-if="priorityIds.length"
 			role="group"
@@ -76,6 +85,7 @@ async function toggle(mood: Mood, active = !viewerIds.value.includes(mood.id)) {
 					v-if="music.moods.get(moodId)"
 					:mood="music.moods.get(moodId)!"
 					:active="viewerIds.includes(moodId)"
+					:unknown="!page.complete.value && !viewerIds.includes(moodId)"
 					:disabled="disabled || pending.size > 0"
 					@toggle="toggle(music.moods.get(moodId)!)"
 				/>
@@ -90,6 +100,7 @@ async function toggle(mood: Mood, active = !viewerIds.value.includes(mood.id)) {
 				:key="mood.id"
 				:mood="mood"
 				:active="viewerIds.includes(mood.id)"
+				:unknown="!page.complete.value && !viewerIds.includes(mood.id)"
 				:disabled="disabled || pending.size > 0"
 				@toggle="toggle(mood)"
 			/>
@@ -132,6 +143,7 @@ async function toggle(mood: Mood, active = !viewerIds.value.includes(mood.id)) {
 			v-if="pickerOpen"
 			:key="trackId"
 			:selected-ids="viewerIds"
+			:selection-incomplete="!page.complete.value"
 			:disabled="disabled || pending.size > 0"
 			@select="toggle"
 			@busy="pickerBusy = $event"

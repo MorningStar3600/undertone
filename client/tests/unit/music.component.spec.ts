@@ -496,6 +496,115 @@ describe("personal music API integration", () => {
 		]);
 	});
 
+	it.each(["contributor", "favorite"])(
+		"does not invert an unloaded personal tag shown as %s",
+		async group => {
+			const vocabulary: Mood[] = Array.from({ length: 100 }, (_, index) => ({
+				...custom,
+				id: `20000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+			}));
+			tags[trackA] = [...vocabulary, custom];
+			favorites = group === "favorite" ? [custom, like] : [like];
+			const original = respond;
+			respond = config =>
+				config.method === "GET" && config.url?.includes("/tracks/")
+					? pageResponse(
+							tags[trackA].slice(
+								config.params.offset,
+								config.params.offset + config.params.limit,
+							),
+							config,
+							tags[trackA].length,
+						)
+					: original(config);
+			const { wrapper, store } = mountComponent(TrackMoods, {
+				props: {
+					trackId: trackA,
+					contributorMoodIds: group === "contributor" ? [custom.id] : [],
+					contributorMoods: [custom],
+				},
+			});
+			store.commit("LOGIN", account());
+			await flushPromises();
+			const button = wrapper.get(`[data-mood-id="${custom.id}"]`);
+			expect(button.attributes("aria-pressed")).toBeUndefined();
+			expect(button.attributes("data-selection")).toBe("unknown");
+			expect(button.attributes("disabled")).toBeDefined();
+			await button.trigger("click");
+			expect(calls.every(c => c.method === "GET")).toBe(true);
+			expect(
+				wrapper.get(`[data-mood-id="${vocabulary[0].id}"]`).attributes("aria-pressed"),
+			).toBe("true");
+			await wrapper
+				.findAll("button")
+				.find(b => b.text() === "Load more personal tags")!
+				.trigger("click");
+			await flushPromises();
+			expect(button.attributes("aria-pressed")).toBe("true");
+			expect(button.attributes("disabled")).toBeUndefined();
+			expect(wrapper.get(`[data-mood-id="${like.id}"]`).attributes("aria-pressed")).toBe(
+				"false",
+			);
+			await button.trigger("click");
+			await flushPromises();
+			expect(calls.filter(c => c.method !== "GET").map(c => [c.method, c.url])).toEqual([
+				["DELETE", `/music/tracks/${trackA}/moods/${custom.id}`],
+			]);
+		},
+	);
+
+	it("keeps unloaded favorite selections unknown through a page error until explicit retry", async () => {
+		const vocabulary: Mood[] = Array.from({ length: 100 }, (_, index) => ({
+			...custom,
+			id: `20000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+		}));
+		favorites = [...vocabulary, like];
+		let fail = true;
+		const original = respond;
+		respond = config => {
+			if (config.method === "GET" && config.url === "/music/favorites") {
+				if (config.params.offset === 100 && fail) {
+					return Promise.reject({ response: { status: 500 } });
+				}
+				return pageResponse(
+					favorites.slice(
+						config.params.offset,
+						config.params.offset + config.params.limit,
+					),
+					config,
+					favorites.length,
+				);
+			}
+			return original(config);
+		};
+		const { wrapper, store } = mountComponent(MusicFavorites);
+		store.commit("LOGIN", account());
+		await flushPromises();
+		const button = wrapper.getComponent(MoodPicker).findAll(`[data-mood-id="${like.id}"]`)[0];
+		expect(button.attributes("aria-pressed")).toBeUndefined();
+		expect(button.attributes("disabled")).toBeDefined();
+		await button.trigger("click");
+		expect(calls.every(c => c.method === "GET")).toBe(true);
+		await wrapper
+			.findAll("button")
+			.find(b => b.text() === "Load more favorites")!
+			.trigger("click");
+		await flushPromises();
+		expect(button.attributes("data-selection")).toBe("unknown");
+		fail = false;
+		await wrapper
+			.findAll("button")
+			.find(b => b.text() === "Try again")!
+			.trigger("click");
+		await flushPromises();
+		expect(button.attributes("aria-pressed")).toBe("true");
+		await button.trigger("click");
+		await flushPromises();
+		expect(calls.filter(c => c.method !== "GET").map(c => [c.method, c.url])).toEqual([
+			["DELETE", `/music/favorites/${like.id}`],
+		]);
+	});
+
 	it("loads extra personal tag/favorite pages only on explicit request", async () => {
 		const vocabulary = Array.from(
 			{ length: 101 },
