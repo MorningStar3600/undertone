@@ -2,7 +2,8 @@ import { URL } from "node:url";
 import axios, { type AxiosResponse } from "axios";
 import _ from "lodash";
 import type { RedisClientType } from "redis";
-import { ServiceAdapter, type VideoRequest } from "../serviceadapter.js";
+import { ServiceAdapter, type VideoRequest, type CollectionPage } from "../serviceadapter.js";
+import { z } from "zod";
 import {
 	BadApiArgumentException,
 	InvalidVideoIdException,
@@ -25,6 +26,7 @@ const knownPrivateLists = ["LL", "WL"];
 const ADD_PREVIEW_PLAYLIST_RESULTS_COUNT = conf.get("add_preview.playlist_results_count");
 const ADD_PREVIEW_SEARCH_RESULTS_COUNT = conf.get("add_preview.search.results_count");
 const YOUTUBE_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]+$/;
+const IMPORT_VIDEO_ID_REGEX = /^[A-Za-z0-9_-]{1,128}$/;
 const YOUTUBE_LENGTH_FALLBACK_REGEXES = [
 	/length_seconds":"\d+/,
 	/lengthSeconds\\":\\"\d+/,
@@ -139,6 +141,138 @@ function isYoutubeApiError(
 }
 
 export default class YouTubeAdapter extends ServiceAdapter {
+	get supportsCollectionPagination(): boolean {
+		return true;
+	}
+
+	/** Independent of the legacy preview cap. At most two API calls and fifty entries per page. */
+	async fetchCollectionPage(
+		id: string,
+		cursor: string | null,
+		signal: AbortSignal,
+	): Promise<CollectionPage> {
+		const response = await this.api.get("/playlistItems", {
+			signal,
+			timeout: 15000,
+			maxContentLength: 2_000_000,
+			params: {
+				key: this.apiKey,
+				part: "snippet,status",
+				playlistId: id,
+				maxResults: 50,
+				pageToken: cursor ?? undefined,
+				fields: "nextPageToken,items(status(privacyStatus),snippet(resourceId(videoId)))",
+			},
+		});
+		const page = z
+			.object({
+				nextPageToken: z.string().min(1).max(2048).optional(),
+				items: z
+					.array(
+						z.object({
+							status: z.object({ privacyStatus: z.string() }).optional(),
+							snippet: z
+								.object({
+									resourceId: z
+										.object({
+											videoId: z
+												.string()
+												.regex(IMPORT_VIDEO_ID_REGEX)
+												.optional(),
+										})
+										.optional(),
+								})
+								.optional(),
+						}),
+					)
+					.max(50),
+			})
+			.parse(response.data);
+		const ids = [
+			...new Set(
+				page.items
+					.filter(
+						item =>
+							item.status?.privacyStatus === "public" ||
+							item.status?.privacyStatus === "unlisted",
+					)
+					.map(item => item.snippet?.resourceId?.videoId)
+					.filter((id): id is string => !!id),
+			),
+		];
+		let videos: Video[] = [];
+		if (ids.length) {
+			// Do not use videoApiRequest: its quota fallback scrapes and logs raw provider errors.
+			const details = await this.api.get("/videos", {
+				signal,
+				timeout: 15000,
+				maxContentLength: 2_000_000,
+				params: {
+					key: this.apiKey,
+					part: "snippet,contentDetails,status",
+					id: ids.join(","),
+					fields: "items(id,snippet(title,liveBroadcastContent,thumbnails(default(url),medium(url))),contentDetails(duration),status(privacyStatus,embeddable,uploadStatus))",
+				},
+			});
+			const items = z
+				.object({
+					items: z
+						.array(
+							z.object({
+								id: z.string(),
+								snippet: z.object({
+									title: z.string().max(4096),
+									liveBroadcastContent: z.string(),
+									thumbnails: z
+										.object({
+											default: z.object({ url: z.string() }).optional(),
+											medium: z.object({ url: z.string() }).optional(),
+										})
+										.optional(),
+								}),
+								contentDetails: z.object({ duration: z.string() }),
+								status: z.object({
+									privacyStatus: z.string(),
+									embeddable: z.boolean(),
+									uploadStatus: z.string(),
+								}),
+							}),
+						)
+						.max(50),
+				})
+				.parse(details.data).items;
+			videos = items
+				.filter(
+					item =>
+						ids.includes(item.id) &&
+						item.snippet.liveBroadcastContent === "none" &&
+						item.status.embeddable &&
+						item.status.uploadStatus === "processed" &&
+						["public", "unlisted"].includes(item.status.privacyStatus),
+				)
+				.map(item => ({
+					service: "youtube",
+					id: item.id,
+					title: item.snippet.title,
+					length: parseIso8601Duration(item.contentDetails.duration),
+					thumbnail:
+						item.snippet.thumbnails?.medium?.url ??
+						item.snippet.thumbnails?.default?.url,
+				}));
+		}
+		const entries = page.items.flatMap(item => {
+			if (!["public", "unlisted"].includes(item.status?.privacyStatus ?? "")) {
+				return [];
+			}
+			const video = videos.find(video => video.id === item.snippet?.resourceId?.videoId);
+			return video ? [{ reference: { service: this.serviceId, id: video.id }, video }] : [];
+		});
+		return {
+			entries,
+			unavailable: page.items.length - entries.length,
+			nextCursor: page.nextPageToken ?? null,
+		};
+	}
 	apiKey: string;
 	redisClient: RedisClientType;
 	api = axios.create({

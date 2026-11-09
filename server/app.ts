@@ -19,6 +19,7 @@ import bodyParser from "body-parser";
 import { loadConfigFile, conf, setLogger, validateConfig } from "./ott-config.js";
 import { buildRateLimiter } from "./rate-limit.js";
 import { initExtractor } from "./infoextractor.js";
+import { createImportWorker } from "./music/import-worker.js";
 import session, { type SessionOptions } from "express-session";
 import RedisStore from "connect-redis";
 import { setupPostgresMetricsCollection } from "./storage.metrics.js";
@@ -225,6 +226,9 @@ export async function main() {
 	}
 
 	initExtractor();
+	if (conf.get("env") !== "test") {
+		importWorker.start();
+	}
 
 	//start our server
 	if (conf.get("env") !== "test") {
@@ -248,6 +252,7 @@ export async function main() {
 }
 
 async function shutdown() {
+	await importWorker.stop();
 	// The order here is important. We want to get all the clients disconnected first, so they don't get the room unloaded message when all the rooms get unloaded.
 	clientmanager.shutdown();
 	// let the clients disconnect
@@ -256,4 +261,5 @@ async function shutdown() {
 	process.exit(0);
 }
 
+const importWorker = createImportWorker();
 main();

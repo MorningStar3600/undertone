@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import PageHeader from "@/components/PageHeader.vue";
 import LogInForm from "@/components/LogInForm.vue";
 import LibraryImport from "@/components/music/LibraryImport.vue";
+import LibraryImports from "@/components/music/imports/LibraryImports.vue";
 import MusicFavorites from "@/components/music/MusicFavorites.vue";
 import MusicFeedback from "@/components/music/MusicFeedback.vue";
 import MusicPagination from "@/components/music/MusicPagination.vue";
@@ -94,6 +95,7 @@ function removeTrack(id: string) {
 			<TabsList class="flex h-auto flex-wrap">
 				<TabsTrigger value="library">{{ $t("music.library") }}</TabsTrigger>
 				<TabsTrigger value="favorites">{{ $t("music.favorites") }}</TabsTrigger>
+				<TabsTrigger value="imports">{{ $t("musicImports.title") }}</TabsTrigger>
 			</TabsList>
 			<TabsContent value="library" class="flex min-w-0 flex-col gap-6">
 				<LibraryImport :disabled="pending" @import="importTrack" />
@@ -185,6 +187,9 @@ function removeTrack(id: string) {
 			</TabsContent>
 			<TabsContent value="favorites" class="min-w-0"
 				><MusicFavorites :key="version"
+			/></TabsContent>
+			<TabsContent value="imports" class="min-w-0"
+				><LibraryImports :key="version" @changed="page.load()"
 			/></TabsContent>
 		</Tabs>
 	</main>

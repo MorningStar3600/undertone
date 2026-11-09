@@ -308,61 +308,107 @@ export class MusicCatalogue {
 		// Slow provider work must stay outside transactions and room transition locks.
 		const { reference: identity, video } = await this.resolver.resolve(reference);
 		MusicReferenceSchema.parse(identity);
-		return this.write(async transaction => {
-			const models = this.models();
-			const existing = await models.TrackSource.findOne({
-				where: { service: identity.service, providerId: identity.id },
+		return this.write(transaction => this.storeResolved(identity, video, transaction));
+	}
+
+	private async storeResolved(identity: VideoId, video: Video, transaction: Transaction) {
+		const models = this.models();
+		const existing = await models.TrackSource.findOne({
+			where: { service: identity.service, providerId: identity.id },
+			transaction,
+		});
+		if (existing) {
+			const source = existing.get({ plain: true });
+			const track = await models.Track.findByPk(source.trackId, {
 				transaction,
+				rejectOnEmpty: true,
 			});
-			if (existing) {
-				const source = existing.get({ plain: true });
-				const track = await models.Track.findByPk(source.trackId, {
-					transaction,
-					rejectOnEmpty: true,
-				});
-				return { track: trackDto(track.get({ plain: true })), source };
-			}
-			const trackId = referenceId("track", identity);
-			const [track] = await models.Track.findOrCreate({
-				where: { id: trackId },
-				defaults: {
-					id: trackId,
-					title: safeTrackTitle(video.title),
-					artists: [],
-					styles: [],
-					duration:
+			return { track: trackDto(track.get({ plain: true })), source };
+		}
+		const trackId = referenceId("track", identity);
+		const [track] = await models.Track.findOrCreate({
+			where: { id: trackId },
+			defaults: {
+				id: trackId,
+				title: safeTrackTitle(video.title),
+				artists: [],
+				styles: [],
+				duration:
+					video.length !== undefined && Number.isFinite(video.length) && video.length >= 0
+						? video.length
+						: null,
+				artworkUrl: safeArtwork(video.thumbnail),
+			},
+			transaction,
+		});
+		const [source] = await models.TrackSource.findOrCreate({
+			where: { service: identity.service, providerId: identity.id },
+			defaults: {
+				id: referenceId("source", identity),
+				trackId,
+				service: identity.service,
+				providerId: identity.id,
+				capabilities: {
+					seek:
 						video.length !== undefined &&
 						Number.isFinite(video.length) &&
-						video.length >= 0
-							? video.length
-							: null,
-					artworkUrl: safeArtwork(video.thumbnail),
+						video.length > 0,
+					backgroundPlayback: "unknown",
 				},
-				transaction,
-			});
-			const [source] = await models.TrackSource.findOrCreate({
-				where: { service: identity.service, providerId: identity.id },
-				defaults: {
-					id: referenceId("source", identity),
-					trackId,
-					service: identity.service,
-					providerId: identity.id,
-					capabilities: {
-						seek:
-							video.length !== undefined &&
-							Number.isFinite(video.length) &&
-							video.length > 0,
-						backgroundPlayback: "unknown",
-					},
-					availability: "available",
-				},
-				transaction,
-			});
-			return {
-				track: trackDto(track.get({ plain: true })),
-				source: source.get({ plain: true }),
-			};
+				availability: "available",
+			},
+			transaction,
 		});
+		return {
+			track: trackDto(track.get({ plain: true })),
+			source: source.get({ plain: true }),
+		};
+	}
+
+	/** Trusted bounded provider page; caller owns the lease and shared music transaction. */
+	async importReferences(
+		userId: number,
+		entries: { reference: VideoId; video: Video }[],
+		transaction: Transaction,
+	) {
+		const added: string[] = [];
+		const trackIds: string[] = [];
+		for (const { reference, video } of entries) {
+			MusicReferenceSchema.parse(reference);
+			const { track, source } = await this.storeResolved(reference, video, transaction);
+			trackIds.push(track.id);
+			await this.models().Track.update(
+				{
+					title: safeTrackTitle(video.title),
+					artworkUrl: safeArtwork(video.thumbnail),
+					...(Number.isFinite(video.length) && video.length! >= 0
+						? { duration: video.length }
+						: {}),
+				},
+				{ where: { id: track.id }, transaction },
+			);
+			await this.models().TrackSource.update(
+				{ availability: "available" },
+				{ where: { id: source.id }, transaction },
+			);
+			const [, created] = await this.models().UserLibraryTrack.findOrCreate({
+				where: { userId, trackId: track.id },
+				defaults: { userId, trackId: track.id, importKind: "reference" },
+				transaction,
+			});
+			if (created) {
+				added.push(track.id);
+			}
+		}
+		if (entries.length) {
+			await this.invalidateRoomUser(userId, transaction);
+		}
+		return { added, trackIds };
+	}
+	async notifyImported(userId: number, trackIds: string[]) {
+		for (const trackId of new Set(trackIds)) {
+			await notify({ kind: "library", userId, trackId, action: "added" });
+		}
 	}
 
 	async addLibraryTrack(userId: number, input: AddLibraryTrackRequest): Promise<Track> {

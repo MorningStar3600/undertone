@@ -111,6 +111,52 @@ export default {
 		"invalid-extras":
 			"Use a nonnegative start, an end after the start, and an HTTP or HTTPS subtitle URL without credentials.",
 	},
+	musicImports: {
+		title: "Playlist sync",
+		reference: "YouTube playlist URL or ID",
+		hint: "Synchronize playlist references and metadata using this instance's configured access. This does not download audio, index files, or add a playlist to the room queue. Other playlist providers are not supported yet.",
+		retention:
+			"Daily sync runs sequentially, normally 24 hours after completion. Turning it off stops future scheduled runs; an active run can finish. Cancel or stop a source to discard in-flight work. Already imported tracks, moods and favorites are kept. Refresh to see progress.",
+		register: "Register playlist",
+		refresh: "Refresh progress and library",
+		empty: "No playlist sources. Register one, then choose Run now or enable daily sync.",
+		source: "YouTube playlist {id}",
+		removed: "Source stopped. Register the same reference again to restore it.",
+		referenceOnly: "References and metadata only",
+		daily: "Daily synchronization",
+		lastSuccess: "Last full success: {date}",
+		never: "Never",
+		nextRun: "Next scheduled run: {date}",
+		noRuns: "No runs yet.",
+		run: "Run now",
+		retry: "Retry from saved progress",
+		cancel: "Cancel run",
+		remove: "Stop source",
+		history: "Run history",
+		sourceHistory: "Run history for playlist {id}",
+		counters:
+			"{pages} pages; {processed} entries; {added} added; {existing} already in library; {unavailable} unavailable.",
+		failures: "{count} sync failures; {retries} consecutive retry attempts (maximum 5).",
+		retryAt: "Retry after: {date}",
+		completed: "Completed: {date}",
+		status: {
+			queued: "Waiting",
+			running: "Synchronizing",
+			succeeded: "Fully synchronized",
+			partial: "Completed with unavailable entries",
+			failed: "Failed — manual retry required",
+			cancelled: "Cancelled",
+		},
+		errors: {
+			storage:
+				"This page could not be saved. Progress is retained and retries are bounded. Retry manually after five consecutive failures.",
+			provider:
+				"The provider could not return this page. Progress is saved. Automatic retries use increasing delays; after five consecutive failures, retry manually.",
+			unavailable:
+				"Some entries were private, deleted, live or not playable. Available entries were kept; this run is not a full success.",
+			"page-limit": "The per-run page limit was reached. Imported entries are kept.",
+		},
+	},
 	music: {
 		library: "My library",
 		personal: "Your music",
@@ -132,7 +178,7 @@ export default {
 		reference: "Provider reference",
 		service: "Provider",
 		"import-hint":
-			"Add a single track URL or provider ID. Playlists and downloads are not supported here.",
+			"Add a single track URL or provider ID. Use Playlist sync for playlists. Audio downloads are not supported.",
 		remove: "Remove",
 		saved: "Library saved. Removing a track keeps its mood annotations.",
 		"unknown-title": "Untitled track",

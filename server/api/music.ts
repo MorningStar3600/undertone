@@ -12,6 +12,7 @@ import {
 } from "../music/catalogue.js";
 import { consumeRateLimitPoints } from "../rate-limit.js";
 import { getLogger } from "../logger.js";
+import { buildMusicImportsRouter } from "./music-imports.js";
 
 const log = getLogger("api/music");
 const EmptyBodySchema = z.object({}).strict();
@@ -45,6 +46,7 @@ export function buildMusicRouter(catalogue: MusicCatalogue = musicCatalogue): ex
 			}
 		};
 	const noBody = (req: Request) => EmptyBodySchema.parse(req.body ?? {});
+	router.use("/imports", buildMusicImportsRouter());
 	const trackId = (req: Request) => MusicIdSchema.parse(req.params.trackId);
 	const moodId = (req: Request) => MusicIdSchema.parse(req.params.moodId);
 

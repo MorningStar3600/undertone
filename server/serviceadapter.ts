@@ -11,7 +11,24 @@ export interface VideoRequest {
 	missingInfo: (keyof VideoMetadata)[];
 }
 
+export interface CollectionPage {
+	entries: { reference: { service: VideoService; id: string }; video: Video }[];
+	unavailable: number;
+	nextCursor: string | null;
+}
+
 export class ServiceAdapter {
+	/** Full, resumable reference import is explicitly opt-in; legacy previews are not imports. */
+	get supportsCollectionPagination(): boolean {
+		return false;
+	}
+	async fetchCollectionPage(
+		id: string,
+		cursor: string | null,
+		signal: AbortSignal,
+	): Promise<CollectionPage> {
+		throw new IncompleteServiceAdapterException("Full playlist import is unavailable.");
+	}
 	/**
 	 * A string that identifies this service adapter.
 	 */
