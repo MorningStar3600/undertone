@@ -56,7 +56,7 @@ describe("Video playback", () => {
 			)
 			.toBe(true);
 
-		await page.locator(".video-controls button").nth(1).click();
+		await page.locator('[data-cy="playback-toggle"]').click();
 		await expect
 			.poll(() =>
 				page
@@ -71,7 +71,7 @@ describe("Video playback", () => {
 		await addVideo(page, "https://vjs.zencdn.net/v/oceans.mp4");
 		await expect(page.locator("video")).toBeVisible();
 		await expectPaused(page, true);
-		await page.locator(".video-controls button").nth(1).click();
+		await page.locator('[data-cy="playback-toggle"]').click();
 		await expectPaused(page, false);
 	});
 
@@ -107,11 +107,11 @@ describe("Video playback", () => {
 			await expectCurrentTime(page, 10);
 			await expectCurrentTime(secondPage, 10);
 
-			await page.locator(".video-controls button").nth(1).click();
+			await page.locator('[data-cy="playback-toggle"]').click();
 			await expectPaused(page, false);
 			await expectPaused(secondPage, false);
 
-			await page.locator(".video-controls button").nth(1).click();
+			await page.locator('[data-cy="playback-toggle"]').click();
 			await expectPaused(page, true);
 			await expectPaused(secondPage, true);
 		} finally {
@@ -158,6 +158,8 @@ describe("Video playback", () => {
 		await expectPaused(page, true);
 		await ott.closeToasts();
 
+		await page.getByRole("button", { name: "More player controls", exact: true }).click();
+
 		await expect(page.getByLabel("Playback Speed")).toBeEnabled();
 		await expect(page.getByLabel("Subtitles/CC")).toBeVisible();
 		await expect(page.getByLabel("Player settings")).toBeEnabled();
@@ -170,7 +172,7 @@ describe("Video playback", () => {
 			)
 			.toBe(1.5);
 
-		await page.locator(".video-controls button").nth(1).click();
+		await page.locator('[data-cy="playback-toggle"]').click();
 		await expectPaused(page, false);
 
 		await page.getByLabel("Playback Speed").click();
@@ -206,6 +208,8 @@ describe("Video playback", () => {
 			await expect(page.locator("iframe")).toBeVisible();
 			await ott.closeToasts();
 
+			await page.getByRole("button", { name: "More player controls", exact: true }).click();
+
 			await expect(page.getByLabel("Playback Speed")).toBeDisabled();
 			await expect(page.getByLabel("Subtitles/CC")).toBeDisabled();
 			await expect(page.getByLabel("Player settings")).toBeEnabled();
@@ -215,7 +219,7 @@ describe("Video playback", () => {
 			).toBeDisabled();
 			await expect(page.getByRole("button", { name: "Quality disabled" })).toBeDisabled();
 
-			await page.locator(".video-controls button").nth(3).click();
+			await page.locator('[data-cy="playback-skip"]').click();
 			await expect(page.locator("video")).toBeVisible();
 			await expectPaused(page, true);
 
@@ -240,7 +244,7 @@ describe("Video playback", () => {
 				await expect(page.getByRole("button", { name: "Quality disabled" })).toBeDisabled();
 			}
 
-			await page.locator(".video-controls button").nth(3).click();
+			await page.locator('[data-cy="playback-skip"]').click();
 			await expect(page.locator("video")).toHaveCount(0);
 			await expect(page.getByLabel("Playback Speed")).toBeDisabled();
 			await expect(page.getByLabel("Subtitles/CC")).toBeDisabled();

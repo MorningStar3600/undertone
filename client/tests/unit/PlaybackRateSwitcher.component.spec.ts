@@ -1,9 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import PlaybackRateSwitcher from "@/components/controls/PlaybackRateSwitcher.vue";
 import { usePlaybackRate } from "@/components/composables";
 import { mountComponent } from "./component-test-utils";
 
 describe("PlaybackRateSwitcher component", () => {
+	const originalNumberFormat = Number.prototype.toLocaleString;
+	beforeEach(() => {
+		// These expected labels use English decimals, independently of the host OS.
+		vi.spyOn(Number.prototype, "toLocaleString").mockImplementation(function (
+			this: number,
+			locales,
+			options,
+		) {
+			return originalNumberFormat.call(this, locales ?? "en-US", options);
+		});
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	const PLAYBACK_RATES: [number, string][] = [
 		[0.25, "0.25x"],
 		[1 / 3, "0.33x"],
