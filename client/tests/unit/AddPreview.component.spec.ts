@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AddPreview from "@/components/AddPreview.vue";
+import MusicPreview from "@/components/music/MusicPreview.vue";
+import { QueueMode } from "ott-common/models/types";
 import { flush, mountComponent } from "./component-test-utils";
 
 const { API } = vi.hoisted(() => ({
@@ -71,4 +73,57 @@ describe("AddPreview component", () => {
 
 		expect(wrapper.find('[data-cy="test-video"]').exists()).toBe(false);
 	});
+
+	it("keeps stable provider references for individual music previews and removes bulk admission", async () => {
+		API.get.mockResolvedValueOnce({
+			data: {
+				success: true,
+				result: [
+					{ service: "youtube", id: "original", title: "Track" },
+					{ service: "vimeo", id: "second", title: "Other" },
+				],
+			},
+		});
+		const { wrapper, store } = mountComponent(AddPreview);
+		store.commit("room/SYNC", { queueMode: QueueMode.Music });
+		await wrapper.get('[data-cy="add-preview-input"]').setValue("search");
+		await wrapper.get('[data-cy="add-preview-manual-search"]').trigger("click");
+		await flush();
+		await flush();
+		expect(wrapper.findAllComponents(MusicPreview)).toHaveLength(2);
+		expect(wrapper.findAllComponents(MusicPreview)[0].props("reference")).toEqual({
+			service: "youtube",
+			id: "original",
+		});
+		expect(wrapper.text()).not.toContain("Add all");
+		expect(wrapper.findAll(".video")).toHaveLength(0);
+		expect(API.post).not.toHaveBeenCalled();
+	});
+
+	it.each(["direct", "hls", "dash", "odysee"])(
+		"does not invent catalogue identity from an ephemeral %s preview",
+		async service => {
+			API.get.mockResolvedValueOnce({
+				data: {
+					success: true,
+					result: [
+						{
+							service,
+							id: "https://cdn.example.org/temporary-stream",
+							title: "Resolved track",
+						},
+					],
+				},
+			});
+			const { wrapper, store } = mountComponent(AddPreview);
+			store.commit("room/SYNC", { queueMode: QueueMode.Music });
+			await wrapper.get('[data-cy="add-preview-input"]').setValue("search");
+			await wrapper.get('[data-cy="add-preview-manual-search"]').trigger("click");
+			await flush();
+			await flush();
+			expect(wrapper.getComponent(MusicPreview).props("reference")).toBeUndefined();
+			expect(wrapper.get('[data-cy="music-add-mix"]').attributes("disabled")).toBeDefined();
+			expect(API.post).not.toHaveBeenCalled();
+		},
+	);
 });

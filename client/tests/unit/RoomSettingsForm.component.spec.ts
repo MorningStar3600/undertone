@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Grants, parseIntoGrantMask } from "ott-common/permissions";
-import { PlayerStatus, Role } from "ott-common/models/types";
+import { PlayerStatus, QueueMode, Role } from "ott-common/models/types";
+import { Select } from "@/components/ui/select";
 import RoomSettingsForm from "@/components/RoomSettingsForm.vue";
 import { flush, mountComponent } from "./component-test-utils";
 
@@ -122,5 +123,45 @@ describe("RoomSettingsForm component", () => {
 		expect(
 			wrapper.get('[data-cy="input-auto-skip"] [role="checkbox"]').attributes("disabled"),
 		).toBe("");
+	});
+
+	it("submits the Music mode through the existing authorized settings API", async () => {
+		const { wrapper, store } = mountRoomSettings();
+		store.commit("room/SYNC", {
+			queueMode: QueueMode.Manual,
+			currentSource: null,
+			queue: [],
+			music: null,
+		});
+		await flush();
+		await flush();
+		await new Promise(resolve => setTimeout(resolve, 0));
+		wrapper.findAllComponents(Select)[1].vm.$emit("update:modelValue", QueueMode.Music);
+		await wrapper.vm.$nextTick();
+		await wrapper.get("form").trigger("submit");
+		await flush();
+		expect(API.patch).toHaveBeenCalledWith(
+			"/room/foo",
+			expect.objectContaining({ queueMode: QueueMode.Music }),
+		);
+	});
+
+	it("does not send a mode transition when the source or music queue prevents it", async () => {
+		const { wrapper, store } = mountRoomSettings();
+		store.commit("room/SYNC", {
+			queueMode: QueueMode.Manual,
+			currentSource: { service: "youtube", id: "playing" },
+			queue: [],
+			music: null,
+		});
+		await flush();
+		await flush();
+		await new Promise(resolve => setTimeout(resolve, 0));
+		wrapper.findAllComponents(Select)[1].vm.$emit("update:modelValue", QueueMode.Music);
+		await wrapper.vm.$nextTick();
+		await wrapper.get("form").trigger("submit");
+		await flush();
+		expect(API.patch).not.toHaveBeenCalled();
+		expect(wrapper.text()).toContain("requires an empty queue");
 	});
 });

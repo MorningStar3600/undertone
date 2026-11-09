@@ -6,6 +6,7 @@ import OmniPlayer from "@/components/players/OmniPlayer.vue";
 import VideoControls from "@/components/controls/VideoControls.vue";
 import { OttSfx } from "@/plugins/sfx";
 import { ChatPlacement } from "@/stores/settings";
+import { QueueMode } from "ott-common/models/types";
 import { mountComponent } from "./component-test-utils";
 
 // The room's settings form loads from the API on mount; keep these tests off the network.
@@ -150,5 +151,31 @@ describe("Room chat", () => {
 			.get('[data-cy="volume-slider"]')
 			.trigger("keydown", { code: "ArrowRight", key: "ArrowRight" });
 		expect(connection.sent).toEqual([]);
+	});
+
+	it("keeps the single player mounted when Music sync replaces the legacy queue", async () => {
+		const { wrapper, store } = await mountRoom();
+		const player = wrapper.getComponent(OmniPlayer).vm;
+		store.commit("room/SYNC", {
+			queueMode: QueueMode.Music,
+			queue: [],
+			music: {
+				revision: 1,
+				queue: [],
+				queueTotal: 40,
+				current: null,
+				participants: [],
+				settings: {},
+			},
+		});
+		await settle(wrapper);
+		expect(wrapper.find('[data-cy="music-queue"]').exists()).toBe(true);
+		expect(wrapper.get('[data-cy="music-queue"]').text()).toContain("40");
+		expect(wrapper.getComponent(OmniPlayer).vm).toBe(player);
+		expect(wrapper.findAllComponents(OmniPlayer)).toHaveLength(1);
+		store.state.fullscreen = true;
+		await settle(wrapper);
+		expect(wrapper.getComponent(OmniPlayer).vm).toBe(player);
+		expect(wrapper.get('[data-cy="playback-skip"]').isVisible()).toBe(true);
 	});
 });

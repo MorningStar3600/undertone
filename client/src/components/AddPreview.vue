@@ -29,13 +29,15 @@
 						<SelectValue :placeholder="$t('add-preview.adapter-selector.auto')" />
 					</SelectTrigger>
 					<SelectContent>
-						<SelectItem
-							v-for="opt in adapterOptions"
-							:key="String(opt.value)"
-							:value="opt.value as unknown as string"
-						>
-							{{ opt.text }}
-						</SelectItem>
+						<SelectGroup>
+							<SelectItem
+								v-for="opt in adapterOptions"
+								:key="String(opt.value)"
+								:value="opt.value as unknown as string"
+							>
+								{{ opt.text }}
+							</SelectItem>
+						</SelectGroup>
 					</SelectContent>
 				</Select>
 			</div>
@@ -66,7 +68,7 @@
 				</div>
 			</div>
 			<Button
-				v-if="videos.length > 1"
+				v-if="videos.length > 1 && !isMusic"
 				variant="marquee"
 				@click="addAllToQueue()"
 				:disabled="isLoadingAddAll"
@@ -102,7 +104,10 @@
 				<AddPreviewHelper @link-click="setAddPreviewText" />
 			</div>
 		</div>
-		<div v-if="highlightedAddPreviewItem">
+		<p v-if="isMusic && videos.length > 1" class="text-sm text-muted-foreground">
+			{{ $t("musicRoom.playlist-hint") }}
+		</p>
+		<div v-if="highlightedAddPreviewItem && !isMusic">
 			<VideoQueueItem
 				:item="highlightedAddPreviewItem"
 				is-preview
@@ -110,7 +115,16 @@
 			/>
 			<h4 class="label-mono text-signal">{{ $t("add-preview.playlist") }}</h4>
 		</div>
+		<template v-if="isMusic">
+			<MusicPreview
+				v-for="(item, index) in videos"
+				:key="`${item.service}:${item.id}:${index}`"
+				:item="item"
+				:reference="musicReference(item)"
+			/>
+		</template>
 		<VideoQueueItem
+			v-else
 			v-for="(itemdata, index) in videos"
 			:key="index"
 			:item="itemdata"
@@ -125,6 +139,7 @@ import { Icon } from "@/components/ui/icon";
 import {
 	Select,
 	SelectContent,
+	SelectGroup,
 	SelectItem,
 	SelectTrigger,
 	SelectValue,
@@ -141,7 +156,9 @@ import _ from "lodash";
 import VideoQueueItem from "@/components/VideoQueueItem.vue";
 import { ToastStyle } from "@/models/toast";
 import toast from "@/util/toast";
-import type { Video } from "ott-common/models/video";
+import type { Video, VideoId } from "ott-common/models/video";
+import { QueueMode } from "ott-common/models/types";
+import MusicPreview from "@/components/music/MusicPreview.vue";
 import type { OttResponseBody, OttApiResponseAddPreview } from "ott-common/models/rest-api";
 import axios from "axios";
 import AddPreviewHelper from "./AddPreviewHelper.vue";
@@ -150,6 +167,23 @@ import { ALL_VIDEO_SERVICES } from "ott-common/constants";
 const store = useStore();
 const { t } = useI18n();
 const route = useRoute();
+const isMusic = computed(() => store.state.room.queueMode === QueueMode.Music);
+// The legacy preview DTO loses original references for resolving adapters. Never
+// promote an ephemeral stream into catalogue identity. See docs/music-room-frontend.md.
+function musicReference(item: Video): VideoId | undefined {
+	if (selectedAdapter.value === "invidious") {
+		return undefined;
+	}
+	if (["direct", "hls", "dash", "odysee"].includes(item.service)) {
+		if (item.service === "odysee" && item.id.startsWith("lbry://")) {
+			return { service: item.service, id: item.id };
+		}
+		if (item.id !== inputAddPreview.value.trim()) {
+			return undefined;
+		}
+	}
+	return { service: item.service, id: item.id };
+}
 
 const videos: Ref<Video[]> = ref([]);
 const isLoadingAddPreview = ref(false);
@@ -357,6 +391,9 @@ async function requestAddPreviewExplicit() {
 	await requestAddPreview();
 }
 async function addAllToQueue() {
+	if (isMusic.value) {
+		return;
+	}
 	isLoadingAddAll.value = true;
 	try {
 		await API.post(`/room/${route.params.roomId}/queue`, { videos: videos.value });

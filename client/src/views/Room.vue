@@ -124,7 +124,9 @@
 				</div>
 			</div>
 			<div class="my-2.5" v-show="!store.state.fullscreen">
-				<RestoreQueue />
+				<RestoreQueue v-if="!isMusic" />
+				<RoomMusicFeedback v-if="isMusic" />
+				<RoomMusicFilters v-if="isMusic && musicRoom.state.value" />
 			</div>
 			<div class="flex min-w-0 w-full max-lg:flex-col" v-show="!store.state.fullscreen">
 				<div class="min-w-0 w-3/5 grow max-lg:w-full">
@@ -138,11 +140,7 @@
 								<Icon :icon="mdiFormatListBulleted" class="size-4" />
 								<span class="mx-2 max-lg:hidden">{{ $t("room.tabs.queue") }}</span>
 								<Badge variant="secondary" class="ml-1">
-									{{
-										store.state.room.queue.length <= 99
-											? $n(store.state.room.queue.length)
-											: "99+"
-									}}
+									{{ queueTotal <= 99 ? $n(queueTotal) : "99+" }}
 								</Badge>
 							</TabsTrigger>
 							<TabsTrigger
@@ -167,13 +165,16 @@
 
 						<TabsContentAnimatedGroup>
 							<TabsContentAnimated value="queue">
-								<VideoQueue @switchtab="queueTab = 'add'" />
+								<RoomMusicQueue v-if="isMusic && musicRoom.state.value" />
+								<VideoQueue v-else-if="!isMusic" @switchtab="queueTab = 'add'" />
+								<p v-else role="status">{{ $t("common.loading") }}</p>
 							</TabsContentAnimated>
 							<TabsContentAnimated value="add">
 								<AddPreview ref="addpreview" />
 							</TabsContentAnimated>
 							<TabsContentAnimated value="settings">
 								<RoomSettingsForm ref="settings" />
+								<RoomMusicSettings v-if="isMusic" />
 							</TabsContentAnimated>
 						</TabsContentAnimatedGroup>
 					</Tabs>
@@ -262,6 +263,7 @@
 				<RoomDisconnected />
 			</div>
 		</Transition>
+		<RoomMusicConfirmation v-if="isMusic" />
 		<ServerMessageHandler />
 		<WorkaroundPlaybackStatusUpdater />
 		<WorkaroundUserStateNotifier />
@@ -345,7 +347,13 @@ import { secondsToTimestamp } from "@/util/timestamp";
 import { useCaptions, useMediaPlayer, useVolume } from "@/components/composables";
 import { useGrants } from "@/components/composables/grants";
 import { isOfficialSite } from "@/util/misc";
-import { Visibility } from "ott-common/models/types";
+import { QueueMode, Visibility } from "ott-common/models/types";
+import { provideMusicRoom } from "@/composables/use-music-room";
+import RoomMusicQueue from "@/components/music/RoomMusicQueue.vue";
+import RoomMusicFilters from "@/components/music/RoomMusicFilters.vue";
+import RoomMusicSettings from "@/components/music/RoomMusicSettings.vue";
+import RoomMusicFeedback from "@/components/music/RoomMusicFeedback.vue";
+import RoomMusicConfirmation from "@/components/music/RoomMusicConfirmation.vue";
 import { ChatPlacement, DEFAULT_CHAT_PANEL_WIDTH } from "@/stores/settings";
 
 const QUEUE_TABS = ["queue", "add", "settings"] as const;
@@ -357,6 +365,11 @@ type QueueTab = (typeof QUEUE_TABS)[number];
 export default defineComponent({
 	name: "room",
 	components: {
+		RoomMusicQueue,
+		RoomMusicFilters,
+		RoomMusicSettings,
+		RoomMusicFeedback,
+		RoomMusicConfirmation,
 		VideoControls,
 		VideoQueue,
 		OmniPlayer,
@@ -398,6 +411,11 @@ export default defineComponent({
 		const { t } = useI18n();
 		const router = useRouter();
 		const route = useRoute();
+		const musicRoom = provideMusicRoom();
+		const isMusic = computed(() => store.state.room.queueMode === QueueMode.Music);
+		const queueTotal = computed(() =>
+			isMusic.value ? store.state.room.music?.queueTotal ?? 0 : store.state.room.queue.length,
+		);
 
 		// actively calculate the current position of the video
 		const truePosition = ref(0);
@@ -852,6 +870,9 @@ export default defineComponent({
 		const gitCommit = __COMMIT_HASH__;
 
 		return {
+			musicRoom,
+			isMusic,
+			queueTotal,
 			store,
 			roomapi,
 			granted,

@@ -54,20 +54,26 @@
 							</SelectValue>
 						</SelectTrigger>
 						<SelectContent>
-							<SelectItem
-								v-for="queueMode in queueModeOptions"
-								:key="queueMode.value"
-								:value="queueMode.value"
-							>
-								<div class="flex flex-col">
-									<span>{{ queueMode.label }}</span>
-									<span class="text-xs text-muted-foreground">
-										{{ queueMode.hint }}
-									</span>
-								</div>
-							</SelectItem>
+							<SelectGroup>
+								<SelectItem
+									v-for="queueMode in queueModeOptions"
+									:key="queueMode.value"
+									:value="queueMode.value"
+									:disabled="modeTransitionBlocked(queueMode.value)"
+								>
+									<div class="flex flex-col">
+										<span>{{ queueMode.label }}</span>
+										<span class="text-xs text-muted-foreground">
+											{{ queueMode.hint }}
+										</span>
+									</div>
+								</SelectItem>
+							</SelectGroup>
 						</SelectContent>
 					</Select>
+					<p class="text-sm text-muted-foreground">
+						{{ $t("musicRoom.mode-restrictions") }}
+					</p>
 				</Field>
 				<AutoSkipSegmentSettings
 					:loading="
@@ -164,6 +170,7 @@ import { Textarea } from "@/components/ui/textarea";
 import {
 	Select,
 	SelectContent,
+	SelectGroup,
 	SelectItem,
 	SelectTrigger,
 	SelectValue,
@@ -206,6 +213,11 @@ function openVisibilityMenu() {
 
 const queueModeOptions = computed(() => [
 	{
+		value: QueueMode.Music,
+		label: t("musicRoom.mode"),
+		hint: t("musicRoom.mode-hint"),
+	},
+	{
 		value: QueueMode.Manual,
 		label: t("room-settings.manual"),
 		hint: t("room-settings.manual-hint"),
@@ -226,6 +238,17 @@ const queueModeOptions = computed(() => [
 		hint: t("room-settings.dj-hint"),
 	},
 ]);
+
+function modeTransitionBlocked(mode: QueueMode) {
+	const current = store.state.room.queueMode;
+	return (
+		mode !== current &&
+		(mode === QueueMode.Music || current === QueueMode.Music) &&
+		(!!store.state.room.currentSource?.id ||
+			store.state.room.queue.length > 0 ||
+			(store.state.room.music?.queueTotal ?? 0) > 0)
+	);
+}
 
 function queueModeLabel(queueMode: QueueMode) {
 	return queueModeOptions.value.find(option => option.value === queueMode)?.label;
@@ -314,11 +337,25 @@ function getRoomSettingsSubmit(): Partial<RoomSettings> {
 			blocked.push(prop as keyof typeof propsToGrants);
 		}
 	}
+	if (modeTransitionBlocked(inputRoomSettings.queueMode)) {
+		blocked.push("queueMode");
+	}
 	return _.omit(inputRoomSettings, blocked);
 }
 
 /** Take room settings from the UI and submit them to the server. */
 async function submitRoomSettings() {
+	if (
+		dirtySettings.value.includes("queueMode") &&
+		modeTransitionBlocked(inputRoomSettings.queueMode)
+	) {
+		toast.add({
+			style: ToastStyle.Error,
+			content: t("musicRoom.mode-restrictions"),
+			duration: 6000,
+		});
+		return;
+	}
 	isLoadingRoomSettings.value = true;
 	try {
 		await API.patch(

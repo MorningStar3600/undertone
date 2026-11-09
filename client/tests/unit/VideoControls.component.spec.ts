@@ -6,6 +6,7 @@ import { RoomRequestType } from "ott-common/models/messages";
 import { Grants, parseIntoGrantMask } from "ott-common/permissions";
 import VideoControls from "@/components/controls/VideoControls.vue";
 import VideoProgressSlider from "@/components/controls/VideoProgressSlider.vue";
+import TrackMoods from "@/components/music/TrackMoods.vue";
 import { mountComponent } from "./component-test-utils";
 
 const source = {
@@ -205,6 +206,52 @@ describe("Persistent player controls", () => {
 		await nextTick();
 		expect(wrapper.get('[data-cy="current-title"]').text()).toBe("Nothing playing.");
 		expect(wrapper.get('[data-cy="playback-toggle"]').attributes("disabled")).toBeDefined();
+	});
+
+	it("coordinates mood and secondary panels while retaining transport and actual track metadata", async () => {
+		const { wrapper, store } = await controls();
+		const custom = {
+			id: "00000000-0000-4000-8000-000000000001",
+			name: "Custom dreamy",
+			normalizedName: "custom dreamy",
+			iconKey: "moon" as const,
+		};
+		store.commit("room/SYNC", {
+			music: {
+				current: {
+					trackId: "catalogue-track",
+					contributorMoodIds: [custom.id],
+					contributorMoods: [custom],
+				},
+			},
+		});
+		await nextTick();
+		const transport = wrapper.get('[data-cy="playback-toggle"]').element;
+		const volume = wrapper.get('[data-cy="volume-slider"]').element;
+		await wrapper.get('[data-cy="player-moods"]').trigger("click");
+		await nextTick();
+		await nextTick();
+		const annotations = wrapper.getComponent(TrackMoods);
+		expect(annotations.props()).toMatchObject({
+			trackId: "catalogue-track",
+			contributorMoodIds: [custom.id],
+			contributorMoods: [custom],
+		});
+		expect(document.querySelector('[data-cy="player-moods-panel"]')?.textContent).toContain(
+			"Sign in",
+		);
+		expect(
+			document.querySelector(`[data-mood-id="${custom.id}"]`)?.getAttribute("aria-pressed"),
+		).not.toBe("true");
+		await wrapper.get('button[aria-label="More player controls"]').trigger("click");
+		await nextTick();
+		await nextTick();
+		expect(wrapper.get('[data-cy="player-moods"]').attributes("aria-expanded")).toBe("false");
+		expect(
+			wrapper.get('button[aria-label="More player controls"]').attributes("aria-expanded"),
+		).toBe("true");
+		expect(wrapper.get('[data-cy="playback-toggle"]').element).toBe(transport);
+		expect(wrapper.get('[data-cy="volume-slider"]').element).toBe(volume);
 	});
 
 	it("uses explicit Media Session actions, rechecks grants and clears handlers on unmount", async () => {

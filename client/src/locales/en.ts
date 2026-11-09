@@ -1,6 +1,116 @@
 import { BehaviorOption, OttWebsocketError, Role } from "ott-common/models/types";
 
 export default {
+	musicRoom: {
+		mode: "Music",
+		"mode-hint": "Build a shared mix with moods and contribution fairness.",
+		"mode-restrictions":
+			"Entering or leaving Music requires an empty queue and nothing playing. Finish or skip the current track and remove upcoming entries first. Existing video entries are never adopted automatically.",
+		queue: "Shared music queue",
+		"show-peek": "Short peek",
+		"show-full": "Full queue",
+		"order-hint":
+			"The server plans this order. Positions can change with participants, filters and new requests.",
+		"empty-queue": "No tracks admitted yet. Add a track or adjust the room filters.",
+		untitled: "Untitled track",
+		"contributed-by": "Brought by {name}",
+		"departed-participant": "a participant who left",
+		"unknown-participant": "Participant name unavailable",
+		"remove-entry": "Remove {title} from the mix",
+		origin: {
+			automatic: "Mood selection",
+			manual: "Manual addition",
+			recommendation: "Recommendation",
+		},
+		requests: "Your requests",
+		"requested-track": "Requested track",
+		"requests-hint":
+			"Private request history, 25 per page. Pages refresh from the start when the room changes. Check later pages for older requests needing confirmation.",
+		"empty-requests": "No requests on this page.",
+		"page-failed": "This page could not be loaded.",
+		"review-conflicts": "Review exclusions",
+		"request-status": {
+			pending: "Awaiting confirmation",
+			admitted: "Admitted",
+			consumed: "Played",
+			cancelled: "Cancelled",
+		},
+		intent: { mix: "Add to mix", next: "Play next" },
+		"next-hint":
+			"Play next reserves the passage after the current track. It never interrupts playback.",
+		"retry-intent": "Retry this same action",
+		results: {
+			applied: "Action accepted.",
+			duplicate: "This request has already been handled.",
+			"confirmation-required": "Review the exclusions before adding this track.",
+			"revision-conflict":
+				"The room changed. Review the current state, then retry your action explicitly.",
+			"slot-conflict":
+				"The next passage is already reserved. Your request was not changed into an addition to the mix.",
+			"request-conflict": "This request identity conflicts with an existing request.",
+			"source-unavailable": "No usable source is available for this track.",
+			"not-found": "This request or entry is no longer available.",
+			"invalid-confirmation": "The offered exclusions changed. Review your requests again.",
+			rejected: "The server rejected this action. Check your permissions and input.",
+			timeout:
+				"No reply arrived. The action may have been accepted. Check your requests before retrying the same action.",
+			disconnected:
+				"Connection lost. Reconnect and review your requests before trying again.",
+		},
+		"confirm-title": "Add despite exclusions?",
+		"confirm-description":
+			"These participants excluded moods assigned to this track. Confirming applies only to this request and the exclusions shown here.",
+		"add-anyway": "Add anyway",
+		"review-later": "Review later",
+		"unresolved-conflicts":
+			"Some names are unavailable. Choose Review later and load the missing vocabulary from the room filters before reviewing this request, or Cancel to withdraw it. Guests cannot currently resolve custom mood names not supplied by the room.",
+		filters: "Room mood filters",
+		"browse-moods": "Load room mood names",
+		"more-moods": "Load more room moods",
+		"filter-hint":
+			"Any of your included moods may match (OR). Every participant's inclusion rule must match (AND), using the contributor's tags. No inclusion means neutral. These filters do not tag the current track.",
+		"exclusion-hint":
+			"Exclusions use all present participants' tags. Right-click a mood to exclude it, or use its Exclude button. Manual additions ignore inclusions; exclusions ask for confirmation.",
+		"include-mood": "Include {name}",
+		"exclude-mood": "Exclude {name}",
+		include: "Include",
+		exclude: "Exclude",
+		neutral: "Any mood",
+		none: "None",
+		"content-change": "On applying filters",
+		keep: "Keep compatible tracks",
+		renew: "Renew proposals",
+		"content-hint":
+			"Keep preserves compatible automatic entries. Renew replaces automatic proposals. Both replan the queue and preserve listening history and valid manual requests.",
+		"apply-filters": "Apply my room filters",
+		"guest-vocabulary":
+			"Guests can use the supplied moods and add tracks manually. Sign in to discover and create more moods or manage personal tags.",
+		settings: "Music settings",
+		"settings-label": {
+			fairShare: "Fair share",
+			autoAdmitOnJoin: "Admit libraries on arrival",
+			removeDepartedEntries: "Remove upcoming contributions on departure",
+		},
+		"settings-hint": {
+			fairShare: "Balance real contributions. When off, participants take turns.",
+			autoAdmitOnJoin:
+				"Allow automatic selection from arriving participants' account libraries.",
+			removeDepartedEntries:
+				"Remove future entries when their contributor leaves. The current track keeps playing.",
+		},
+		"replan-keep": "Replan compatible tracks",
+		"replan-renew": "Renew automatic proposals",
+		"tags-hint":
+			"These are personal annotations of the current track. Blue means your own tag. Favorites are shortcuts; listening never assigns tags.",
+		"playlist-hint":
+			"Choose individual tracks below. Playlist library jobs are not available here; there is no bulk admission to the mix.",
+		"reference-unavailable":
+			"Music additions from this provider preview are not available yet. Choose another source for this track.",
+		"start-at": "Start at (seconds, optional)",
+		"end-at": "End at (seconds, optional)",
+		"invalid-extras":
+			"Use a nonnegative start, an end after the start, and an HTTP or HTTPS subtitle URL without credentials.",
+	},
 	music: {
 		library: "My library",
 		personal: "Your music",

@@ -23,7 +23,33 @@
 			<!-- Track-mood controls can use PlayerPanel in this slot. Its content opens
 			     above the dock without replacing the source player or transport. -->
 			<slot name="panels" />
-			<PlayerPanel :label="$t('room.more-player-controls')">
+			<Popover v-if="musicCurrent" v-model:open="moodsOpen">
+				<PopoverTrigger as-child
+					><Button
+						variant="ghost"
+						size="icon-lg"
+						:aria-label="$t('music.track-moods')"
+						data-cy="player-moods"
+						><Music2 aria-hidden="true" /></Button
+				></PopoverTrigger>
+				<PopoverContent
+					side="top"
+					align="end"
+					:avoid-collisions="false"
+					class="player-moods-panel flex flex-col gap-4"
+					data-cy="player-moods-panel"
+				>
+					<h2>{{ $t("music.track-moods") }}</h2>
+					<p class="text-sm text-muted-foreground">{{ $t("musicRoom.tags-hint") }}</p>
+					<TrackMoods
+						:track-id="musicCurrent.trackId"
+						:contributor-mood-ids="musicCurrent.contributorMoodIds"
+						:contributor-moods="musicCurrent.contributorMoods"
+					/>
+					<MusicFavorites v-if="store.state.user" />
+				</PopoverContent>
+			</Popover>
+			<PlayerPanel v-model:open="moreOpen" :label="$t('room.more-player-controls')">
 				<div class="flex flex-wrap items-center gap-2">
 					<ClosedCaptionsSwitcher />
 					<PlaybackRateSwitcher />
@@ -57,10 +83,45 @@ import PlaybackRateSwitcher from "./PlaybackRateSwitcher.vue";
 import VideoSettings from "./VideoSettings.vue";
 import PictureInPictureButton from "./PictureInPictureButton.vue";
 import PlayerPanel from "./PlayerPanel.vue";
+import { Button } from "@/components/ui/button";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Music2 } from "@lucide/vue";
+import TrackMoods from "@/components/music/TrackMoods.vue";
+import MusicFavorites from "@/components/music/MusicFavorites.vue";
 
 defineProps<{ sliderPosition: number; truePosition: number }>();
 const store = useStore();
 const source = computed(() => store.state.room.currentSource);
+const musicCurrent = computed(() => store.state.room.music?.current);
+const panel = ref<"moods" | "more" | null>(null);
+const moodsOpen = computed({
+	get: () => panel.value === "moods",
+	set: value => {
+		if (value) {
+			panel.value = "moods";
+		} else if (panel.value === "moods") {
+			panel.value = null;
+		}
+	},
+});
+const moreOpen = computed({
+	get: () => panel.value === "more",
+	set: value => {
+		if (value) {
+			panel.value = "more";
+		} else if (panel.value === "more") {
+			panel.value = null;
+		}
+	},
+});
+watch([() => store.state.room.name, () => store.state.user], () => {
+	panel.value = null;
+});
+watch(musicCurrent, current => {
+	if (!current && panel.value === "moods") {
+		panel.value = null;
+	}
+});
 const thumbnailFailed = ref(false);
 watch(
 	() => source.value?.thumbnail,
@@ -86,6 +147,24 @@ watch(
 }
 .player-volume {
 	min-width: 0;
+}
+.player-moods-panel {
+	width: min(32rem, calc(100vw - 1rem));
+	max-height: max(
+		0px,
+		calc(var(--room-viewport-height, 100dvh) - var(--room-player-height, 160px) - 1rem)
+	);
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+@media (max-width: 379px) {
+	.player-actions {
+		grid-column: 1 / -1;
+		justify-content: flex-end;
+	}
+	.player-volume {
+		grid-column: 2 / -1;
+	}
 }
 @media (min-width: 768px) {
 	.video-controls {
