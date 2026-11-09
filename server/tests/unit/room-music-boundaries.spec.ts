@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Room, RoomUser } from "../../room.js";
 import { addClient } from "../../clientmanager.js";
-import type { Client, ClientEventHandlers } from "../../client.js";
+import { Client, ClientJoinStatus } from "../../client.js";
 import roommanager from "../../roommanager.js";
 import tokens from "../../auth/tokens.js";
 import usermanager from "../../usermanager.js";
@@ -117,18 +117,21 @@ describe("Room authentication and music commit boundaries", () => {
 		room.grants.setRoleGrants(Role.UnregisteredUser, 0);
 		vi.mocked(roommanager.getRoom).mockResolvedValue(ok(room));
 		let onMessage!: (client: Client, message: ClientMessage) => Promise<void>;
-		const client = {
-			id: guest.id,
-			room: room.name,
-			token: guest.token,
-			clientType: "boundary",
-			on: (event: string, handler: ClientEventHandlers<"message">) => {
-				if (event === "message") {
-					onMessage = handler as typeof onMessage;
-				}
-			},
-			kick: vi.fn(),
-		} as unknown as Client;
+		const client = new (class extends Client {
+			get clientType() {
+				return "boundary";
+			}
+			sendRaw = vi.fn();
+			kick = vi.fn();
+		})(room.name);
+		client.id = guest.id;
+		client.token = guest.token;
+		client.joinStatus = ClientJoinStatus.Joined;
+		vi.spyOn(client, "on").mockImplementation((event, handler) => {
+			if (event === "message") {
+				onMessage = handler as typeof onMessage;
+			}
+		});
 		addClient(client);
 		for (const type of [
 			0,

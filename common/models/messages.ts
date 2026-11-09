@@ -185,6 +185,8 @@ export interface ClientMessageRoomRequest extends ClientMessageBase {
 export interface RoomRequestAuthorization {
 	token: AuthToken;
 	clientId?: ClientId;
+	/** Server-only captured connection lifetime. Absent for REST/internal requests. */
+	assertCurrent?: () => void;
 }
 
 /**

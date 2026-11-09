@@ -1,5 +1,6 @@
 import type { Mood, MusicQueueItem } from "ott-common/models/music.js";
 import { createHash, randomUUID } from "node:crypto";
+import type { PlaybackAuthorization as Authorize } from "../playback/authorization.js";
 import { Mutex } from "@divine/synchronization";
 import type {
 	MusicCandidate,
@@ -90,7 +91,6 @@ type RefreshedContext = {
 	identities: string[];
 	invalidation: number;
 };
-type Authorize = () => void | Promise<void>;
 
 /** Owns the entire read/transition/SQL commit/publication boundary. Provider calls
  * are outside lock; a revision/head check makes a stale resolution harmless. */
@@ -290,6 +290,7 @@ export class RoomMusic {
 				authorize,
 				finalize: timeline
 					? () => {
+							authorize?.assertCurrent?.();
 							next = timeline(Date.now());
 							// Retryable candidate derivation only; no live sequence or publication.
 							install = this.stagePlayback?.(next, seek);

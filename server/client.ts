@@ -4,7 +4,12 @@ import {
 	type ClientInfo,
 	OttWebsocketError,
 } from "ott-common/models/types.js";
-import type { ClientMessage, ServerMessage } from "ott-common/models/messages.js";
+import type {
+	ClientMessage,
+	RoomRequestAuthorization,
+	ServerMessage,
+} from "ott-common/models/messages.js";
+import { OttException } from "ott-common/exceptions.js";
 import type WebSocket from "ws";
 import { type SessionInfo, setSessionInfo } from "./auth/tokens.js";
 import { v4 as uuidv4 } from "uuid";
@@ -36,7 +41,9 @@ export enum ClientJoinStatus {
  */
 export abstract class Client {
 	id: ClientId;
-	room: string;
+	private _room: string;
+	private authGeneration = 0;
+	private disconnected = false;
 	token: AuthToken | null = null;
 	session?: SessionInfo;
 	joinStatus: ClientJoinStatus = ClientJoinStatus.WaitingForAuth;
@@ -47,17 +54,60 @@ export abstract class Client {
 
 	constructor(room: string) {
 		this.id = uuidv4();
-		this.room = room;
+		this._room = room;
 		this.bus = new EventEmitter();
 	}
 
 	abstract get clientType(): string;
+
+	get room() {
+		return this._room;
+	}
+	set room(value: string) {
+		if (value !== this._room) {
+			this.invalidateAuthorization();
+			this.joinStatus = ClientJoinStatus.WaitingForAuth;
+			this._room = value;
+		}
+	}
+	private invalidateAuthorization() {
+		this.authGeneration++;
+		this.playbackSubscribed = false;
+		this.playbackSubscriptionRevision++;
+	}
+	/** Capture once at ingress; recovery subscriptions must not renew command authority. */
+	captureAuthorization(): RoomRequestAuthorization {
+		const generation = this.authGeneration,
+			room = this.room,
+			token = this.token,
+			clientId = this.id;
+		const assertCurrent = () => {
+			if (
+				this.disconnected ||
+				generation !== this.authGeneration ||
+				room !== this.room ||
+				token !== this.token ||
+				clientId !== this.id ||
+				!token ||
+				this.joinStatus !== ClientJoinStatus.Joined
+			) {
+				throw new OttException("unauthorized");
+			}
+		};
+		assertCurrent();
+		return Object.freeze({ token: token!, clientId, assertCurrent });
+	}
 
 	on<E extends ClientEvents>(event: E, handler: ClientEventHandlers<E>) {
 		this.bus.on(event, handler);
 	}
 
 	emit<E extends ClientEvents>(event: E, ...args: Parameters<ClientEventHandlers<E>>) {
+		if (event === "disconnect") {
+			this.disconnected = true;
+			this.invalidateAuthorization();
+			this.joinStatus = ClientJoinStatus.WaitingForAuth;
+		}
 		this.bus.emit(event, ...args);
 	}
 
@@ -72,21 +122,35 @@ export abstract class Client {
 	}
 
 	public async auth(token: AuthToken): Promise<void> {
-		this.playbackSubscribed = false;
-		this.playbackSubscriptionRevision++;
+		this.invalidateAuthorization();
+		const generation = this.authGeneration;
+		this.joinStatus = ClientJoinStatus.WaitingForAuth;
+		this.token = null;
+		this.session = undefined;
+		if (this.disconnected) {
+			return;
+		}
 		if (!token) {
 			log.warn("Client sent empty auth token, kicking");
 			this.kick(OttWebsocketError.MISSING_TOKEN);
 			return;
 		}
-		this.token = token;
+		let session: SessionInfo;
 		try {
-			this.session = await getSessionInfo(this.token);
+			session = await getSessionInfo(token);
 		} catch (err) {
+			if (generation !== this.authGeneration || this.disconnected) {
+				return;
+			}
 			log.warn(`Client sent invalid auth token, kicking: ${err}`);
 			this.kick(OttWebsocketError.MISSING_TOKEN);
 			return;
 		}
+		if (generation !== this.authGeneration || this.disconnected) {
+			return;
+		}
+		this.token = token;
+		this.session = session;
 		this.joinStatus = ClientJoinStatus.Joined;
 		this.emit("auth", this, this.token, this.session);
 	}

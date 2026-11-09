@@ -7,6 +7,7 @@ import { createSubscriber } from "./redisclient.js";
 import {
 	type ClientMessage,
 	type RoomRequest,
+	type RoomRequestAuthorization,
 	RoomRequestType,
 	isRoomRequestType,
 	type ServerMessage,
@@ -23,7 +24,7 @@ import {
 } from "ott-common/models/types.js";
 import roommanager from "./roommanager.js";
 import { ANNOUNCEMENT_CHANNEL, ROOM_NAME_REGEX } from "ott-common/constants.js";
-import tokens, { type SessionInfo } from "./auth/tokens.js";
+import tokens from "./auth/tokens.js";
 import { Gauge } from "prom-client";
 import { replacer } from "ott-common/serialize.js";
 import { type Client, ClientJoinStatus, DirectClient, BalancerClient } from "./client.js";
@@ -48,7 +49,7 @@ import { z } from "zod";
 const log = getLogger("clientmanager");
 
 const connections: Client[] = [];
-const roomJoins: Map<string, Client[]> = new Map();
+const roomJoins: Map<string, Set<Client>> = new Map();
 export async function setup(): Promise<void> {
 	log.debug("setting up client manager...");
 	const server = wss;
@@ -133,14 +134,25 @@ export function addClient(client: Client) {
 	client.on("disconnect", onClientDisconnect);
 }
 
-async function onClientAuth(client: Client, token: AuthToken, session: SessionInfo) {
-	const result = await roommanager.getRoom(client.room);
+async function onClientAuth(client: Client) {
+	let authorization = client.captureAuthorization();
+	const roomName = client.room;
+	const result = await roommanager.getRoom(roomName);
+	try {
+		authorization.assertCurrent?.();
+	} catch {
+		return;
+	}
 	if (!result.ok) {
 		client.kick(OttWebsocketError.ROOM_NOT_FOUND);
 		return;
 	}
 	const room = result.value;
-	client.room = room.name;
+	if (client.room !== room.name) {
+		client.room = room.name;
+		client.joinStatus = ClientJoinStatus.Joined;
+		authorization = client.captureAuthorization();
+	}
 
 	// full sync
 	const syncMsg = Object.assign(
@@ -153,19 +165,29 @@ async function onClientAuth(client: Client, token: AuthToken, session: SessionIn
 	let clients = roomJoins.get(room.name);
 	if (clients === undefined) {
 		log.warn("room joins not present, creating");
-		clients = [];
+		clients = new Set();
 		roomJoins.set(room.name, clients);
 	}
-	clients.push(client);
+	for (const [name, joins] of roomJoins) {
+		if (name !== room.name) {
+			joins.delete(client);
+		}
+	}
+	clients.add(client);
 
 	// actually join the room
 	try {
-		await makeRoomRequest(client, {
-			type: RoomRequestType.JoinRequest,
-			info: client.getClientInfo(),
-		});
+		await room.processUnauthorizedRequest(
+			{
+				type: RoomRequestType.JoinRequest,
+				info: client.getClientInfo(),
+			},
+			authorization,
+		);
+		authorization.assertCurrent?.();
 	} catch (e) {
 		log.error(`Failed to process join request for client ${client.id}: ${e}`);
+		return;
 	}
 
 	// initialize client info
@@ -289,9 +311,21 @@ export async function handlePlaybackMessage(
 			? ++client.playbackSubscriptionRevision
 			: client.playbackSubscriptionRevision;
 	const token = client.token;
+	const roomName = client.room;
+	const authorization = client.captureAuthorization();
 	const session = await tokens.getSessionInfo(token);
-	const found = await roommanager.getRoom(client.room, { mustAlreadyBeLoaded: true });
-	if (!found.ok || client.token !== token || client.joinStatus !== ClientJoinStatus.Joined) {
+	try {
+		authorization.assertCurrent?.();
+	} catch {
+		return;
+	}
+	const found = await roommanager.getRoom(roomName, { mustAlreadyBeLoaded: true });
+	try {
+		authorization.assertCurrent?.();
+	} catch {
+		return;
+	}
+	if (!found.ok) {
 		return;
 	}
 	const room = found.value;
@@ -322,13 +356,13 @@ export async function handlePlaybackMessage(
 		if (!client.playbackSubscribed) {
 			return;
 		}
-		const result = await room.executePlaybackCommand(msg.command, {
-			token,
-			clientId: client.id,
-		});
-		if (client.token === token && client.joinStatus === ClientJoinStatus.Joined) {
-			client.send({ action: "playback-result", result });
+		const result = await room.executePlaybackCommand(msg.command, authorization);
+		try {
+			authorization.assertCurrent?.();
+		} catch {
+			return;
 		}
+		client.send({ action: "playback-result", result });
 	}
 }
 
@@ -343,19 +377,9 @@ async function onClientDisconnect(client: Client) {
 			log.error("failed to remove client from connections");
 			return;
 		}
-		const client = clients[0];
-		const joins = roomJoins.get(client.room);
-		if (joins) {
-			const index = joins.indexOf(client);
-			if (index !== -1) {
-				joins.splice(index, 1);
-			}
-		}
 	}
-
-	if (client.joinStatus !== ClientJoinStatus.Joined) {
-		log.debug(`Client ${client.id} disconnected before joining`);
-		return;
+	for (const joins of roomJoins.values()) {
+		joins.delete(client);
 	}
 
 	const result = await roommanager.getRoom(client.room, { mustAlreadyBeLoaded: true });
@@ -366,6 +390,9 @@ async function onClientDisconnect(client: Client) {
 		return;
 	}
 	const room = result.value;
+	if (!room.getUser(client.id)) {
+		return;
+	}
 	// it's safe to bypass authenticating the leave request because this event is only triggered by the socket closing
 	try {
 		await room.processRequestUnsafe(
@@ -502,18 +529,17 @@ async function makeRoomRequest(client: Client, request: RoomRequest): Promise<vo
 	if (!client.token) {
 		throw new MissingToken();
 	}
+	const authorization: RoomRequestAuthorization = client.captureAuthorization();
 	const result = await roommanager.getRoom(client.room, {
 		mustAlreadyBeLoaded: true,
 	});
+	authorization.assertCurrent?.();
 	if (!result.ok) {
 		log.error(`Failed to get room ${client.room} when processing request`);
 		return;
 	}
 	const room = result.value;
-	await room.processUnauthorizedRequest(request, {
-		token: client.token,
-		clientId: client.id,
-	});
+	await room.processUnauthorizedRequest(request, authorization);
 }
 
 async function broadcast(roomName: string, msg: ServerMessage) {
@@ -524,6 +550,9 @@ async function broadcast(roomName: string, msg: ServerMessage) {
 	const text = JSON.stringify(msg, replacer);
 	const balancers = new Set<string>();
 	for (const client of clients) {
+		if (client.room !== roomName) {
+			continue;
+		}
 		if (client instanceof BalancerClient) {
 			balancers.add(client.conn.id);
 		} else {
@@ -560,7 +589,7 @@ async function onRoomPublish(roomName: string, msg: ServerMessage) {
 	if (msg.action === "playback-event") {
 		// Per-client sends preserve opt-in over balancers too; room broadcasts cannot filter.
 		for (const client of roomJoins.get(roomName) ?? []) {
-			if (client.playbackSubscribed) {
+			if (client.room === roomName && client.playbackSubscribed) {
 				try {
 					client.send(msg);
 				} catch (error) {
@@ -595,7 +624,7 @@ const roomUnloadReasons: Record<UnloadReason, OttWebsocketError> = {
 function onRoomUnload(roomName: string, reason: UnloadReason) {
 	const code = roomUnloadReasons[reason];
 	const clients = roomJoins.get(roomName);
-	log.debug(`Room unloaded, kicking ${clients?.length} clients`);
+	log.debug(`Room unloaded, kicking ${clients?.size} clients`);
 	if (clients) {
 		for (const client of clients) {
 			client.kick(code);
@@ -624,7 +653,14 @@ async function onUserModified(token: AuthToken): Promise<void> {
 	log.debug(`User was modified, pulling info and telling rooms`);
 	for (const client of connections) {
 		if (client.token === token) {
-			client.session = await tokens.getSessionInfo(token);
+			const authorization = client.captureAuthorization();
+			const session = await tokens.getSessionInfo(token);
+			try {
+				authorization.assertCurrent?.();
+			} catch {
+				continue;
+			}
+			client.session = session;
 			await makeRoomRequest(client, {
 				type: RoomRequestType.UpdateUser,
 				info: client.getClientInfo(),
@@ -655,7 +691,7 @@ function getClient(id: ClientId): Client | undefined {
 }
 
 function getClientsInRoom(roomName: string): Client[] {
-	return roomJoins.get(roomName) ?? [];
+	return [...(roomJoins.get(roomName) ?? [])];
 }
 
 setInterval(() => {

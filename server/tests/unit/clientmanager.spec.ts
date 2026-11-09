@@ -19,6 +19,8 @@ import { loadModels } from "../../models/index.js";
 import type { Request } from "express";
 import { loadConfigFile, conf } from "../../ott-config.js";
 import { type M2BInit, UnloadReason, type MsgB2M } from "../../generated.js";
+import tokens from "../../auth/tokens.js";
+import * as tokenModule from "../../auth/tokens.js";
 
 class TestClient extends Client {
 	sendRawMock = vi.fn();
@@ -83,6 +85,11 @@ describe("ClientManager", () => {
 	});
 
 	beforeEach(async () => {
+		vi.spyOn(tokens, "getSessionInfo").mockImplementation(async token => ({
+			isLoggedIn: false,
+			username: token,
+		}));
+		vi.spyOn(tokenModule, "getSessionInfo").mockImplementation(tokens.getSessionInfo);
 		await roommanager.createRoom({
 			name: "foo",
 			isTemporary: true,
@@ -91,6 +98,8 @@ describe("ClientManager", () => {
 
 	afterEach(async () => {
 		await roommanager.unloadRoom("foo", UnloadReason.Admin);
+		vi.mocked(tokens.getSessionInfo).mockRestore();
+		vi.mocked(tokenModule.getSessionInfo).mockRestore();
 	});
 
 	it.each([
@@ -153,7 +162,7 @@ describe("ClientManager", () => {
 	it("should add clients to roomJoins when they auth", async () => {
 		const client = new TestClient("foo");
 		clientmanager.addClient(client);
-		client.emit("auth", client, "token", { isLoggedIn: false, username: "foo" });
+		await client.auth("token");
 		await new Promise(resolve => setTimeout(resolve, 100));
 		const joins = clientmanager.getClientsInRoom("foo");
 		expect(joins).toHaveLength(1);
@@ -169,7 +178,7 @@ describe("ClientManager", () => {
 	it("should remove clients from roomJoins when they disconnect", async () => {
 		const client = new TestClient("foo");
 		clientmanager.addClient(client);
-		client.emit("auth", client, "token", { isLoggedIn: false, username: "foo" });
+		await client.auth("token");
 		await new Promise(resolve => setTimeout(resolve, 100));
 		const joins = clientmanager.getClientsInRoom("foo");
 		expect(joins).toHaveLength(1);
@@ -185,7 +194,7 @@ describe("ClientManager", () => {
 		await mockBalancerCon.emitInit();
 		const client = new BalancerClient("foo", "foo", mockBalancerCon);
 		clientmanager.addClient(client);
-		client.emit("auth", client, "token", { isLoggedIn: false, username: "foo" });
+		await client.auth("token");
 		await new Promise(resolve => setTimeout(resolve, 100));
 		const joins = clientmanager.getClientsInRoom("foo");
 		expect(joins).toHaveLength(1);
@@ -212,7 +221,7 @@ describe("ClientManager", () => {
 		const clients = [client1, client2, client3, client4, client5];
 		for (const [i, client] of clients.entries()) {
 			clientmanager.addClient(client);
-			client.emit("auth", client, `token${i}`, { isLoggedIn: false, username: `foo${i}` });
+			await client.auth(`token${i}`);
 		}
 		await new Promise(resolve => setTimeout(resolve, 100));
 		const joins = clientmanager.getClientsInRoom("foo");

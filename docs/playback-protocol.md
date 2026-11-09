@@ -91,6 +91,10 @@ stay on legacy playback unless a valid requested snapshot establishes the new ti
 establishment, ignore legacy playback fields for rendering, including legacy `currentSource`.
 Other sync fields and room events remain useful for queue/UI updates.
 
+Registration is idempotent for each connection: reauthentication does not add another recipient.
+Distinct tabs remain independent, including individually targeted balancer subscribers. Disconnect
+removes the connection from every recipient set; ordinary balancer broadcasts remain once per balancer.
+
 On reconnect/room change reset the clock and subscription generation, request a new snapshot, and
 ignore replies/events belonging to the previous connection. Install snapshots only for the latest
 outstanding nonce on the expected authenticated room connection. For the same epoch, never replace
@@ -183,6 +187,19 @@ account claims, to authorize. Music next explicitly tracks its own committed cle
 authorization; another command cannot claim that clear. Legacy transition decisions are serialized;
 Music owns its SQL save → install → publication mutex. Room update loops cannot overlap.
 
+Socket authorization also captures an immutable connection lifetime guard at ingress. Every auth
+attempt (including the same token), disconnect and room change invalidates that guard immediately.
+It is checked around session I/O and at playback commit, including the synchronous Music SQL
+finalizer after awaited authorization. Superseded authentication/session/account lookups cannot
+install membership or send capability/recovery responses. This lifetime is independent of snapshot
+subscription revisions: requesting recovery does not cancel an otherwise authorized command.
+REST/internal legacy requests without a socket guard retain their existing session authorization.
+
+Undo validates its required source, position and queue fields before any mutation. Playback restores
+stage the complete journal candidate before queue/source/anchor changes, so an invalid undo leaves
+playback, queue, journal, dirty state and publications unchanged. Valid skip undo creates a new
+occurrence; seek undo accepts zero and add undo can clear the current source.
+
 ```json
 {
 	"action": "playback-result",
@@ -211,6 +228,10 @@ are installed before authentication/transition awaits. Concurrent identical vali
 one promise/result; a changed payload conflicts. Both successful and rejected completed results are
 cached. Duplicate skip requests therefore cannot toggle votes twice, including zero-event votes.
 This does not change Music's separate persistent admission requestIds.
+
+Reauthentication does not replace a pending reservation's captured authority. A new lifetime retry
+can share its original result, but cannot revive a stale pending command; a rejection remains cached.
+Completed results remain scoped to session/principal/requestId across same-session reauthentication.
 
 The cache holds at most 512 reservations per room, for five minutes from reservation time. Completed
 entries expire lazily on a new command. Pending entries are never evicted; capacity returns rejection.
@@ -268,7 +289,8 @@ handling. Native provider errors and actual listening evidence are separate conc
 completion or Connected Music validation is claimed here.
 
 Focused regression suites: `server/tests/unit/playback-transport.spec.ts`, `room.spec.ts`,
-`room-music.spec.ts`, `room-music-boundaries.spec.ts`, `room-music-persistence.spec.ts`. Run Vitest with
+`playback-interleavings.spec.ts`, `room-music.spec.ts`, `room-music-boundaries.spec.ts`,
+`room-music-persistence.spec.ts`. Run Vitest with
 `envFile:false` in startVitest's fourth (Vite override) argument, `config:false`, an empty envDir,
 Node environment and the Redis mock setup to avoid loading application env files. Music tests use
 isolated SQLite fixtures. Legacy room unit checks can mock loadModels (they do not assert storage).
