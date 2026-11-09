@@ -1,4 +1,27 @@
-# How to deploy OTT (Self-hosted)
+# How to deploy Undertone (Self-hosted)
+
+## Source availability
+
+Undertone is an AGPL-3.0-or-later fork of OpenTogetherTube; see [LICENSE](../LICENSE)
+and [NOTICE.md](../NOTICE.md). Modified versions used over a network must prominently
+offer their users the Corresponding Source of that version at no charge (AGPL section 13).
+
+The application footer and attribution page link to the source for the Git revision embedded
+at build time. Build production releases from a clean, published commit. If supplying
+`GIT_COMMIT`, use the revision actually being built. Without a recognized Git hash, the link
+falls back to the fork's master branch; that fallback is not a substitute for checking that
+the offered source corresponds to the deployed version.
+
+If you modify Undertone further or host its source elsewhere, set `VITE_SOURCE_CODE_URL`
+in the client build environment to a public URL providing the complete corresponding source
+for that release. Vite embeds this setting at build time; changing only the running server's
+environment will not change an already built client. Publish your changes and the required
+build/install scripts and dependency manifests. Do not publish passwords, tokens, or private
+runtime configuration. Verify the source link from the deployed application, and keep the
+source available while that version is offered to users.
+
+The inherited deployment instructions below otherwise apply to Undertone.
+
 
 ## Quickstart
 
@@ -9,8 +32,8 @@ This method will run OTT in production mode, using redis and postgresql. However
 1. Install docker and docker-compose
 2. Clone the repository
 ```bash
-git clone https://github.com/dyc3/opentogethertube.git
-cd opentogethertube
+git clone https://github.com/MorningStar3600/undertone.git
+cd undertone
 ```
 1. Copy the example configuration file
 ```bash

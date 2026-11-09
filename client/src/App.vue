@@ -156,6 +156,7 @@
 			<main class="relative flex-1">
 				<router-view />
 			</main>
+			<AppFooter v-if="!fullscreen" class="px-4 pb-6" />
 
 			<!-- create room dialog -->
 			<Dialog v-model:open="showCreateRoomForm">
@@ -198,6 +199,7 @@
 </template>
 
 <script lang="ts">
+import AppFooter from "@/components/AppFooter.vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -230,6 +232,7 @@ import LocaleSelector from "@/components/navbar/LocaleSelector.vue";
 const App = defineComponent({
 	name: "app",
 	components: {
+		AppFooter,
 		CreateRoomForm,
 		LogInForm,
 		NavUser,

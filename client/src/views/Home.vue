@@ -31,7 +31,7 @@
 						<router-link to="/rooms">{{ $t("landing.hero.btns.browse") }}</router-link>
 					</Button>
 					<Button variant="marquee" size="xl" as-child>
-						<a href="https://github.com/dyc3/opentogethertube">
+						<a :href="sourceCodeUrl">
 							<Icon :icon="mdiGithub" class="size-5" />
 							{{ $t("landing.hero.btns.source") }}
 						</a>
@@ -117,8 +117,6 @@
 			</section>
 
 			<p class="mb-10 text-sm italic text-dim">{{ $t("footer.disclaimer") }}</p>
-
-			<AppFooter />
 		</div>
 	</div>
 </template>
@@ -141,7 +139,7 @@ import {
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from "vue";
 import { createRoomHelper } from "@/util/roomcreator";
 import { useStore } from "@/store";
-import AppFooter from "@/components/AppFooter.vue";
+import { sourceCodeUrl } from "@/util/source-code";
 
 // Lazy-loaded: pulls in the shaders/three.js bundle as its own chunk so it
 // doesn't bloat the landing page's initial JS. The .hero CSS gradient shows

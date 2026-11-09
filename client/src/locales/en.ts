@@ -98,6 +98,16 @@ export default {
 			contribute: "Contribute",
 		},
 	},
+	fork: {
+		notice: "Undertone is an independent fork of OpenTogetherTube, maintained by MorningStar3600.",
+		source: "Source code for this version",
+		license: "AGPL-3.0-or-later license",
+		"upstream-credit":
+			"Original project: Carson McManus (dyc3) and the OpenTogetherTube contributors",
+		modified:
+			"Modified on 2026-11-09: Undertone specification and fork/source notices. See the source history for individual changes.",
+		terms: "You may modify and redistribute this software under the GNU AGPL, version 3 or any later version. It comes without warranty, to the extent permitted by law. See the license for its conditions.",
+	},
 	footer: {
 		disclaimer:
 			"Disclaimer: The OpenTogetherTube project is not associated with TogetherTube nor Watch2Gether.",
