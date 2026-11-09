@@ -231,6 +231,7 @@ export default class InvidiousAdapter extends ServiceAdapter {
 
 		// Prefer DASH/HLS (higher quality) and fall back to progressive "direct"
 		const video = await this.parseAsDirect(data, host, id);
+		video.originalReference = { service: this.serviceId, id: videoId };
 
 		// Pre-fill cache to avoid a later HEAD/probe by the DirectVideoAdapter that might be blocked by CORS
 		// or upstream shields on public instances. – Browser+CORS / Invidious infra

@@ -126,4 +126,57 @@ describe("AddPreview component", () => {
 			expect(API.post).not.toHaveBeenCalled();
 		},
 	);
+	it.each(["direct", "hls", "dash", "odysee"])(
+		"uses a returned original reference for transformed %s previews",
+		async service => {
+			const originalReference = { service: "invidious", id: "inv.example:studio" };
+			API.get.mockResolvedValueOnce({
+				data: {
+					success: true,
+					result: [
+						{
+							service,
+							id: "https://cdn.example/rotating-stream",
+							title: "Same title",
+							originalReference,
+						},
+					],
+				},
+			});
+			const { wrapper, store } = mountComponent(AddPreview);
+			store.commit("room/SYNC", { queueMode: QueueMode.Music });
+			await wrapper.get('[data-cy="add-preview-input"]').setValue("search");
+			await wrapper.get('[data-cy="add-preview-manual-search"]').trigger("click");
+			await flush();
+			await flush();
+			expect(wrapper.getComponent(MusicPreview).props("reference")).toEqual(
+				originalReference,
+			);
+		},
+	);
+	it("preserves a highlighted original identity separately from a collection with matching titles", async () => {
+		const highlighted = {
+			service: "dash",
+			id: "https://cdn.example/highlight",
+			title: "Same title",
+			originalReference: { service: "invidious", id: "inv.example:live" },
+		};
+		const item = {
+			service: "direct",
+			id: "https://cdn.example/other",
+			title: "Same title",
+			originalReference: { service: "invidious", id: "inv.example:studio" },
+		};
+		API.get.mockResolvedValueOnce({ data: { success: true, result: [item], highlighted } });
+		const { wrapper, store } = mountComponent(AddPreview);
+		store.commit("room/SYNC", { queueMode: QueueMode.Music });
+		await wrapper.get('[data-cy="add-preview-input"]').setValue("collection search");
+		await wrapper.get('[data-cy="add-preview-manual-search"]').trigger("click");
+		await flush();
+		await flush();
+		expect(wrapper.findAllComponents(MusicPreview).map(p => p.props("reference"))).toEqual([
+			highlighted.originalReference,
+			item.originalReference,
+		]);
+	});
 });

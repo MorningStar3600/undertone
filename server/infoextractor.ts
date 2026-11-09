@@ -197,9 +197,10 @@ export default {
 
 		const adapter = this.getServiceAdapter(service);
 		const [cachedVideo, missingInfo] = await this.getCachedVideo(service, videoId);
+		const originalReference = { service, id: videoId };
 
 		if (missingInfo.length === 0) {
-			return adapter.postProcessVideo(cachedVideo);
+			return { ...adapter.postProcessVideo(cachedVideo), originalReference };
 		} else {
 			log.warn(
 				`MISSING INFO for ${cachedVideo.service}:${
@@ -214,7 +215,7 @@ export default {
 					if (adapter.isCacheSafe) {
 						this.updateCache(video);
 					}
-					return video;
+					return { ...video, originalReference };
 				} else {
 					log.info("video services don't match, must be an alias");
 					const video = fetchedVideo;
@@ -222,7 +223,7 @@ export default {
 					if (newadapter.isCacheSafe) {
 						this.updateCache(video);
 					}
-					return video;
+					return { ...video, originalReference };
 				}
 			} catch (e) {
 				if (e instanceof OutOfQuotaException) {
@@ -233,7 +234,7 @@ export default {
 						log.warn(
 							`Returning incomplete cached result for ${cachedVideo.service}:${cachedVideo.id}`,
 						);
-						return cachedVideo;
+						return { ...cachedVideo, originalReference };
 					} else {
 						throw e;
 					}
@@ -266,6 +267,14 @@ export default {
 			Object.entries(grouped).map(async ([service, serviceVideos]) => {
 				// Handle each service separately
 				const adapter = this.getServiceAdapter(service);
+				const matches = (video: Video, id: string) => {
+					const ref = video.originalReference ?? video;
+					return ref.service === service && ref.id === id;
+				};
+				const withReference = (video: Video, id: string): Video => ({
+					...video,
+					originalReference: { service: service as VideoService, id },
+				});
 				const cachedVideos: Video[] = adapter.isCacheSafe
 					? await storage.getManyVideoInfo(serviceVideos)
 					: serviceVideos;
@@ -282,22 +291,26 @@ export default {
 					hasResolvedVideo = true;
 				}
 				if (requests.length === 0 && adapter.isCacheSafe) {
-					return cachedVideos;
+					return cachedVideos.map(video =>
+						withReference(adapter.postProcessVideo(video), video.id),
+					);
 				}
 
 				const fetchedVideos = await adapter.fetchManyVideoInfo(requests);
-				if (requests.some(req => !fetchedVideos.some(video => video.id === req.id))) {
+				if (requests.some(req => !fetchedVideos.some(video => matches(video, req.id)))) {
 					complete = false;
 				}
-				if (fetchedVideos.some(video => serviceVideos.some(req => req.id === video.id))) {
+				if (
+					fetchedVideos.some(video => serviceVideos.some(req => matches(video, req.id)))
+				) {
 					hasResolvedVideo = true;
 				}
 				const finalResults = cachedVideos.map(video => {
-					const fetchedVideo = fetchedVideos.find(v => v.id === video.id);
+					const fetchedVideo = fetchedVideos.find(v => matches(v, video.id));
 					if (fetchedVideo) {
-						return mergeVideo(video, fetchedVideo);
+						return withReference(mergeVideo({ ...video }, fetchedVideo), video.id);
 					} else {
-						return video;
+						return withReference(video, video.id);
 					}
 				});
 				return finalResults;
@@ -314,7 +327,14 @@ export default {
 		const flattened = results.flat();
 		// type cast should be safe here because find should always be able to find a video.
 		const result = videoIds
-			.map(video => flattened.find(v => v.id === video.id) as Video)
+			.map(
+				video =>
+					flattened.find(
+						v =>
+							v.originalReference?.service === video.service &&
+							v.originalReference.id === video.id,
+					) as Video,
+			)
 			.filter(v => !!v);
 		this.updateCache(
 			result.filter(video => {

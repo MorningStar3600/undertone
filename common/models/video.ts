@@ -20,7 +20,11 @@ export interface VideoMetadata {
 	subtitleUrl?: string;
 }
 
-export type Video = VideoId & Partial<VideoMetadata>;
+export type Video = VideoId &
+	Partial<VideoMetadata> & {
+		/** Provider identity before resolving a playable alias. Never an admission grant. */
+		originalReference?: VideoId;
+	};
 export interface QueueItemExtras {
 	startAt?: number;
 	endAt?: number;

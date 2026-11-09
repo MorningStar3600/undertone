@@ -296,6 +296,19 @@ export class MusicCatalogue {
 		return trackDto(row.get({ plain: true }));
 	}
 
+	/** Shared vocabulary lookup, restricted to requested UUIDs; no libraries or annotations. */
+	async moodsByIds(ids: string[]): Promise<Mood[]> {
+		const unique = [...new Set(ids.map(id => MusicIdSchema.parse(id)))];
+		const result: Mood[] = [];
+		for (let offset = 0; offset < unique.length; offset += 100) {
+			const rows = await this.models().Mood.findAll({
+				where: { id: { [Op.in]: unique.slice(offset, offset + 100) } },
+			});
+			result.push(...rows.map(row => moodDto(row.get({ plain: true }))));
+		}
+		return result;
+	}
+
 	/** Trusted server import, also usable for manual room requests without adding a library link. */
 	async resolveTrack(
 		reference: VideoId | { url: string },
@@ -684,7 +697,7 @@ function trackDto(track: Track): Track {
 }
 /** Adapters can use a signed playback URL as their fallback title. It is not public metadata.
  * Also sanitize old/truncated URL titles until the cleanup migration has run. */
-function safeTrackTitle(title?: string): string {
+export function safeTrackTitle(title?: string): string {
 	return !title || URL_TITLE.test(title) ? "Untitled track" : title.slice(0, 512);
 }
 function moodDto(mood: Mood): Mood {

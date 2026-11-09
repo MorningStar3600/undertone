@@ -821,7 +821,7 @@ export default class OdyseeAdapter extends ServiceAdapter {
 				...(isHls ? { hls_url: finalStreamingUrl } : null),
 			};
 			log.debug(`Odysee FE payload (bypass resolve) -> ${JSON.stringify(snapshot)}`);
-			return result;
+			return { ...result, originalReference: { service: this.serviceId, id: videoId } };
 		}
 
 		const { canonicalUri, resolved } = await resolveCanonicalUri(videoId);
@@ -986,6 +986,6 @@ export default class OdyseeAdapter extends ServiceAdapter {
 		};
 		log.debug(`Odysee FE payload -> ${JSON.stringify(snapshot)}`);
 
-		return result;
+		return { ...result, originalReference: { service: this.serviceId, id: videoId } };
 	}
 }

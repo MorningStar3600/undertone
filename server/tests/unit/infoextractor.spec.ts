@@ -21,6 +21,11 @@ import { loadModels } from "../../models/index.js";
 import { loadConfigFile, conf } from "../../ott-config.js";
 import type { Video, VideoMetadata, VideoService } from "ott-common/models/video.js";
 
+const withReference = (video: Video): Video => ({
+	...video,
+	originalReference: { service: video.service, id: video.id },
+});
+
 class TestAdapter extends ServiceAdapter {
 	get serviceId(): VideoService {
 		return "fakeservice" as VideoService;
@@ -203,7 +208,10 @@ describe("InfoExtractor", () => {
 				["title", "description", "length", "thumbnail"],
 			]);
 			adapterFetchVideoInfo.mockResolvedValue(vid);
-			expect(await InfoExtractor.getVideoInfo("youtube", "asdf")).toEqual(vid);
+			expect(await InfoExtractor.getVideoInfo("youtube", "asdf")).toEqual({
+				...vid,
+				originalReference: { service: "youtube", id: "asdf" },
+			});
 			expect(adapterFetchVideoInfo).toBeCalledTimes(1);
 			expect(getCachedVideo).toBeCalledTimes(1);
 		});
@@ -227,7 +235,10 @@ describe("InfoExtractor", () => {
 				[],
 			]);
 			adapterFetchVideoInfo.mockResolvedValue(vid);
-			expect(await InfoExtractor.getVideoInfo("youtube", "asdf")).toEqual(vid);
+			expect(await InfoExtractor.getVideoInfo("youtube", "asdf")).toEqual({
+				...vid,
+				originalReference: { service: "youtube", id: "asdf" },
+			});
 			expect(adapterFetchVideoInfo).toBeCalledTimes(0);
 			expect(getCachedVideo).toBeCalledTimes(1);
 		});
@@ -239,9 +250,10 @@ describe("InfoExtractor", () => {
 				["title", "description", "thumbnail"],
 			]);
 			adapterFetchVideoInfo.mockRejectedValue(new OutOfQuotaException("fake"));
-			expect(await InfoExtractor.getVideoInfo("youtube", "asdf")).toEqual(
-				_.pick(vid, "service", "id", "length"),
-			);
+			expect(await InfoExtractor.getVideoInfo("youtube", "asdf")).toEqual({
+				..._.pick(vid, "service", "id", "length"),
+				originalReference: { service: "youtube", id: "asdf" },
+			});
 			expect(adapterFetchVideoInfo).toBeCalledTimes(1);
 		});
 
@@ -342,7 +354,7 @@ describe("InfoExtractor", () => {
 						vids.map(vid => _.pick(vid, "service", "id")),
 						{ requireAny },
 					),
-				).toEqual({ videos: vids, complete: true });
+				).toEqual({ videos: vids.map(withReference), complete: true });
 				expect(adapterFetchManyVideoInfo).not.toBeCalled();
 			},
 		);
@@ -355,7 +367,7 @@ describe("InfoExtractor", () => {
 			updateCache.mockResolvedValue();
 			expect(
 				await InfoExtractor.getManyVideoInfo(vids.map(vid => _.pick(vid, "service", "id"))),
-			).toEqual({ videos: vids, complete: true });
+			).toEqual({ videos: vids.map(withReference), complete: true });
 			expect(adapterFetchManyVideoInfo).toBeCalledTimes(1);
 			expect(updateCache).toBeCalledTimes(1);
 		});
@@ -369,7 +381,7 @@ describe("InfoExtractor", () => {
 					vids.map(vid => _.pick(vid, "service", "id")),
 					{ requireAny: true },
 				),
-			).toEqual({ videos: partialResults, complete: false });
+			).toEqual({ videos: partialResults.map(withReference), complete: false });
 		});
 
 		it("accepts a successful lookup when another service's lookups all fail", async () => {
@@ -382,7 +394,7 @@ describe("InfoExtractor", () => {
 				requests[0].id === vids[0].id ? [vids[0]] : [],
 			);
 			expect(await InfoExtractor.getManyVideoInfo(videoIds, { requireAny: true })).toEqual({
-				videos: [vids[0], videoIds[1]],
+				videos: [vids[0], videoIds[1]].map(withReference),
 				complete: false,
 			});
 		});
@@ -401,7 +413,7 @@ describe("InfoExtractor", () => {
 						vids.map(vid => _.pick(vid, "service", "id")),
 						{ requireAny },
 					),
-				).toEqual({ videos: vids, complete: true });
+				).toEqual({ videos: vids.map(withReference), complete: true });
 				expect(adapterFetchManyVideoInfo).toBeCalledTimes(1);
 				expect(updateCache).toBeCalledTimes(1);
 			},

@@ -2,8 +2,9 @@
 
 The room UI consumes `server/music/room-music-api.md` and the existing
 `MusicRoomActionInput`, `MusicRoomPublic`, `MusicRoomRequestSummary` and
-`MusicRoomResult` types. It adds no backend/common/store interface, REST control
-channel, catalogue candidates, local scheduling, or demo data.
+`MusicRoomResult` types. Additive preview, rule vocabulary and private pending-page
+DTOs extend that contract, with no separate REST control channel, catalogue
+candidates, local scheduling, or demo data.
 
 ## Ownership and lifecycle
 
@@ -40,6 +41,10 @@ supplied room moods; personal tags/favorites explicitly require a login.
 - `queue`/`requests`: private correlated reads with 25 items per page, no imposed
   business quota or borrowed catalogue offset cap. Revision changes invalidate
   pages and refresh page zero. Old responses cannot replace a newer revision.
+  The pending view sends `requests` with `filter: "pending"`; its total is the
+  caller-only pending count. History keeps the default `all` filter. Both views
+  refresh bounded slices on revisions; neither drains historical pages. Request
+  titles come from sanitized summaries, with a localized fallback.
 
 Results expose loading, rejection, source unavailability, slot conflict, stale
 revision and uncertain timeout/disconnection. No failed mutation is automatically
@@ -71,35 +76,37 @@ mounted; small screens give panel triggers their own row. Panel scrolling uses
 RoomPlayerLayout's visual-viewport and dock-height variables, including its
 keyboard/safe-area behavior. No browser layout verification is implied by tests.
 
-## Concrete upstream gaps
+## Additive interfaces
 
-1. **Original preview identity.** `/data/previewAdd` returns Video[] only.
-   InvidiousAdapter.parseAsDirect changes service/id to direct/HLS/DASH stream
-   URLs; OdyseeAdapter.fetchVideoInfo replaces the original LBRY identity with a
-   streaming URL. The UI cannot reliably recover the original adapter identity.
-   Required addition: per-result originalReference `{ service, id }` (also for
-   highlighted results/collections), retained before provider resolution. Keep
-   playback metadata separate. The current UI permits stable references and
-   direct URLs unchanged from the input; it disables ambiguous resolved streams.
-   It does not submit the preview input URL as an invented provider ID.
-2. **Public rule/conflict vocabulary.** Public participants and private conflicts
-   contain mood IDs only. The paginated `/music/moods` endpoint requires a numeric
-   account. A guest cannot resolve a custom mood absent from current contributor
-   metadata, and an account may need several explicit vocabulary pages. Required
-   addition: public Mood metadata for active rule IDs and offered conflicts
-   (with authoritative participant display names), or a token-authorized public
-   vocabulary lookup by IDs. Until then the dialog refuses unnamed confirmation;
-   Review later preserves the pending request, while Cancel withdraws it.
-3. **Pending request discovery and titles.** `requests` slices the complete
-   historical request list in insertion order, with no pending filter, title or
-   pending count. The UI refreshes page zero on revisions and offers explicit
-   later pages; pending older requests require navigating those pages. It cannot
-   promise automatic discovery of every reconfirmation without draining history.
-   Required addition: pending-only pagination/count and a sanitized track title
-   in request summaries. Absent titles are labelled "Requested track" rather
-   than exposing UUIDs as product copy.
+- Preview results and highlighted items carry optional `originalReference: { service, id }`.
+  Extractor/adapters retain the identity before playable service/ID transformation,
+  including batches, filtered failures and cache hits. The UI prefers that returned
+  reference and keeps its conservative fallback for older servers. Admission still
+  validates the ordinary MusicReferenceSchema and grants. No client-supplied
+  originalReference grants access. Playable metadata and catalogue identity stay separate.
+- Public `ruleMoods: Mood[]` contains vocabulary only for active include/exclude IDs.
+  Private request `conflictMetadata` describes exactly the offered pairs, with mood
+  name/icon/ID and authoritative excluding participant names. Guests reuse these
+  supplied values; an account vocabulary browse is optional. Unknown names or moods
+  keep confirmation disabled. New offers replace old pairs. Departed participants
+  can retain the last authoritative name, without exposing unrelated annotations.
+- `requests.filter` accepts `all` (the legacy default) or `pending` and rejects
+  unknown fields/values. Replies add caller-only `pendingCount`; page totals follow
+  the chosen filter. Request summaries add a sanitized `title`. Older requests
+  invalidated today and pending requests after history entry 25 are discoverable
+  directly in the bounded pending view. Cancellation, next-slot conflicts and
+  requestId idempotence use the existing protocol.
 
-Playlist library jobs, recommendations and history browsing remain later lots.
+Integration handoff: RoomMusic accepts an optional final constructor callback
+`names: () => { participantId: string; name: string }[]`, after redisSnapshot.
+The concurrent Room boundary correction owns the Room.ts wiring: supply public
+authoritative names via Room/getUserInfo with musicIdentity, including guests.
+This implementation tests the callback directly; the integrated real Room name
+path still needs validation by the manager. No commit/playback/context/scheduler
+or authorization semantics are changed in this lot.
+
+Playlist library jobs are owned by a concurrent lot; recommendations and listening
+history browsing remain later lots.
 No multi-track admission or manual queue cap is invented here.
 
 ## Verification
@@ -117,11 +124,30 @@ development credentials are not read. Esbuild needs escalation because sandbox
 ancestor-directory resolution fails before test collection. No lockfile changes,
 push, PR or deployment are part of this lot.
 
-Final implementation checks: client `tsc --noEmit`, Vite production build,
-targeted client ESLint, Biome (18 changed source/test files), Vue Prettier checks,
-E2E TypeScript and targeted E2E ESLint pass. Eight focused client suites pass
-73 tests, including the 21 personal-music regression tests from the authorized
-fix. The production build emits dependency pure-annotation/chunk-size and locale
-dynamic-import warnings; Vitest also reports the existing standalone keyboard
-injection and legacy component/Sass warnings. These are implementation checks,
-not an independent review or browser/provider/SQL/Redis validation.
+Contract follow-up checks: `tsc --noEmit` passes in common, server and client;
+the client Vite production build, targeted ESLint, Biome and Vue Prettier checks pass.
+Seven focused client suites pass 71 tests, including all 21 personal-music paging
+regressions. Nine server suites pass 196 tests with real SQLite fixtures and
+mocked provider transport; all 71 common tests pass. The provider fixture coverage
+includes actual Invidious direct/HLS/DASH transformation, Odysee identities, cached
+search/metadata, filtered/reordered batches, highlighted collections, and stable
+catalogue identity across refreshed playable aliases. Room fixtures exercise 30
+pending requests, old requests invalidated now, private dispatch and account/guest
+isolation. The production build emits dependency pure-annotation and locale
+dynamic-import warnings; Vitest reports existing legacy component/Sass warnings.
+These are implementation checks, not independent review or live browser, provider,
+PostgreSQL or Redis validation. The Room name callback integration remains as above.
+
+Exact focused suites (pinned Yarn via `node .yarn/releases/yarn-4.1.0.cjs`):
+
+- Server `vitest run tests/unit/room-music.spec.ts tests/unit/room-music-boundaries.spec.ts tests/unit/preview-reference.spec.ts tests/unit/infoextractor.spec.ts tests/unit/services/invidious.spec.ts tests/unit/services/odysee.spec.ts tests/unit/music-catalogue.spec.ts tests/unit/api/music.spec.ts tests/unit/music-scheduler.spec.ts`.
+- Client `vitest run --config ../node_modules/.cache/music-room-validation/vite.config.mjs tests/unit/collective-music.component.spec.ts tests/unit/AddPreview.component.spec.ts tests/unit/room-music.spec.ts tests/unit/music.component.spec.ts tests/unit/RoomSettingsForm.component.spec.ts tests/unit/RoomPlayerLayout.component.spec.ts tests/unit/VideoControls.component.spec.ts`.
+- Common `vitest run`; each workspace `tsc --noEmit`; client
+  `vite build --config ../node_modules/.cache/music-room-validation/vite.config.mjs`.
+- Targeted ESLint covers all changed TS/Vue source and test files, Biome covers
+  the 16 changed TS files, and Prettier checks the four changed Vue files.
+
+Server tests use `NODE_ENV=test DB_MODE=sqlite`; no development configuration
+was loaded. The native SQLite 5.1.5 binary was reused from the parent checkout in
+ignored node_modules. The immutable install skips native build scripts and changes
+no package manifest or lockfile. Browser, visual and E2E tests were not run.

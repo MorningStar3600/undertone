@@ -417,13 +417,14 @@ describe("Collective music commands and views", () => {
 		expect(room.confirmation.value).toBeNull();
 	});
 
-	it("refuses unnamed consent and resolves custom vocabulary through an explicit account read", async () => {
-		const { wrapper, room, reply, commands } = await setup(["*"], true);
+	it("resolves guest custom rules and offered conflicts without account vocabulary reads", async () => {
+		const { wrapper, room, reply, commands, store } = await setup();
+		const reads = API.request.mock.calls.length;
 		const custom = {
 			id: "00000000-0000-4000-8000-000000000099",
 			name: "Epic custom",
 			normalizedName: "epic custom",
-			iconKey: "flame",
+			iconKey: "flame" as const,
 		};
 		const offer = pending([{ participantId: "account:2", moodId: custom.id }]);
 		await wrapper.get('[data-cy="music-add-next"]').trigger("click");
@@ -439,24 +440,80 @@ describe("Collective music commands and views", () => {
 		await flushPromises();
 		expect(room.confirmation.value).toBeNull();
 		expect(commands().some(c => c.action === "cancel")).toBe(false);
-		API.request.mockResolvedValueOnce({
-			data: { success: true, items: [custom], total: 21, offset: 0, limit: 20 },
+		store.commit("room/SYNC", { music: { ...publicState(13), ruleMoods: [custom] } });
+		room.confirmation.value = {
+			...offer,
+			conflictMetadata: [
+				{ ...offer.conflicts[0], mood: custom, participantName: "Last authoritative name" },
+			],
+		};
+		// The excluding participant can depart after the server offered the confirmation.
+		store.commit("room/SYNC", {
+			music: {
+				...publicState(14),
+				participants: publicState().participants.slice(0, 1),
+				ruleMoods: [custom],
+			},
 		});
-		const reads = API.request.mock.calls.length;
-		await wrapper
-			.findAll("button")
-			.find(b => b.text() === "Load room mood names")!
-			.trigger("click");
 		await flushPromises();
-		expect(API.request.mock.calls.length).toBe(reads + 1);
-		room.confirmation.value = offer;
-		await flushPromises();
+		expect(wrapper.get(`[data-include-mood="${custom.id}"]`).text()).toContain(custom.name);
 		expect(document.querySelector('[data-cy="music-conflicts"]')?.textContent).toContain(
 			custom.name,
 		);
 		expect(
 			(document.querySelector('[data-cy="music-confirm"]') as HTMLButtonElement).disabled,
 		).toBe(false);
+		expect(document.querySelector('[data-cy="music-conflicts"]')?.textContent).toContain(
+			"Last authoritative name",
+		);
+		expect(API.request.mock.calls.length).toBe(reads);
+	});
+	it("refreshes a bounded pending slice separately from history and purges late session replies", async () => {
+		const { room, commands, connection, store, wrapper } = await setup();
+		const pendingCommand = () =>
+			commands()
+				.filter(c => c.action === "requests" && c.filter === "pending")
+				.at(-1)!;
+		const respond = (command: MusicRoomActionInput, revision: number, title: string) =>
+			connection.mockReceive({
+				action: "music-result",
+				result: {
+					correlationId: command.correlationId,
+					status: "applied",
+					revision,
+					pendingCount: 27,
+					page: { items: [{ ...pending(), title }], total: 27, offset: 0, limit: 25 },
+				},
+			});
+		expect(pendingCommand()).toMatchObject({ offset: 0, limit: 25 });
+		respond(pendingCommand(), 12, "Old request needing review");
+		await flushPromises();
+		expect(wrapper.get('[data-cy="pending-requests"]').text()).toContain(
+			"Old request needing review",
+		);
+		expect(room.pendingRequests.total.value).toBe(27);
+		expect(room.requests.items.value).toEqual([]);
+		const more = room.pendingRequests.load(25);
+		expect(pendingCommand()).toMatchObject({ filter: "pending", offset: 25, limit: 25 });
+		respond(pendingCommand(), 12, "Page two");
+		await more;
+		store.commit("room/SYNC", { music: publicState(20) });
+		await nextTick();
+		expect(pendingCommand()).toMatchObject({ offset: 0, expectedRevision: 20 });
+		const stale = pendingCommand();
+		respond(stale, 19, "Stale");
+		await flushPromises();
+		expect(room.pendingRequests.items.value).toEqual([]);
+		expect(pendingCommand().correlationId).not.toBe(stale.correlationId);
+		expect(commands().filter(c => c.action === "requests" && (c.offset ?? 0) > 0)).toHaveLength(
+			1,
+		);
+		const old = pendingCommand();
+		store.commit("users/SET_AUTH_TOKEN", "replacement-session");
+		respond(old, 21, "Other session");
+		await flushPromises();
+		expect(room.pendingRequests.items.value).toEqual([]);
+		expect(room.pendingRequests.total.value).toBe(0);
 	});
 
 	it("uses a synchronous public revision and discards pages from older revisions", async () => {

@@ -17,7 +17,12 @@ import type {
 	MusicRoomResult,
 } from "ott-common/models/music-room.js";
 import type { QueueItemExtras } from "ott-common/models/video.js";
-import { musicCatalogue, type MusicCatalogue, MusicReferenceSchema } from "./catalogue.js";
+import {
+	musicCatalogue,
+	type MusicCatalogue,
+	MusicReferenceSchema,
+	safeTrackTitle,
+} from "./catalogue.js";
 import {
 	createMusicScheduler,
 	restoreMusicScheduler,
@@ -61,6 +66,14 @@ const requestDto = (request: MusicSchedulerState["requests"][number]): MusicRoom
 	intent: request.intent,
 	status: request.status,
 	conflicts: structuredClone(request.offeredConflicts),
+	title: safeTrackTitle(
+		typeof request.candidate.mediaRef === "object" &&
+			request.candidate.mediaRef &&
+			!Array.isArray(request.candidate.mediaRef) &&
+			typeof request.candidate.mediaRef.title === "string"
+			? request.candidate.mediaRef.title
+			: undefined,
+	),
 });
 const json = (value: unknown): MusicJson => JSON.parse(JSON.stringify(value));
 const reduce = (
@@ -86,6 +99,8 @@ export class RoomMusic {
 	private value?: DurableMusicRoom;
 	private versions = "";
 	private currentMoods: Mood[] = [];
+	private ruleMoods: Mood[] = [];
+	private participantNames = new Map<string, string>();
 	private nextVersionCheck = 0;
 	private invalid = true;
 	private invalidation = 0;
@@ -96,6 +111,7 @@ export class RoomMusic {
 		private catalogue: MusicCatalogue = musicCatalogue,
 		private store: MusicRoomStore = new SqlMusicRoomStore(),
 		private redisSnapshot?: MusicSchedulerState,
+		private names: () => { participantId: string; name: string }[] = () => [],
 	) {
 		this.roomId = roomId.toLowerCase();
 	}
@@ -106,6 +122,7 @@ export class RoomMusic {
 		if (!this.value) {
 			return null;
 		}
+		this.rememberNames();
 		const s = this.value.state;
 		return {
 			revision: s.revision,
@@ -122,6 +139,15 @@ export class RoomMusic {
 					}
 				: null,
 			participants: structuredClone(s.participants),
+			ruleMoods: structuredClone(
+				this.ruleMoods.filter(mood =>
+					s.participants.some(
+						p =>
+							p.includeMoodIds.includes(mood.id) ||
+							p.excludeMoodIds.includes(mood.id),
+					),
+				),
+			),
 			settings: { ...s.settings },
 		};
 	}
@@ -138,6 +164,7 @@ export class RoomMusic {
 		const saved = await this.store.load(this.roomId);
 		if (saved) {
 			this.currentMoods = await this.loadCurrentMoods(saved.state);
+			this.ruleMoods = await this.loadRuleMoods(saved.state);
 			this.value = saved;
 			await this.publish(saved, this.publicState!);
 			return;
@@ -159,6 +186,7 @@ export class RoomMusic {
 			},
 		};
 		await this.store.save(initial, null);
+		this.ruleMoods = await this.loadRuleMoods(state);
 		this.value = initial;
 		await this.publish(initial, this.publicState!);
 	}
@@ -173,6 +201,33 @@ export class RoomMusic {
 		}
 		const snapshot = await this.catalogue.roomSnapshot([], [current.entry.trackId], [account]);
 		return snapshot.moods;
+	}
+	private loadRuleMoods(state: MusicSchedulerState): Promise<Mood[]> {
+		return this.catalogue.moodsByIds([
+			...state.participants.flatMap(p => [...p.includeMoodIds, ...p.excludeMoodIds]),
+			...state.requests.flatMap(r => r.offeredConflicts.map(c => c.moodId)),
+		]);
+	}
+	private requestDtos(requests: MusicSchedulerState["requests"]): MusicRoomRequestSummary[] {
+		this.rememberNames();
+		// Rules are hydrated on restore and before preference commits. Offered conflicts
+		// can only use those IDs. Keep reply projection synchronous after authorization.
+		const moods = new Map(this.ruleMoods.map(m => [m.id, m]));
+		return requests.map(request => ({
+			...requestDto(request),
+			conflictMetadata: request.offeredConflicts.map(c => ({
+				...c,
+				mood: moods.get(c.moodId),
+				participantName: this.participantNames.get(c.participantId),
+			})),
+		}));
+	}
+	private rememberNames() {
+		for (const person of this.names()) {
+			if (person.name) {
+				this.participantNames.set(person.participantId, person.name);
+			}
+		}
 	}
 	private versionAccounts(state = this.value?.state, people = this.people()): number[] {
 		return [
@@ -344,18 +399,27 @@ export class RoomMusic {
 				status,
 			});
 			if (action.action === "queue" || action.action === "requests") {
-				const own = initial.requests.filter(r => r.candidate.contributorId === identity);
+				const own =
+					action.action === "requests"
+						? initial.requests.filter(r => r.candidate.contributorId === identity)
+						: [];
+				const pending = own.filter(r => r.status === "pending");
+				const selected =
+					action.action === "requests" && action.filter === "pending" ? pending : own;
 				const items =
 					action.action === "queue"
 						? initial.queue
 								.slice(action.offset, action.offset + action.limit)
 								.map(entryDto)
-						: own.slice(action.offset, action.offset + action.limit).map(requestDto);
+						: this.requestDtos(
+								selected.slice(action.offset, action.offset + action.limit),
+							);
 				return {
 					...result("applied"),
+					...(action.action === "requests" ? { pendingCount: pending.length } : {}),
 					page: {
 						items,
-						total: action.action === "queue" ? initial.queue.length : own.length,
+						total: action.action === "queue" ? initial.queue.length : selected.length,
 						offset: action.offset,
 						limit: action.limit,
 					},
@@ -377,6 +441,18 @@ export class RoomMusic {
 			let command: MusicSchedulerCommand;
 			switch (action.action) {
 				case "preferences": {
+					// Cache vocabulary only; publicState selects IDs from committed active rules.
+					this.ruleMoods = [
+						...new Map(
+							[
+								...this.ruleMoods,
+								...(await this.catalogue.moodsByIds([
+									...action.includeMoodIds,
+									...action.excludeMoodIds,
+								])),
+							].map(mood => [mood.id, mood]),
+						).values(),
+					];
 					const participants = state.participants.map(p =>
 						p.participantId === identity
 							? {
@@ -483,9 +559,10 @@ export class RoomMusic {
 				"requestId" in action
 					? transition.state.requests.find(r => r.requestId === action.requestId)
 					: undefined;
+			const summary = request ? this.requestDtos([request])[0] : undefined;
 			return {
 				...result(transition.status),
-				request: request ? requestDto(request) : undefined,
+				request: summary,
 			};
 		});
 	}

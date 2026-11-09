@@ -23,9 +23,12 @@ export default {
 			recommendation: "Recommendation",
 		},
 		requests: "Your requests",
+		"pending-requests": "Awaiting your confirmation",
+		"pending-requests-hint":
+			"All your pending requests, 25 per page, including older requests needing new confirmation.",
 		"requested-track": "Requested track",
 		"requests-hint":
-			"Private request history, 25 per page. Pages refresh from the start when the room changes. Check later pages for older requests needing confirmation.",
+			"Private request history, 25 per page. Pages refresh from the start when the room changes.",
 		"empty-requests": "No requests on this page.",
 		"page-failed": "This page could not be loaded.",
 		"review-conflicts": "Review exclusions",

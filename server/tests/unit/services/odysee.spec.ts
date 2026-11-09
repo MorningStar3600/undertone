@@ -133,6 +133,7 @@ describe("OdyseeAdapter", () => {
 		});
 
 		const out = await adapter.fetchVideoInfo("lbry://@c#1/slug#2");
+		expect(out.originalReference).toEqual({ service: "odysee", id: "lbry://@c#1/slug#2" });
 		expect(out.mime).toBe("application/x-mpegURL");
 		expect(out.hls_url).toMatch(ODYSEE_STREAM_URL_REGEX);
 		expect(out.title).toBe("Foo");
@@ -206,6 +207,7 @@ describe("OdyseeAdapter", () => {
 		});
 
 		const res = await adapter.fetchVideoInfo("lbry://@c#1/slug#3");
+		expect(res.originalReference).toEqual({ service: "odysee", id: "lbry://@c#1/slug#3" });
 		expect(res.mime).toBe("video/mp4");
 		expect(res.title).toBe("FallbackToMp4");
 	});

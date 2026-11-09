@@ -117,6 +117,11 @@
 		</div>
 		<template v-if="isMusic">
 			<MusicPreview
+				v-if="highlightedAddPreviewItem"
+				:item="highlightedAddPreviewItem"
+				:reference="musicReference(highlightedAddPreviewItem)"
+			/>
+			<MusicPreview
 				v-for="(item, index) in videos"
 				:key="`${item.service}:${item.id}:${index}`"
 				:item="item"
@@ -168,9 +173,12 @@ const store = useStore();
 const { t } = useI18n();
 const route = useRoute();
 const isMusic = computed(() => store.state.room.queueMode === QueueMode.Music);
-// The legacy preview DTO loses original references for resolving adapters. Never
-// promote an ephemeral stream into catalogue identity. See docs/music-room-frontend.md.
+// Only server-returned identity can disambiguate an alias. Older servers retain
+// the conservative fallback below; admission still validates every reference.
 function musicReference(item: Video): VideoId | undefined {
+	if (item.originalReference) {
+		return { service: item.originalReference.service, id: item.originalReference.id };
+	}
 	if (selectedAdapter.value === "invidious") {
 		return undefined;
 	}

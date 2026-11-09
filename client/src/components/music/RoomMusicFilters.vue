@@ -33,7 +33,8 @@ watch(
 	([, moods]) => music.remember(moods ?? []),
 	{ immediate: true },
 );
-const moods = computed(() => [...music.moods.values()]);
+const vocabularyMoods = computed(() => new Map([...music.moods, ...room.publicMoods.value]));
+const moods = computed(() => [...vocabularyMoods.value.values()]);
 const disabled = computed(() => room.busy.value || !room.active.value || !room.own.value);
 function toggle(id: string, exclusion = false, active?: boolean) {
 	if (disabled.value) {
@@ -107,7 +108,7 @@ const dirty = computed(
 			</div>
 		</div>
 		<div
-			v-for="id in [...include, ...exclude].filter(id => !music.moods.has(id))"
+			v-for="id in [...include, ...exclude].filter(id => !vocabularyMoods.has(id))"
 			:key="id"
 			class="flex flex-wrap items-center gap-2"
 		>
@@ -200,7 +201,7 @@ const dirty = computed(
 				{{ $t("musicRoom.include") }}:
 				{{
 					participant.includeMoodIds
-						.map(id => music.moods.get(id)?.name || $t("music.unknown-mood"))
+						.map(id => vocabularyMoods.get(id)?.name || $t("music.unknown-mood"))
 						.join(", ") || $t("musicRoom.neutral")
 				}}
 			</p>
@@ -208,7 +209,7 @@ const dirty = computed(
 				{{ $t("musicRoom.exclude") }}:
 				{{
 					participant.excludeMoodIds
-						.map(id => music.moods.get(id)?.name || $t("music.unknown-mood"))
+						.map(id => vocabularyMoods.get(id)?.name || $t("music.unknown-mood"))
 						.join(", ") || $t("musicRoom.none")
 				}}
 			</p>

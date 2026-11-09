@@ -105,63 +105,77 @@ const contributor = (id: string) =>
 				>{{ $t("music.next") }}</Button
 			>
 		</nav>
-		<h3>{{ $t("musicRoom.requests") }}</h3>
-		<p class="text-sm text-muted-foreground">{{ $t("musicRoom.requests-hint") }}</p>
-		<p v-if="room.requests.loading.value" role="status">{{ $t("common.loading") }}</p>
-		<p v-if="room.requests.error.value" role="alert">
-			{{ $t("musicRoom.page-failed") }}
-			<Button variant="outline" @click="room.requests.load()">{{ $t("music.retry") }}</Button>
-		</p>
-		<ul class="flex flex-col gap-2">
-			<li
-				v-for="request in room.requests.items.value"
-				:key="request.requestId"
-				class="flex flex-wrap items-center gap-2"
-				:data-request-id="request.requestId"
-			>
-				<span>{{
-					room.state.value?.queue.find(e => e.trackId === request.trackId)?.title ||
-					$t("musicRoom.requested-track")
-				}}</span
-				><Badge variant="secondary"
-					>{{ $t(`musicRoom.intent.${request.intent}`) }} ·
-					{{ $t(`musicRoom.request-status.${request.status}`) }}</Badge
+		<section
+			v-for="requestPage in [
+				{ page: room.pendingRequests, label: 'pending-requests' },
+				{ page: room.requests, label: 'requests' },
+			]"
+			:key="requestPage.label"
+			class="flex flex-col gap-2"
+			:data-cy="requestPage.label"
+		>
+			<h3>
+				{{ $t(`musicRoom.${requestPage.label}`) }}
+				<Badge variant="secondary">{{ requestPage.page.total.value }}</Badge>
+			</h3>
+			<p class="text-sm text-muted-foreground">
+				{{ $t(`musicRoom.${requestPage.label}-hint`) }}
+			</p>
+			<p v-if="requestPage.page.loading.value" role="status">{{ $t("common.loading") }}</p>
+			<p v-if="requestPage.page.error.value" role="alert">
+				{{ $t("musicRoom.page-failed") }}
+				<Button variant="outline" @click="requestPage.page.load()">{{
+					$t("music.retry")
+				}}</Button>
+			</p>
+			<ul class="flex flex-col gap-2">
+				<li
+					v-for="request in requestPage.page.items.value"
+					:key="request.requestId"
+					class="flex flex-wrap items-center gap-2"
+					:data-request-id="request.requestId"
+				>
+					<span>{{ request.title || $t("musicRoom.requested-track") }}</span
+					><Badge variant="secondary"
+						>{{ $t(`musicRoom.intent.${request.intent}`) }} ·
+						{{ $t(`musicRoom.request-status.${request.status}`) }}</Badge
+					>
+					<Button
+						v-if="request.status === 'pending' && request.conflicts.length"
+						variant="outline"
+						:disabled="room.busy.value"
+						@click="room.confirmation.value = request"
+						>{{ $t("musicRoom.review-conflicts") }}</Button
+					>
+					<Button
+						v-if="['pending', 'admitted'].includes(request.status)"
+						variant="outline"
+						:disabled="room.busy.value || !room.active.value"
+						@click="room.cancel(request.requestId)"
+						>{{ $t("common.cancel") }}</Button
+					>
+				</li>
+			</ul>
+			<p v-if="!requestPage.page.loading.value && !requestPage.page.items.value.length">
+				{{ $t("musicRoom.empty-requests") }}
+			</p>
+			<nav :aria-label="$t(`musicRoom.${requestPage.label}`)" class="flex flex-wrap gap-2">
+				<Button
+					variant="outline"
+					:disabled="requestPage.page.loading.value || !requestPage.page.offset.value"
+					@click="requestPage.page.load(Math.max(0, requestPage.page.offset.value - 25))"
+					>{{ $t("music.previous") }}</Button
 				>
 				<Button
-					v-if="request.status === 'pending' && request.conflicts.length"
 					variant="outline"
-					:disabled="room.busy.value"
-					@click="room.confirmation.value = request"
-					>{{ $t("musicRoom.review-conflicts") }}</Button
+					:disabled="
+						requestPage.page.loading.value ||
+						requestPage.page.offset.value + 25 >= requestPage.page.total.value
+					"
+					@click="requestPage.page.load(requestPage.page.offset.value + 25)"
+					>{{ $t("music.next") }}</Button
 				>
-				<Button
-					v-if="['pending', 'admitted'].includes(request.status)"
-					variant="outline"
-					:disabled="room.busy.value || !room.active.value"
-					@click="room.cancel(request.requestId)"
-					>{{ $t("common.cancel") }}</Button
-				>
-			</li>
-		</ul>
-		<p v-if="!room.requests.loading.value && !room.requests.items.value.length">
-			{{ $t("musicRoom.empty-requests") }}
-		</p>
-		<nav :aria-label="$t('musicRoom.requests')" class="flex flex-wrap gap-2">
-			<Button
-				variant="outline"
-				:disabled="room.requests.loading.value || !room.requests.offset.value"
-				@click="room.requests.load(Math.max(0, room.requests.offset.value - 25))"
-				>{{ $t("music.previous") }}</Button
-			>
-			<Button
-				variant="outline"
-				:disabled="
-					room.requests.loading.value ||
-					room.requests.offset.value + 25 >= room.requests.total.value
-				"
-				@click="room.requests.load(room.requests.offset.value + 25)"
-				>{{ $t("music.next") }}</Button
-			>
-		</nav>
+			</nav>
+		</section>
 	</section>
 </template>

@@ -24,6 +24,7 @@ import type {
 	MusicRoomResult,
 } from "ott-common/models/music-room";
 import type { QueueItemExtras, VideoId } from "ott-common/models/video";
+import { DEFAULT_MOODS, type Mood } from "ott-common/models/music";
 
 type WithoutEnvelope<T> = T extends unknown ? Omit<T, "expectedRevision" | "correlationId"> : never;
 export type MusicCommand = WithoutEnvelope<MusicRoomActionInput>;
@@ -55,6 +56,25 @@ export function createMusicRoomCommands(
 	const busy = ref(false);
 	const status = ref<string | null>(null);
 	const confirmation = shallowRef<MusicRoomRequestSummary | null>(null);
+	const publicMoods = computed(() => {
+		const moods = new Map<string, Mood>(DEFAULT_MOODS.map(m => [m.id, m]));
+		for (const mood of [
+			...(state.value?.ruleMoods ?? []),
+			...(state.value?.current?.contributorMoods ?? []),
+		]) {
+			moods.set(mood.id, mood);
+		}
+		return moods;
+	});
+	function conflictDetails(participantId: string, moodId: string) {
+		const metadata = confirmation.value?.conflictMetadata?.find(
+			c => c.participantId === participantId && c.moodId === moodId,
+		);
+		return {
+			name: metadata?.participantName ?? participantNames.get(participantId),
+			mood: metadata?.mood?.id === moodId ? metadata.mood : publicMoods.value.get(moodId),
+		};
+	}
 	const retryCommand = shallowRef<MusicCommand | null>(null);
 	const waiting = new Map<
 		string,
@@ -136,6 +156,7 @@ export function createMusicRoomCommands(
 	}
 	function page<T extends MusicRoomEntry | MusicRoomRequestSummary>(
 		action: "queue" | "requests",
+		filter?: "pending",
 	) {
 		const items = shallowRef<T[]>([]),
 			total = ref(0),
@@ -153,7 +174,11 @@ export function createMusicRoomCommands(
 			error.value = null;
 			items.value = [];
 			offset.value = nextOffset;
-			const result = await send({ action, offset: nextOffset, limit: 25 });
+			const result = await send(
+				action === "requests"
+					? { action, offset: nextOffset, limit: 25, ...(filter ? { filter } : {}) }
+					: { action, offset: nextOffset, limit: 25 },
+			);
 			if (epoch !== version.value || current !== sequence) {
 				return;
 			}
@@ -187,6 +212,7 @@ export function createMusicRoomCommands(
 	}
 	const queue = page<MusicRoomEntry>("queue");
 	const requests = page<MusicRoomRequestSummary>("requests");
+	const pendingRequests = page<MusicRoomRequestSummary>("requests", "pending");
 	async function run(command: MusicCommand) {
 		if (READS.has(command.action) || busy.value || !can(command)) {
 			return;
@@ -211,6 +237,7 @@ export function createMusicRoomCommands(
 			retryCommand.value = command;
 		}
 		// Read only: never silently replay a mutation after conflict/reconnect.
+		void pendingRequests.load(0);
 		void requests.load(0);
 		if (fullQueue.value) {
 			void queue.load(0);
@@ -253,6 +280,7 @@ export function createMusicRoomCommands(
 		() => {
 			revision.value = Math.max(revision.value, state.value?.revision ?? 0);
 			if (active.value && own.value) {
+				void pendingRequests.load(0);
 				void requests.load(0);
 				if (fullQueue.value) {
 					void queue.load(0);
@@ -273,6 +301,14 @@ export function createMusicRoomCommands(
 				request.status === "pending" && request.conflicts.length ? request : null;
 		}
 	});
+	watch(pendingRequests.items, items => {
+		const request = items.find(r => r.requestId === confirmation.value?.requestId);
+		if (request) {
+			confirmation.value = request;
+		} else if (!pendingRequests.loading.value && pendingRequests.total.value <= items.length) {
+			confirmation.value = null;
+		}
+	});
 	onScopeDispose(() => {
 		disposed = true;
 		unsubscribe();
@@ -282,6 +318,8 @@ export function createMusicRoomCommands(
 	return {
 		state,
 		participantNames,
+		publicMoods,
+		conflictDetails,
 		own,
 		active,
 		version,
@@ -294,6 +332,7 @@ export function createMusicRoomCommands(
 		run,
 		queue,
 		requests,
+		pendingRequests,
 		fullQueue,
 		request: (reference: VideoId, extras: QueueItemExtras, intent: "mix" | "next") =>
 			run({
@@ -305,7 +344,14 @@ export function createMusicRoomCommands(
 			}),
 		confirm: () => {
 			const r = confirmation.value;
-			if (r) {
+			if (
+				r &&
+				r.conflicts.length &&
+				r.conflicts.every(c => {
+					const detail = conflictDetails(c.participantId, c.moodId);
+					return !!detail.name && !!detail.mood?.name;
+				})
+			) {
 				return run({
 					action: "confirm",
 					requestId: r.requestId,

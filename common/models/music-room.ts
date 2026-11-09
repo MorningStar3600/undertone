@@ -80,6 +80,7 @@ export const MusicRoomActionSchema = z.discriminatedUnion("action", [
 		.object({
 			...base,
 			action: z.literal("requests"),
+			filter: z.enum(["all", "pending"]).default("all"),
 			offset: z.number().int().nonnegative().default(0),
 			limit: z.number().int().min(1).max(100).default(25),
 		})
@@ -119,6 +120,8 @@ export interface MusicRoomPublic {
 		  })
 		| null;
 	participants: (RoomMoodPreference & { name?: string; clientIds?: string[] })[];
+	/** Shared vocabulary only for active room rule IDs. No per-track annotations. */
+	ruleMoods?: Mood[];
 	settings: MusicSchedulerSettings;
 }
 export interface MusicRoomRequestSummary {
@@ -128,12 +131,17 @@ export interface MusicRoomRequestSummary {
 	intent: "mix" | "next";
 	status: "pending" | "admitted" | "consumed" | "cancelled";
 	conflicts: MoodExclusionConflict[];
+	title?: string;
+	/** Metadata for exactly the offered pairs, from the authorized server reply. */
+	conflictMetadata?: (MoodExclusionConflict & { mood?: Mood; participantName?: string })[];
 }
 export interface MusicRoomResult {
 	correlationId: string;
 	revision: number;
 	status: string;
 	request?: MusicRoomRequestSummary;
+	/** Caller-only count, independent of the requested history/pending page. */
+	pendingCount?: number;
 	page?: {
 		items: MusicRoomRequestSummary[] | MusicRoomEntry[];
 		total: number;

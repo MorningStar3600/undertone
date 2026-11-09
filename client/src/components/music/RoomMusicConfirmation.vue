@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, watch } from "vue";
 import { useMusicRoom } from "@/composables/use-music-room";
-import { useMusic } from "@/composables/use-music";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
@@ -13,7 +12,6 @@ import {
 } from "@/components/ui/dialog";
 import RoomMusicFeedback from "./RoomMusicFeedback.vue";
 const room = useMusicRoom()!;
-const music = useMusic();
 let opener: HTMLElement | null = null;
 watch(
 	() => room.confirmation.value,
@@ -40,12 +38,17 @@ const groups = computed(() => {
 	}
 	return [...grouped].map(([id, moods]) => ({
 		id,
-		name: room.state.value?.participants.find(p => p.participantId === id)?.name,
-		moods: [...moods],
+		name: room.conflictDetails(id, [...moods][0]).name,
+		moods: [...moods].map(moodId => ({
+			id: moodId,
+			mood: room.conflictDetails(id, moodId).mood,
+		})),
 	}));
 });
-const resolved = computed(() =>
-	groups.value.every(g => !!g.name && g.moods.every(id => music.moods.has(id))),
+const resolved = computed(
+	() =>
+		groups.value.length > 0 &&
+		groups.value.every(g => !!g.name && g.moods.every(m => !!m.mood?.name)),
 );
 function cancel() {
 	if (room.confirmation.value && !room.busy.value) {
@@ -77,12 +80,13 @@ function cancel() {
 				<DialogDescription>{{ $t("musicRoom.confirm-description") }}</DialogDescription>
 			</DialogHeader>
 			<p>{{ $t(`musicRoom.intent.${room.confirmation.value?.intent ?? "mix"}`) }}</p>
+			<p>{{ room.confirmation.value?.title || $t("musicRoom.requested-track") }}</p>
 			<ul class="flex flex-col gap-2" data-cy="music-conflicts">
 				<li v-for="group in groups" :key="group.id" class="break-words">
 					<strong>{{ group.name || $t("musicRoom.unknown-participant") }}</strong>
 					<ul>
-						<li v-for="id in group.moods" :key="id">
-							{{ music.moods.get(id)?.name || $t("music.unknown-mood") }}
+						<li v-for="item in group.moods" :key="item.id">
+							{{ item.mood?.name || $t("music.unknown-mood") }}
 						</li>
 					</ul>
 				</li>

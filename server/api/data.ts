@@ -5,11 +5,19 @@ import type { OttApiResponseAddPreview, OttResponseBody } from "ott-common/model
 import { OttException } from "ott-common/exceptions.js";
 import { BadApiArgumentException } from "../exceptions.js";
 import InfoExtract from "../infoextractor.js";
+import { MusicReferenceSchema } from "../music/catalogue.js";
+import type { Video } from "ott-common/models/video.js";
 import { consumeRateLimitPoints } from "../rate-limit.js";
 import { counterHttpErrors } from "../metrics.js";
 
 const router = express.Router();
 const log = getLogger("api/data");
+// Expose only shareable original references; playback/legacy DTOs stay unchanged.
+const previewDto = (video: Video): Video => {
+	const { originalReference, ...playable } = video;
+	const reference = MusicReferenceSchema.safeParse(originalReference);
+	return reference.success ? { ...playable, originalReference: reference.data } : playable;
+};
 const addPreview: RequestHandler<
 	any,
 	OttResponseBody<OttApiResponseAddPreview>,
@@ -44,8 +52,8 @@ const addPreview: RequestHandler<
 
 		res.json({
 			success: true,
-			result: result.videos,
-			highlighted: result.highlighted,
+			result: result.videos.map(previewDto),
+			highlighted: result.highlighted ? previewDto(result.highlighted) : undefined,
 		});
 		log.info(`Sent add preview response with ${result.videos.length} items`);
 	} catch (err) {

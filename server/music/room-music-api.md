@@ -3,7 +3,8 @@
 This implements the Room/protocol/storage portion of `docs/undertone-spec.md` on the
 catalogue and scheduler foundations. Run the normal Sequelize migrations, including
 `20261109200000-create-music-rooms.js`, before enabling `QueueMode.Music` (`"music"`).
-No provider cache is imported into a personal library. No frontend view is added by this lot.
+No provider cache is imported into a personal library. The collective frontend
+contract is documented in `docs/music-room-frontend.md`.
 
 ## UI and wire interfaces
 
@@ -52,7 +53,7 @@ between page reads. There is no second REST/control channel for music commands.
 | `confirm` | `requestId`, `trackId`, `conflicts: [{ participantId, moodId }]` | Request author only; same add/order grants as the request |
 | `cancel` | `requestId` | Request author only, including their own reserved next slot |
 | `remove` | `entryId` | `manage-queue.remove`; one occurrence, never the current playback |
-| `requests` | `offset` (default 0), `limit` (default 25, maximum 100) | Page of caller's requests only |
+| `requests` | `offset` (default 0), `limit` (default 25, maximum 100), `filter: "all" \| "pending"` (default "all") | Page of caller's requests only; pending filter ignores history positions |
 | `queue` | Same pagination | Public admitted occurrence page |
 
 `MusicRoomActionSchema` in `common/models/music-room.ts` rejects unknown fields,
@@ -65,8 +66,13 @@ All catalogue IDs are UUID strings; account IDs are numbers internally.
 
 Private replies are `{ action: "music-result", result }`. `result` has `status`,
 `correlationId`, `revision`, optional `request`, and optional `page`. Request summaries
-contain only `requestId`, `entryId`, `trackId`, `intent`, `status` and current unaccepted
-`conflicts`. A page is `{ items, total, offset, limit }`; DTO conversion occurs only
+contain only `requestId`, `entryId`, `trackId`, `intent`, `status`, sanitized `title`,
+current unaccepted `conflicts`, and `conflictMetadata` for exactly those pairs.
+Each metadata entry has participantId/moodId, optional Mood vocabulary and an
+authoritative participantName (last observed authoritative name if departed).
+Missing metadata never permits fabricated names or consent. Requests read replies
+also add caller-only `pendingCount`, independent of the selected page/filter.
+A page is `{ items, total, offset, limit }`; DTO conversion occurs only
 for the requested slice. No automatic quota limits manual admissions or page offsets.
 Typical statuses are `applied`, `duplicate`, `revision-conflict`, `confirmation-required`,
 `slot-conflict`, `request-conflict`, `source-unavailable`, `not-found`, `invalid-confirmation`.
@@ -74,8 +80,11 @@ Permission/validation failures return a safe targeted `rejected` result when a v
 correlation ID is available, then follow the existing OTT exception/logging behavior.
 No upstream error text or private media reference is copied to the reply.
 
-After a public revision changes, reread the caller's request page to discover newly
-pending confirmations; private request data is never added to that public sync.
+After a public revision changes, reread the caller's pending-only page
+(`filter: "pending"`) to discover confirmations without draining history. Its total
+and `pendingCount` include old requests invalidated now. Private requests never
+enter public sync. Vocabulary is hydrated by requested UUIDs at restore and before
+preference commits; private reply projection is synchronous after authorization.
 
 A confirmation must echo only server-offered conflicts for that request/track. There
 is no `ignoreExclusions` flag. The server refreshes annotations before admission;
@@ -89,6 +98,10 @@ The normal `sync` message gains `music: MusicRoomPublic | null`; Vuex stores it 
 `store.state.room.music`. It contains `revision`, `planRevision`, at most ten public
 queue entries, `queueTotal`, current occurrence/playback provenance, deduplicated
 participants with public preferences, display names/client IDs, and settings.
+Additive ruleMoods contains shared Mood vocabulary only for active participant
+include/exclude IDs; it is available to authorized guests without account REST reads.
+MusicCatalogue.moodsByIds validates requested UUIDs and reads only those IDs in batches
+of 100, without fetching libraries, per-track tags or the whole mood catalogue.
 The public entry DTO contains occurrence/track/source/contributor IDs, origin,
 optional request ID/title and catalogue artists. The resolved legacy `currentSource` still feeds the
 existing player, includes optional music identity/provenance fields on `QueueItem`,
@@ -265,3 +278,20 @@ migrated, including catalogue, rooms and URL-title redaction. No migration/helpe
 changes were needed. The matching SQLite 5.1.5 binary was reused from the parent
 checkout into ignored local `node_modules`; no dependency/lockfile changes.
 Live Redis, PostgreSQL, providers and browser/multi-device playback remain untested.
+
+## Preview identity and implementation handoff
+
+Video gains optional originalReference ({ service, id }); preview arrays and
+highlighted results retain it across provider transformation and cache reads.
+Invidious and Odysee adapters preserve their input provider ID while playable
+service/id continue to serve legacy players. The HTTP preview projection omits
+unsafe original references. Music admission still validates the submitted normal
+MusicReferenceSchema and performs the existing room ownership/grant checks.
+Catalogue sources remain keyed by stable provider identity, never stream URL or title.
+
+The final optional RoomMusic constructor argument is an authoritative display-name
+callback after redisSnapshot. The concurrent Room boundary lot owns Room.ts wiring
+via Room/getUserInfo and musicIdentity (guest public names included). Direct callback
+fixtures cover this lot; the manager must check the integrated real Room name path.
+No changes to commit, setPlayback, advance, context, authorization, SQLite transactions
+or scheduler semantics are included here. Independent integrated review is required.
