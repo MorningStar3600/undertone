@@ -91,6 +91,15 @@ are exported from `server/models/music.ts` for isolated tests. Normal applicatio
   `removeLibraryTrack(userId, trackId)`, `listMoods(pagination)`, `createMood(userId, input)`,
   `listTrackMoods(userId, trackId, pagination)`, `setTrackMood(userId, trackId, moodId, active)`,
   `listFavorites(userId, pagination)`, `setFavorite(userId, moodId, active)` implement the personal API.
+- Internal `roomSnapshot(userIds, occurrenceTrackIds?, annotationUserIds?)` reads present
+  generation libraries and explicitly supplied occurrence tracks in one consistent SQL
+  snapshot. It returns account `versions` plus `trackVersions` for all tracks read.
+  `roomTrackVersions(trackIds)` polls only supplied occurrence IDs in bounded bind batches,
+  hashing safe track metadata and source identity/capabilities/availability in deterministic
+  order, including missing rows. Fingerprints omit timestamps, memberships, tags and favorites.
+  These trusted Room-only reads and fingerprints are never public DTOs or source permissions.
+  No schema migration is required. The existing per-owner postcommit notification contract
+  remains unchanged; guests/nonlibrary occurrences use durable targeted fingerprint polling.
 - `toQueueItem(trackId, sourceId, extras?: QueueItemExtras) -> MusicQueueItem` resolves fresh legacy
   playback metadata, retaining `startAt`, `endAt`, `subtitleUrl`, provider-specific video fields and
   adding `trackId`/`sourceId`. It checks track/source association and rejects unavailable sources.

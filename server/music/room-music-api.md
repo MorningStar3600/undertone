@@ -223,6 +223,27 @@ survive pub/sub outages and process restarts, so no second control bus or lossy-
 notification is required. Remote idle-room convergence is bounded by that polling
 interval plus one RoomManager update. Favorites never touch scheduling.
 
+Shared public metadata/source changes also use internal durable track fingerprints.
+`RoomMusic` retains fingerprints from the same consistent `roomSnapshot` as its context,
+including library candidates that may become queued during that context transition.
+At the existing five-second version check, and after advancement's provider resolution,
+it compares only current, queued and pending/admitted occurrence track IDs against
+`MusicCatalogue.roomTrackVersions`. Removed occurrences are excluded from comparison;
+new automatic occurrences reuse the fingerprint already read with their candidate.
+This avoids replanning merely because the queue changed. A missing/new manual occurrence
+receives its fingerprint on the next context read. Fingerprints survive process restarts
+because they are derived from committed Track/TrackSource rows, not an in-memory counter.
+
+Nonlibrary manual and retained contributions (including guests and departed contributors)
+therefore observe source restoration without a personal library link or owner notification.
+The existing owner hooks can still accelerate local refresh. Other occurrences converge
+by polling, including when hooks are absent. Only changed relevant fingerprints or account
+versions regenerate context; there is no global metadata scan or periodic forced regeneration.
+Occurrence context reads refresh cached titles while retaining playback extras and identities.
+Current playback remains uninterrupted under the existing scheduler rules. Public DTOs,
+source authorization, automatic-library eligibility and private annotation reads are unchanged.
+No migration, model registration or client change is needed for these derived fingerprints.
+
 Automatic candidates contain only present participants' generation libraries.
 Queued/pending sources outside libraries are refreshed as `occurrenceCandidates` and
 never promoted into the automatic pool. Retained departed contributions keep their

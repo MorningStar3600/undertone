@@ -75,6 +75,28 @@ every affected library owner's version. Postcommit `metadata` notifications carr
 owners and track IDs; a new membership uses its existing `library/added` notification.
 Unchanged replay pages do not advance catalogue versions or emit redundant notifications.
 
+PostgreSQL page commits acquire transaction-scoped advisory locks for all provider
+identities, including absent rows, in sorted source-identity order. Manual reference
+creation uses the same lock protocol. After resolution, imports lock actual Track rows
+in sorted UUID order with `FOR NO KEY UPDATE`, then TrackSource rows in sorted UUID
+order with `FOR UPDATE`. This also serializes different provider identities mapped to
+the same Track without conflicting with foreign-key key-share locks. Both metadata and
+availability are reread after acquisition; comparison and conditional writes happen
+under those locks. An importer that previously read M0 must therefore observe a committed
+M1 before restoring M0, and advance affected versions for that restoration. SQLite keeps
+its existing database-wide IMMEDIATE writer lock and whole-transaction retry behavior.
+Exact sanitized metadata/source noops do not issue updates or notifications.
+
+Membership notifications remain limited to actual library owners. Rooms additionally
+poll durable public track/source fingerprints for only their current, queued and
+pending/admitted occurrence tracks. Nonlibrary manual contributions, retained departed
+contributions and guests converge on another monolith without a membership, private
+recipient search or process-local hook. Unrelated tracks and favorites do not trigger
+context regeneration. Polling remains at five seconds plus the RoomManager update;
+there is no periodic full regeneration. See `room-music-api.md` for the internal contract.
+The fingerprint is derived from committed rows, so this correction needs no migration
+or new public REST/WebSocket DTO. Existing catalogue/room/import migrations still apply.
+
 Five consecutive provider/storage failures use delays of 30s, 60s, 120s, 240s, then fail with saved
 progress (maximum computed backoff 1h). Manual retry resets the consecutive retry budget,
 retaining the cursor and cumulative counters. Successful pages reset consecutive retries.
@@ -137,3 +159,12 @@ Verified in this worktree with pinned Yarn `node .yarn/releases/yarn-4.1.0.cjs` 
 The immutable dependency installation linked packages but SQLite/Cypress native setup
 failed in the restricted runner. Verification used the existing matching local SQLite
 native binary copied into ignored `node_modules`. No dependency or lockfile was changed.
+
+The shared-metadata correction adds `music-import-invalidation.spec.ts`: adapted review
+probes for owner deduplication, sanitized noops, rollback/retry recipient recomputation,
+reversed multi-entry independent-connection imports and a new-identity race; nonowner and
+guest source-restoration admission, unrelated-track isolation, guest restart plus remote
+connection polling, and current/queued/departed occurrence coverage. PostgreSQL adapter
+simulations check lock ordering and rereads after an injected lock wait; they do not
+establish live PostgreSQL runtime behavior. The focused six-suite Room/catalogue/import
+set passes 139 tests. Server typechecking and scoped lint are reported in the handoff.

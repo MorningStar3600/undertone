@@ -193,6 +193,41 @@ function referenceId(kind: "track" | "source", reference: VideoId): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/** Internal fingerprints contain no membership or annotation data. Missing tracks count too. */
+function trackVersions(ids: string[], tracks: Track[], sources: TrackSource[]): string {
+	const byId = new Map(tracks.map(track => [track.id, track]));
+	const byTrack = new Map<string, TrackSource[]>();
+	for (const source of sources) {
+		const group = byTrack.get(source.trackId) ?? [];
+		group.push(source);
+		byTrack.set(source.trackId, group);
+	}
+	return [...new Set(ids)]
+		.sort()
+		.map(id => {
+			const track = byId.get(id);
+			const hash = createHash("sha256")
+				.update(
+					JSON.stringify([
+						track ? trackDto(track) : null,
+						(byTrack.get(id) ?? [])
+							.sort((a, b) => a.id.localeCompare(b.id))
+							.map(source => [
+								source.id,
+								source.service,
+								source.providerId,
+								source.availability,
+								source.capabilities.seek,
+								source.capabilities.backgroundPlayback,
+							]),
+					]),
+				)
+				.digest("hex");
+			return `${id}:${hash}`;
+		})
+		.join(",");
+}
+
 export class MusicCatalogue {
 	constructor(
 		private readonly connection: () => Sequelize = () => db.sequelize,
@@ -262,6 +297,7 @@ export class MusicCatalogue {
 					tags,
 					moods,
 					versions,
+					trackVersions: trackVersions(ids, tracks, sources),
 				};
 			},
 			true,
@@ -277,6 +313,38 @@ export class MusicCatalogue {
 			.sort((a, b) => a - b)
 			.map(id => id + ":" + (rows.find(row => row.get().userId === id)?.get().revision ?? 0))
 			.join(",");
+	}
+	/** Trusted Room-only poll, restricted to retained/current occurrence IDs, including guests. */
+	async roomTrackVersions(trackIds: string[]): Promise<string> {
+		if (!trackIds.length) {
+			return "";
+		}
+		return musicTransaction(
+			this.connection(),
+			async transaction => {
+				const tracks: Track[] = [],
+					sources: TrackSource[] = [];
+				const ids = [...new Set(trackIds)];
+				for (let offset = 0; offset < ids.length; offset += 400) {
+					const batch = { [Op.in]: ids.slice(offset, offset + 400) };
+					tracks.push(
+						...(
+							await this.models().Track.findAll({ where: { id: batch }, transaction })
+						).map(row => trackDto(row.get())),
+					);
+					sources.push(
+						...(
+							await this.models().TrackSource.findAll({
+								where: { trackId: batch },
+								transaction,
+							})
+						).map(row => row.get()),
+					);
+				}
+				return trackVersions(ids, tracks, sources);
+			},
+			true,
+		);
 	}
 	private async invalidateRoomUser(userId: number, transaction: Transaction) {
 		const model = musicRoomModels(this.connection()).Version;
@@ -321,7 +389,27 @@ export class MusicCatalogue {
 		// Slow provider work must stay outside transactions and room transition locks.
 		const { reference: identity, video } = await this.resolver.resolve(reference);
 		MusicReferenceSchema.parse(identity);
-		return this.write(transaction => this.storeResolved(identity, video, transaction));
+		return this.write(async transaction => {
+			await this.lockReferences([identity], transaction);
+			return this.storeResolved(identity, video, transaction);
+		});
+	}
+
+	private async lockReferences(references: VideoId[], transaction: Transaction) {
+		if (this.connection().getDialect() !== "postgres") {
+			return;
+		}
+		// Row locks cannot protect absent identities. All creators use these transaction-scoped
+		// advisory locks before lookup, in one deterministic order across the whole page.
+		for (const id of [
+			...new Set(references.map(reference => referenceId("source", reference))),
+		].sort()) {
+			const hash = createHash("sha256").update(`music-reference:${id}`).digest();
+			await this.connection().query("SELECT pg_advisory_xact_lock(:namespace, :identity)", {
+				replacements: { namespace: hash.readInt32BE(0), identity: hash.readInt32BE(4) },
+				transaction,
+			});
+		}
 	}
 
 	private async storeResolved(identity: VideoId, video: Video, transaction: Transaction) {
@@ -387,9 +475,49 @@ export class MusicCatalogue {
 		const added: string[] = [];
 		const trackIds: string[] = [];
 		const changedTracks = new Set<string>();
-		for (const { reference, video } of entries) {
+		for (const { reference } of entries) {
 			MusicReferenceSchema.parse(reference);
-			const { track, source } = await this.storeResolved(reference, video, transaction);
+		}
+		await this.lockReferences(
+			entries.map(entry => entry.reference),
+			transaction,
+		);
+		const resolved: { track: Track; source: TrackSource }[] = [];
+		for (const { reference, video } of entries) {
+			resolved.push(await this.storeResolved(reference, video, transaction));
+		}
+		// Different provider identities can share a Track. Lock actual rows in sorted order,
+		// then reread both track and source AFTER acquiring locks, never compare stale DTOs.
+		for (const id of [...new Set(resolved.map(item => item.track.id))].sort()) {
+			await this.models().Track.findByPk(id, {
+				transaction,
+				// Metadata does not change keys; do not block source/library FK key-share locks.
+				lock: transaction.LOCK.NO_KEY_UPDATE,
+				rejectOnEmpty: true,
+			});
+		}
+		for (const id of [...new Set(resolved.map(item => item.source.id))].sort()) {
+			await this.models().TrackSource.findByPk(id, {
+				transaction,
+				lock: transaction.LOCK.UPDATE,
+				rejectOnEmpty: true,
+			});
+		}
+		for (const [index, { video }] of entries.entries()) {
+			const track = trackDto(
+				(
+					await this.models().Track.findByPk(resolved[index].track.id, {
+						transaction,
+						rejectOnEmpty: true,
+					})
+				).get(),
+			);
+			const source = (
+				await this.models().TrackSource.findByPk(resolved[index].source.id, {
+					transaction,
+					rejectOnEmpty: true,
+				})
+			).get();
 			trackIds.push(track.id);
 			const metadata = {
 				title: safeTrackTitle(video.title),
@@ -399,19 +527,25 @@ export class MusicCatalogue {
 						? video.length!
 						: track.duration,
 			};
-			if (
+			const metadataChanged =
 				metadata.title !== track.title ||
 				metadata.artworkUrl !== track.artworkUrl ||
-				metadata.duration !== track.duration ||
-				source.availability !== "available"
-			) {
+				metadata.duration !== track.duration;
+			if (metadataChanged || source.availability !== "available") {
 				changedTracks.add(track.id);
 			}
-			await this.models().Track.update(metadata, { where: { id: track.id }, transaction });
-			await this.models().TrackSource.update(
-				{ availability: "available" },
-				{ where: { id: source.id }, transaction },
-			);
+			if (metadataChanged) {
+				await this.models().Track.update(metadata, {
+					where: { id: track.id },
+					transaction,
+				});
+			}
+			if (source.availability !== "available") {
+				await this.models().TrackSource.update(
+					{ availability: "available" },
+					{ where: { id: source.id }, transaction },
+				);
+			}
 			const [, created] = await this.models().UserLibraryTrack.findOrCreate({
 				where: { userId, trackId: track.id },
 				defaults: { userId, trackId: track.id, importKind: "reference" },

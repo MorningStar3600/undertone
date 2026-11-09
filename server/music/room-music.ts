@@ -85,6 +85,7 @@ const reduce = (
 type RefreshedContext = {
 	state: MusicSchedulerState;
 	versions: string;
+	trackVersions: string;
 	identities: string[];
 	invalidation: number;
 };
@@ -98,6 +99,7 @@ export class RoomMusic {
 	isAdvancing = false;
 	private value?: DurableMusicRoom;
 	private versions = "";
+	private trackVersions = "";
 	private currentMoods: Mood[] = [];
 	private ruleMoods: Mood[] = [];
 	private participantNames = new Map<string, string>();
@@ -248,6 +250,26 @@ export class RoomMusic {
 			),
 		];
 	}
+	private occurrenceTrackIds(state = this.value?.state): string[] {
+		return [
+			...new Set([
+				...(state?.current ? [state.current.entry.trackId] : []),
+				...(state?.queue.map(entry => entry.trackId) ?? []),
+				...(state?.requests
+					.filter(
+						request => request.status === "pending" || request.status === "admitted",
+					)
+					.map(request => request.candidate.trackId) ?? []),
+			]),
+		];
+	}
+	private occurrenceVersions(): string {
+		const ids = new Set(this.occurrenceTrackIds());
+		return this.trackVersions
+			.split(",")
+			.filter(part => ids.has(part.split(":")[0]))
+			.join(",");
+	}
 	private async commit(
 		state: MusicSchedulerState,
 		playback = this.value!.playback,
@@ -271,6 +293,7 @@ export class RoomMusic {
 		this.value = next;
 		if (context) {
 			this.versions = context.versions;
+			this.trackVersions = context.trackVersions;
 			this.invalid =
 				context.invalidation !== this.invalidation ||
 				JSON.stringify(context.identities) !== JSON.stringify([...new Set(this.people())]);
@@ -304,10 +327,7 @@ export class RoomMusic {
 		];
 		const snapshot = await this.catalogue.roomSnapshot(
 			accounts,
-			[
-				...occurrences.map(e => e.trackId),
-				...(state.current ? [state.current.entry.trackId] : []),
-			],
+			this.occurrenceTrackIds(state),
 			this.versionAccounts(state, ids),
 		);
 		const candidate = (
@@ -333,8 +353,14 @@ export class RoomMusic {
 				tagsByUser,
 				sourceUsable: !!source && source.availability !== "unavailable",
 				mediaRef:
-					mediaRef ??
-					json({ service: source?.service, id: source?.providerId, title: track?.title }),
+					mediaRef && typeof mediaRef === "object" && !Array.isArray(mediaRef)
+						? json({ ...mediaRef, title: track?.title ?? mediaRef.title })
+						: (mediaRef ??
+							json({
+								service: source?.service,
+								id: source?.providerId,
+								title: track?.title,
+							})),
 			};
 		};
 		const candidates = snapshot.links.flatMap(link => {
@@ -358,7 +384,10 @@ export class RoomMusic {
 			.split(",")
 			.filter(part => relevantAccounts.has(Number(part.split(":")[0])))
 			.join(",");
-		return { state: result.state, versions, identities: ids, invalidation };
+		// Retain fingerprints of all tracks read, including automatic candidates which may
+		// enter the queue during this replan. Poll only the occurrences still retained.
+		const trackVersions = snapshot.trackVersions;
+		return { state: result.state, versions, trackVersions, identities: ids, invalidation };
 	}
 	async refresh(force = false) {
 		await this.lock.protect(async () => {
@@ -371,7 +400,9 @@ export class RoomMusic {
 			if (
 				force ||
 				this.invalid ||
-				(await this.catalogue.roomVersions(accounts)) !== this.versions
+				(await this.catalogue.roomVersions(accounts)) !== this.versions ||
+				(await this.catalogue.roomTrackVersions(this.occurrenceTrackIds())) !==
+					this.occurrenceVersions()
 			) {
 				const context = await this.context(this.value!.state);
 				await this.commit(context.state, undefined, context);
@@ -806,7 +837,11 @@ export class RoomMusic {
 					return false;
 				}
 				const accounts = this.versionAccounts();
-				if ((await this.catalogue.roomVersions(accounts)) !== this.versions) {
+				if (
+					(await this.catalogue.roomVersions(accounts)) !== this.versions ||
+					(await this.catalogue.roomTrackVersions(this.occurrenceTrackIds())) !==
+						this.occurrenceVersions()
+				) {
 					const context = await this.context(this.value!.state);
 					await this.commit(context.state, undefined, context, authorize);
 					return false;
