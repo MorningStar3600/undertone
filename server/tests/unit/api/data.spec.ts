@@ -141,6 +141,10 @@ describe("Data API", () => {
 					return video;
 				});
 			const query = { input: videos.map(video => video.id).join("\n") };
+			const expectedVideos = videos.map(video => ({
+				...video,
+				originalReference: { service: video.service, id: video.id },
+			}));
 			try {
 				const failed = await request(app)
 					.get("/api/data/previewAdd")
@@ -153,7 +157,7 @@ describe("Data API", () => {
 				} else {
 					expect(failed.status).toBe(200);
 					expect(failed.body.success).toBe(true);
-					expect(failed.body.result).toContainEqual(videos[0]);
+					expect(failed.body.result).toContainEqual(expectedVideos[0]);
 					expect(failed.headers["cache-control"]).toBe("no-store");
 				}
 
@@ -165,7 +169,7 @@ describe("Data API", () => {
 					.set({ Authorization: "Bearer foobar" })
 					.query(query);
 				expect(retried.status).toBe(200);
-				expect(retried.body.result).toEqual(videos);
+				expect(retried.body.result).toEqual(expectedVideos);
 				expect(retried.headers["cache-control"]).toContain("max-age=3600");
 			} finally {
 				getVideoInfoSpy.mockRestore();
