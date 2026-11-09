@@ -6,9 +6,10 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { MusicDockerForwarder, publishedPort, TCP_PUMP } from "./music-docker-forward.mjs";
 
 const LINES = /\r?\n/;
-const LOCAL_PORT = /^127\.0\.0\.1:(\d+)$/;
+const CONTAINER_ID = /^[a-f0-9]{64}$/;
 const POSTGRES_IMAGE = /^postgres:15(?:[.-].*)?$/;
 const REDIS_IMAGE = /^redis:7(?:[.-].*)?$/;
 
@@ -55,11 +56,97 @@ async function main() {
 				windowsHide: true,
 			})
 		).stdout.trim();
+	function assertOwnedContainer(metadata, name) {
+		if (!containers.includes(name)) {
+			throw new Error("Unknown test container");
+		}
+		if (
+			!CONTAINER_ID.test(metadata.Id) ||
+			metadata.Config?.Labels?.[label] !== runId ||
+			metadata.Name !== `/${name}` ||
+			!metadata.State?.Running ||
+			Object.keys(metadata.NetworkSettings?.Networks ?? {}).join() !== network
+		) {
+			throw new Error(`Container ownership/network mismatch for ${name}`);
+		}
+		return metadata;
+	}
+	async function ownedContainer(name) {
+		return assertOwnedContainer(
+			JSON.parse(await docker("inspect", "--format", "{{json .}}", name)),
+			name,
+		);
+	}
+	let forwarder;
+	async function localPort(name, service, pgName) {
+		const metadata = await ownedContainer(name);
+		const published = publishedPort(metadata, service);
+		if (published) {
+			return published;
+		}
+		const requested = metadata.HostConfig?.PortBindings?.[service];
+		const isolated = JSON.parse(await docker("network", "inspect", network));
+		if (
+			requested?.length !== 1 ||
+			requested[0].HostIp !== "127.0.0.1" ||
+			isolated.length !== 1 ||
+			isolated[0].Labels?.[label] !== runId ||
+			isolated[0].Internal !== true
+		) {
+			throw new Error(
+				"Refusing TCP fallback without owned internal network and loopback request",
+			);
+		}
+		if (!forwarder) {
+			const pinned = await Promise.all(
+				containers.map(async name => ({
+					name,
+					metadata: await ownedContainer(name),
+				})),
+			);
+			const relayId = pinned.find(item => item.name === pgName).metadata.Id;
+			// Docker container IDs and labels are immutable. Pin the inspected ID so
+			// name replacement cannot redirect an exec. Recheck its labels before each
+			// spawn without repeated CLI cold starts inside the 5s SQL connect budget.
+			forwarder = new MusicDockerForwarder({
+				verify: async () => {
+					for (const item of pinned) {
+						assertOwnedContainer(item.metadata, item.name);
+					}
+				},
+				spawn: (host, port) =>
+					spawn(
+						dockerBin,
+						[
+							"--config",
+							join(directory, "docker-config"),
+							"exec",
+							"-i",
+							relayId,
+							"bash",
+							"-c",
+							TCP_PUMP,
+							"--",
+							host,
+							port,
+						],
+						{ env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
+					),
+			});
+		}
+		const port = await forwarder.open(
+			name === pgName ? "127.0.0.1" : name,
+			service.split("/")[0],
+		);
+		console.log(`Internal-network TCP fallback: 127.0.0.1:${port} -> ${service}`);
+		return port;
+	}
 	async function ready(name, args) {
 		const deadline = Date.now() + 60000;
 		while (Date.now() < deadline && !interrupted) {
 			try {
-				await docker("exec", name, ...args);
+				const metadata = await ownedContainer(name);
+				await docker("exec", metadata.Id, ...args);
 				return;
 			} catch {
 				await delay(500);
@@ -89,6 +176,16 @@ async function main() {
 			return;
 		}
 		const failures = [];
+		if (forwarder) {
+			try {
+				console.log(
+					"Local forwarding cleanup audit:",
+					JSON.stringify(await forwarder.close()),
+				);
+			} catch (error) {
+				failures.push(safeError(error));
+			}
+		}
 		for (const name of containers.reverse()) {
 			try {
 				const present = await docker(
@@ -146,7 +243,10 @@ async function main() {
 		}
 		const path = resolve(directory);
 		const within = relative(resolve(cache), path);
-		if (failures.length === 0 && within && !within.startsWith("..") && !isAbsolute(within)) {
+		if (!within || within.startsWith("..") || isAbsolute(within)) {
+			failures.push("Temporary cleanup target is outside this checkout's cache");
+		}
+		if (failures.length === 0) {
 			await rm(path, { recursive: true, force: true });
 		}
 		if (failures.length) {
@@ -242,10 +342,8 @@ async function main() {
 			);
 			await ready(pgName, ["pg_isready", "-U", user, "-d", user]);
 			await ready(redisName, ["redis-cli", "-a", password, "PING"]);
-			const port = async (name, value) =>
-				(await docker("port", name, value)).match(LOCAL_PORT)?.[1];
-			const pgPort = await port(pgName, "5432/tcp"),
-				redisPort = await port(redisName, "6379/tcp");
+			const pgPort = await localPort(pgName, "5432/tcp", pgName),
+				redisPort = await localPort(redisName, "6379/tcp", pgName);
 			if (!pgPort || !redisPort) {
 				throw new Error("Expected dynamically assigned localhost-only service ports");
 			}

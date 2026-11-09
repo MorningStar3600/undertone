@@ -103,6 +103,9 @@ export async function createFixture() {
 	const connect = (searchPath: string) =>
 		new Sequelize(target.database, {
 			dialect: "postgres",
+			// QueryInterface DDL also needs this; a session search_path alone leaves
+			// addColumn targeting Sequelize's default public schema.
+			schema: searchPath,
 			logging: false,
 			pool: { max: 3, acquire: 10000 },
 			dialectOptions: {

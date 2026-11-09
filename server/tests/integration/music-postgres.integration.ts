@@ -13,6 +13,8 @@ import {
 	waitForLock,
 } from "./music-fixture.js";
 
+const ANNOTATIONS_QUERY = /FROM (?:"[^"]+"\.)?"UserTrackMoods"/;
+
 describe("real PostgreSQL migrations and catalogue imports", () => {
 	let f: Awaited<ReturnType<typeof createFixture>>;
 	beforeEach(async () => {
@@ -28,7 +30,7 @@ describe("real PostgreSQL migrations and catalogue imports", () => {
 		const tables = async () =>
 			(
 				await f.connection.query<{ table_name: string }>(
-					"SELECT table_name FROM information_schema.tables WHERE table_schema = :schema ORDER BY table_name",
+					"SELECT t.table_name FROM information_schema.tables AS t WHERE table_schema = :schema ORDER BY table_name",
 					{ replacements: { schema: f.schema }, type: QueryTypes.SELECT },
 				)
 			).map(row => row.table_name);
@@ -73,6 +75,7 @@ describe("real PostgreSQL migrations and catalogue imports", () => {
 
 	it("serializes absent provider identities across independent pools and reversed pages", async () => {
 		const b = f.peer();
+		await b.connection.authenticate();
 		const t = await f.connection.transaction();
 		let committed = false;
 		const entries = [entry("race-new-a"), entry("race-new-b"), entry("race-new-a")];
@@ -261,7 +264,7 @@ describe("real PostgreSQL migrations and catalogue imports", () => {
 		f.connection.addHook("afterQuery", "snapshot-barrier", async (_options, query) => {
 			if (
 				!paused &&
-				(query as unknown as { sql?: string }).sql?.includes('FROM "UserTrackMoods"')
+				ANNOTATIONS_QUERY.test((query as unknown as { sql?: string }).sql ?? "")
 			) {
 				paused = true;
 				entered();

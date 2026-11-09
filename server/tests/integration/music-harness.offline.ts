@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createConnection } from "node:net";
 import { Sequelize, type Transaction } from "sequelize";
 import { discoverMigrations, targets } from "./music-fixture.js";
+import { MusicDockerForwarder, publishedPort } from "./music-docker-forward.mjs";
 
 const runId = "0123456789abcdef01234567";
 const EVENT_INDEX = /CREATE UNIQUE INDEX .*"MusicRoomEvents" \("roomId", "entryId"\)/;
@@ -17,6 +21,100 @@ function valid() {
 afterEach(() => {
 	vi.unstubAllEnvs();
 	vi.restoreAllMocks();
+});
+
+describe("offline Docker transport safeguards (no Docker execution)", () => {
+	it("rejects untrusted shell targets before verification or spawn", async () => {
+		const verify = vi.fn();
+		const transport = vi.fn();
+		const forward = new MusicDockerForwarder({ verify, spawn: transport });
+		await expect(forward.open("127.0.0.1; echo unsafe", "5432")).rejects.toThrow();
+		await expect(forward.open("127.0.0.1", "5432; echo unsafe")).rejects.toThrow();
+		expect(verify).not.toHaveBeenCalled();
+		expect(transport).not.toHaveBeenCalled();
+		expect(await forward.close()).toMatchObject({ listeners: 0, sockets: 0, children: 0 });
+	});
+	it("uses an existing loopback publication and falls back only when it is missing", () => {
+		expect(publishedPort({ NetworkSettings: { Ports: {} } }, "5432/tcp")).toBeUndefined();
+		expect(
+			publishedPort({ NetworkSettings: { Ports: { "5432/tcp": null } } }, "5432/tcp"),
+		).toBeUndefined();
+		expect(
+			publishedPort(
+				{
+					NetworkSettings: {
+						Ports: {
+							"5432/tcp": [{ HostIp: "127.0.0.1", HostPort: "15432" }],
+						},
+					},
+				},
+				"5432/tcp",
+			),
+		).toBe("15432");
+	});
+	it.each([
+		{ HostIp: "0.0.0.0", HostPort: "15432" },
+		{ HostIp: "::", HostPort: "15432" },
+		{ HostIp: "127.0.0.1", HostPort: "0" },
+		{ HostIp: "127.0.0.1", HostPort: "65536" },
+		{ HostIp: "127.0.0.1", HostPort: "15432;echo unsafe" },
+	])("rejects unsafe published binding %j without fallback", binding => {
+		expect(() =>
+			publishedPort({ NetworkSettings: { Ports: { "5432/tcp": [binding] } } }, "5432/tcp"),
+		).toThrow();
+	});
+	it.each(["success", "ownership-failure", "exec-failure"])(
+		"closes real loopback listeners and owned child processes after %s",
+		async mode => {
+			const verify = vi.fn().mockResolvedValue(undefined);
+			const transport = vi.fn(() =>
+				spawn(
+					process.execPath,
+					[
+						"-e",
+						mode === "exec-failure"
+							? "process.exit(42)"
+							: 'process.stderr.write("music-forward-ready\\n"); process.stdin.pipe(process.stdout);',
+					],
+					{ windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
+				),
+			);
+			const forward = new MusicDockerForwarder({ verify, spawn: transport, report: vi.fn() });
+			const port = Number(await forward.open("127.0.0.1", "5432"));
+			if (mode === "ownership-failure") {
+				verify.mockRejectedValue(new Error("synthetic label mismatch"));
+			}
+			const socket = createConnection({ host: "127.0.0.1", port });
+			socket.on("error", () => undefined);
+			try {
+				if (mode === "success") {
+					const data = once(socket, "data");
+					socket.write("real socket bytes");
+					expect(String((await data)[0])).toBe("real socket bytes");
+				} else {
+					await once(socket, "close");
+				}
+			} finally {
+				const audit = await forward.close();
+				expect(audit).toMatchObject({
+					ports: [port],
+					listeners: 0,
+					sockets: 0,
+					children: 0,
+				});
+				for (const pid of audit.pids) {
+					expect(() => process.kill(pid, 0)).toThrow();
+				}
+				expect(verify).toHaveBeenCalledTimes(2);
+				expect(transport).toHaveBeenCalledTimes(mode === "ownership-failure" ? 0 : 1);
+				const probe = createConnection({ host: "127.0.0.1", port });
+				await expect(once(probe, "connect")).rejects.toMatchObject({
+					code: "ECONNREFUSED",
+				});
+				probe.destroy();
+			}
+		},
+	);
 });
 
 describe("offline harness safeguards (no database execution)", () => {

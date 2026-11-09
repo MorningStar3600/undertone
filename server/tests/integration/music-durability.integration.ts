@@ -74,6 +74,8 @@ describe("real PostgreSQL Room persistence", () => {
 		await playing();
 		const b = f.peer(),
 			observer = f.peer();
+		// Connect independent pools before starting the bounded contention window.
+		await Promise.all([b.connection.authenticate(), observer.connection.authenticate()]);
 		const before = (await store.load("durable"))!;
 		const value = structuredClone(before);
 		value.state.revision++;
@@ -221,7 +223,9 @@ describe("real PostgreSQL Room persistence", () => {
 		const outcome = captureError(action);
 		try {
 			await waitForLock(b.connection, f.schema);
+			room.grants.setRoleGrants(Role.UnregisteredUser, 0);
 			room.grants.setRoleGrants(Role.RegisteredUser, 0);
+			expect(room.grants.granted(Role.RegisteredUser, "playback.play-pause")).toBe(false);
 		} finally {
 			await blocker.rollback();
 		}

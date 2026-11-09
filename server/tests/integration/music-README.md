@@ -22,7 +22,18 @@ and `redis:7*` tag if present. Otherwise it pulls only `postgres:15-bullseye` an
 Each run generates a random network, container names, PostgreSQL database/role and
 synthetic password. Containers use tmpfs for PostgreSQL data and Redis `/data`, no
 existing volumes, and dynamic ports bound only to `127.0.0.1`. The bridge network
-is internal. Service readiness is bounded, as are CLI calls, SQL statements, lock
+is internal. If Docker omits the requested publication on that internal network,
+`music-docker-forward.mjs` opens dynamic loopback listeners and forwards raw TCP
+through `docker exec -i` in the owned PostgreSQL image (Bash `/dev/tcp` and `cat`).
+It pins the inspected immutable container ID and checks its run labels before
+each exec; it never attaches an external bridge. Existing safe published ports
+take precedence; unsafe bindings are rejected.
+The shell program is static and receives validated host/port arguments separately.
+Forward startup is bounded to 10s, connections to 64, and teardown to 35s. Teardown
+closes listeners/sockets, waits for local exec children, and then removes only the
+owned containers, which also ends their remote pumps. Its cleanup audit records
+local ports/PIDs and verifies zero remaining forwarding resources on success/failure.
+Service readiness is bounded, as are CLI calls, SQL statements, lock
 waits and connection acquisition. Image pulls have a five-minute limit.
 
 The runner removes only its generated containers/network after checking their run
@@ -93,7 +104,7 @@ check** replaces query execution/transactions. It does not prove DDL acceptance,
 foreign-key enforcement, rollback or concurrency on PostgreSQL. Collection skips
 every live test and proves only that all test modules load successfully.
 
-## Live scenarios implemented (17 tests, not yet executed here)
+## Live scenarios (21 tests)
 
 - Seven PostgreSQL migration/catalogue cases: all discovered migrations on an empty
   schema; failed transactional DDL/reapplication and FK/unique constraints; actual
@@ -113,57 +124,79 @@ every live test and proves only that all test modules load successfully.
   real sockets, TTL and serialized storable/syncable conversions, restoration through
   `redisStateToState`, SQL recovery after removing the test Redis key, and stable
   history/session/playback identity without another credit.
+- Four timeline durability cases: a thrown finalizer and a trigger-rejected final
+  snapshot update both roll back SQL, live state and publication, then retry with
+  exactly sequences 1, 2, 3 and one play credit; commit-time retiming of the public
+  event, SQL playback anchor and normalized start after an observed CAS wait;
+  Redis and SQL-only restoration with distinct fresh public epochs while keeping
+  domain playback/session identity, history, two-contributor fairness and future plan.
 
 Concurrency synchronization observes `pg_stat_activity.wait_event_type = 'Lock'`,
 or pauses an actual Sequelize `afterQuery` hook. It does not substitute SQL results.
 The lock observer uses a monotonic deadline even when a scenario controls `Date.now`.
-Tests use independent Sequelize pools and release their blockers in `finally`.
+Tests warm independent Sequelize pools before bounded lock observation and release
+blockers in `finally`. The observer deadline remains 4s; test/hook limits remain
+20s/30s and production transaction settings remain 5s lock/10s statement.
 
-## Evidence from this Windows checkout
+## Historical evidence (before these harness fixes)
 
-Base production revision: `e1a51665`. No production files or migrations were changed.
+The initial harness at production base `e1a51665` had 13 offline checks passing and
+17 live tests collected/skipped, with no live PostgreSQL/Redis execution because
+Docker was unhealthy. That historical result is not a live pass.
 
-Validated on Node **24.11.1**, pinned Yarn **4.1.0**, Vitest **1.2.2**, Sequelize
-**6.32.0**, pg client **8.11.0**, redis client **4.6.7**:
+A later read-only validation at `f5f6bd86`, recorded under
+`D:/undertone/test-results/live-playback-review`, measured Docker 29.9.3,
+PostgreSQL 15.13 and Redis 7.4.5. The canonical runner failed before tests because
+Docker omitted the internal network's requested published ports. Temporary ignored
+transport/schema adapters ran the original 17 cases (12 passed, 5 failed), then
+focused corrected follow-ups plus four timeline probes passed 9/9. The combined
+21 distinct scenarios passed across those phases; this was **not one canonical
+21-case green run**. The tracked harness now incorporates those bounded corrections.
 
-- **13 offline checks passed.** Initially four music migrations/22 total were
-  discovered. Repeating with read copies from local-media commit
-  `f518ed367b3ab01bf903a0602993d8e4f3f8d8f8` and recommendation commit
-  `3b8697aca047a9926e17af5a7b20ef1e4667c5dd` discovered **24** total and generated SQL
-  for all **six** music migrations, including the local-source FK and publication
-  composite annotation FK. No cherry-pick or production feature import was used.
-  The exact repeat command, after placing those two blobs and the CommonJS package
-  marker under the ignored cache directory, was:
+## Final validation on integrated product
 
-  ```powershell
-  $env:TEST_MUSIC_EXTRA_MIGRATIONS_DIR = Join-Path $PWD "node_modules/.cache/music-migration-copies"
-  node server/tests/integration/music-run.mjs --offline
-  ```
+Product revision: `98145c5a1bc62d8c936bb27d5d7d54726cfac90f` (includes the server
+event timeline, command/undo correction and client controller). This change edits
+only the integration harness. Final run ID: `4dbb2238c9ad5aac08e89ab7`.
 
-- **17 live tests collected and explicitly skipped** with `--collect-only`.
-- Server `tsc --noEmit`, focused ESLint and Biome checks passed.
-- No-argument invocation rejected missing explicit test-service inputs.
+The tracked canonical runner completed **21 passed / 0 failed / 0 skipped** in
+**457.55s**: all original 17 cases and all four timeline probes in one fresh run.
+The exact invocation, with additional evidence reporters only, was:
 
-**Real PostgreSQL tests run: 0. Real Redis tests run: 0.** There are no demonstrated
-production failures and no measured database server versions from this run.
+```powershell
+node server/tests/integration/music-run.mjs --docker --reporter=verbose --reporter=json --outputFile=../test-results/music-harness-final/live-results.json
+```
 
-The installed Docker CLI reports **29.5.2 / API 1.54**. The initial `docker_engine`
-pipe was absent. Docker Desktop was started hidden; subsequent engine requests to
-both `docker_engine` and `dockerDesktopLinuxEngine` returned **HTTP 500 Internal
-Server Error**, including `version` and image enumeration. The bounded harness
-engine probe timed out after 30 seconds, before creating containers/networks or
-pulling images, and removed its temporary configuration directory.
+Measured versions: Node **24.11.1**, Yarn **4.1.0**, Docker engine **29.9.3**,
+PostgreSQL **15.13 (Debian 15.13-1.pgdg110+1), x86_64**, Redis server **7.4.5**;
+Vitest **1.2.2**, Sequelize **6.32.0**, pg **8.11.0**, redis client **4.6.7**,
+TypeScript **6.0.3**, ESLint **8.57.0**, Biome **2.6.3**. Existing official images
+`postgres:15-bullseye` and `redis:7-alpine` were used; no pull was needed. All 24
+canonical migrations applied to empty private schemas. No dependency/lockfile,
+application environment, product or migration changes were made.
 
-`com.docker.service` remained **Stopped**. `Start-Service com.docker.service` failed
-with `CouldNotStartService`: the current account could not open that service on
-computer `.`. `wsl --status` reports default Ubuntu-24.04 and WSL version 2; that does
-not establish that Docker's Linux backend is healthy. Required prerequisite: a
-healthy installed Docker Linux engine accessible to this account (or explicitly
-provisioned isolated PostgreSQL/Redis URLs). No admin changes, updates, downloads of
-Docker/WSL, reboot, or termination of other users' services were attempted.
+Additional checks: **23 offline checks passed**, 21 live tests collected/skipped
+with `--collect-only`, server `tsc --noEmit`, scoped ESLint, Biome formatting/lint,
+Node syntax and `git diff --check` passed. No-input execution rejected missing
+isolated-service inputs. The runner's fallback was exercised live; the ordinary
+published-port selection/rejection path has offline evidence on this engine.
 
-The two additional migrations have only offline SQL-generation evidence here.
-Their live DDL/constraint behavior, local-media balancer access controls, and
-recommendation publication/adoption PostgreSQL locking are **not validated** by this
-lot. Provider playback, browser/login, Redis failover/pubsub and multi-process Room
-ownership beyond SQL CAS are also outside this evidence.
+An earlier diagnostic attempt hit unchanged setup deadlines because repeated
+Docker CLI ownership inspections consumed the SQL connection startup budget.
+Its known Vitest process tree was stopped and the runner cleaned its resources.
+The final implementation pins label-verified immutable container IDs, checks that
+metadata before each exec, and avoids those repeated cold CLI probes. No assertion,
+4s observer deadline, test/hook timeout or production SQL setting was relaxed.
+
+Redacted logs, source hashes, raw Vitest JSON and exact-label cleanup evidence are
+under the ignored `test-results/music-harness-final` directory. The final and
+aborted-run cleanup audits check only their own labels, listener ports and known
+process IDs; neither prunes resources nor changes existing services or data.
+
+The tests exercise migrations and bounded music persistence/timeline behavior.
+They do not establish browser/provider playback, login security, Redis failover,
+multi-process Room ownership beyond SQL CAS, or broad local-media/recommendation
+feature correctness. All 24 migrations are applied, and selected music
+FK/unique/rollback cases exercise constraints; this does not validate every feature
+using those tables. No product defect or production security approval is inferred
+from a passing integration run.
