@@ -355,6 +355,10 @@ export class MusicCatalogue {
 		});
 		await model.increment("revision", { where: { userId }, transaction });
 	}
+	/** Trusted adoption writer: invalidate in the SAME transaction as membership and tags. */
+	async invalidateLibraryAdoption(userId: number, transaction: Transaction) {
+		await this.invalidateRoomUser(userId, transaction);
+	}
 	async getTrack(trackId: string): Promise<Track> {
 		MusicIdSchema.parse(trackId);
 		const row = await this.models().Track.findByPk(trackId);

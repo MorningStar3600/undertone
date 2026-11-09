@@ -2,6 +2,7 @@ import { API } from "@/common-http";
 import type { AxiosRequestConfig } from "axios";
 import type { AddLibraryTrackRequest, CreateMoodRequest } from "ott-common/models/music";
 import type { CreateMusicImportSource } from "ott-common/models/music-imports";
+import type { PublishMusicRequest } from "ott-common/models/music-recommendations";
 
 export const MUSIC_PAGE_LIMIT = 20;
 export const MUSIC_MAX_OFFSET = 10000;
@@ -21,9 +22,10 @@ export async function musicRequest<T>(
 		| AddLibraryTrackRequest
 		| CreateMoodRequest
 		| CreateMusicImportSource
+		| PublishMusicRequest
 		| { daily: boolean }
 		| Record<string, never>,
-	params?: { limit: number; offset: number },
+	params?: { limit: number; offset: number } | { limit: number; moods: string; after?: string },
 ): Promise<T> {
 	const config: AxiosRequestConfig = { method, url: `/music${path}`, signal, data, params };
 	const response = await API.request<{ success: boolean } & T>(config);

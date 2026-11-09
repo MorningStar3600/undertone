@@ -14,6 +14,8 @@ import MusicFavorites from "@/components/music/MusicFavorites.vue";
 import MusicFeedback from "@/components/music/MusicFeedback.vue";
 import MusicPagination from "@/components/music/MusicPagination.vue";
 import TrackMoods from "@/components/music/TrackMoods.vue";
+import LibrarySuggestions from "@/components/music/recommendations/LibrarySuggestions.vue";
+import TrackPublication from "@/components/music/recommendations/TrackPublication.vue";
 
 const music = useMusic();
 const { authorized, version, expired } = music;
@@ -96,6 +98,7 @@ function removeTrack(id: string) {
 				<TabsTrigger value="library">{{ $t("music.library") }}</TabsTrigger>
 				<TabsTrigger value="favorites">{{ $t("music.favorites") }}</TabsTrigger>
 				<TabsTrigger value="imports">{{ $t("musicImports.title") }}</TabsTrigger>
+				<TabsTrigger value="suggestions">{{ $t("musicRecommendations.title") }}</TabsTrigger>
 			</TabsList>
 			<TabsContent value="library" class="flex min-w-0 flex-col gap-6">
 				<LibraryImport :disabled="pending" @import="importTrack" />
@@ -175,6 +178,10 @@ function removeTrack(id: string) {
 							:track-id="entry.track.id"
 							:contributor-mood-ids="[]"
 						/>
+						<TrackPublication
+							v-if="expanded === entry.track.id"
+							:track-id="entry.track.id"
+						/>
 					</li>
 				</ul>
 				<MusicPagination
@@ -190,6 +197,9 @@ function removeTrack(id: string) {
 			/></TabsContent>
 			<TabsContent value="imports" class="min-w-0"
 				><LibraryImports :key="version" @changed="page.load()"
+			/></TabsContent>
+			<TabsContent value="suggestions" class="min-w-0"
+				><LibrarySuggestions :key="version" @changed="page.load()"
 			/></TabsContent>
 		</Tabs>
 	</main>
