@@ -8,6 +8,11 @@ import { isOfficialSite } from "./util/misc";
 
 export const routes: RouteRecordRaw[] = [
 	{
+		path: "/library",
+		name: "library",
+		component: () => import("./views/Library.vue"),
+	},
+	{
 		path: "/",
 		name: "home",
 		component: () => import("@/views/Home.vue"),

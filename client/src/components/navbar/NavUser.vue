@@ -12,16 +12,21 @@
 			</Button>
 		</DropdownMenuTrigger>
 		<DropdownMenuContent align="end" class="w-52">
-			<DropdownMenuItem as-child>
-				<router-link to="/account">{{ $t("nav.account") }}</router-link>
-			</DropdownMenuItem>
-			<DropdownMenuItem v-if="!store.state.user.discordLinked" @click="goLoginDiscord">
-				{{ $t("nav.link-discord") }}
-			</DropdownMenuItem>
-			<DropdownMenuSeparator />
-			<DropdownMenuItem class="text-destructive" @click="$emit('logout')">
-				{{ $t("nav.logout") }}
-			</DropdownMenuItem>
+			<DropdownMenuGroup>
+				<DropdownMenuItem as-child>
+					<router-link to="/library">{{ $t("music.library") }}</router-link>
+				</DropdownMenuItem>
+				<DropdownMenuItem as-child>
+					<router-link to="/account">{{ $t("nav.account") }}</router-link>
+				</DropdownMenuItem>
+				<DropdownMenuItem v-if="!store.state.user.discordLinked" @click="goLoginDiscord">
+					{{ $t("nav.link-discord") }}
+				</DropdownMenuItem>
+				<DropdownMenuSeparator />
+				<DropdownMenuItem class="text-destructive" @click="$emit('logout')">
+					{{ $t("nav.logout") }}
+				</DropdownMenuItem>
+			</DropdownMenuGroup>
 		</DropdownMenuContent>
 	</DropdownMenu>
 	<Button v-else variant="outline" size="sm" data-cy="user-logged-out" @click="$emit('login')">
@@ -34,6 +39,7 @@ import { Button } from "@/components/ui/button";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
+	DropdownMenuGroup,
 	DropdownMenuItem,
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
