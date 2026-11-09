@@ -36,6 +36,7 @@ import {
 	type MusicRoomStore,
 } from "./room-music-storage.js";
 import type { DurableMusicRoom } from "../models/music-room.js";
+import { isLocalSource } from "./local-media.js";
 
 export const musicIdentity = (user: { user_id?: number; token: string }): string =>
 	user.user_id
@@ -330,6 +331,9 @@ export class RoomMusic {
 			this.occurrenceTrackIds(state),
 			this.versionAccounts(state, ids),
 		);
+		const localOwners = await this.catalogue.localSourceOwners(snapshot.sources);
+		const allowed = (source: (typeof snapshot.sources)[number], contributorId: string) =>
+			!isLocalSource(source) || contributorId === `account:${localOwners.get(source.id)}`;
 		const candidate = (
 			trackId: string,
 			sourceId: string,
@@ -351,7 +355,10 @@ export class RoomMusic {
 				artistIds: track?.artists ?? [],
 				styleIds: track?.styles ?? [],
 				tagsByUser,
-				sourceUsable: !!source && source.availability !== "unavailable",
+				sourceUsable:
+					!!source &&
+					source.availability !== "unavailable" &&
+					allowed(source, contributorId),
 				mediaRef:
 					mediaRef && typeof mediaRef === "object" && !Array.isArray(mediaRef)
 						? json({ ...mediaRef, title: track?.title ?? mediaRef.title })
@@ -365,7 +372,10 @@ export class RoomMusic {
 		};
 		const candidates = snapshot.links.flatMap(link => {
 			const source = snapshot.sources.find(
-				s => s.trackId === link.trackId && s.availability !== "unavailable",
+				s =>
+					s.trackId === link.trackId &&
+					s.availability !== "unavailable" &&
+					allowed(s, `account:${link.userId}`),
 			);
 			return source ? [candidate(link.trackId, source.id, `account:${link.userId}`)] : [];
 		});
@@ -425,7 +435,7 @@ export class RoomMusic {
 		let resolved: Awaited<ReturnType<MusicCatalogue["resolveTrack"]>> | undefined;
 		if (action.action === "request") {
 			const reference = MusicReferenceSchema.parse(action.reference);
-			resolved = await this.catalogue.resolveTrack(reference);
+			resolved = await this.catalogue.resolveTrack(reference, identity);
 		}
 		return this.lock.protect(async () => {
 			await this.initializeLocked();
@@ -540,7 +550,9 @@ export class RoomMusic {
 							artistIds: track.artists,
 							styleIds: track.styles,
 							tagsByUser,
-							sourceUsable: source.availability !== "unavailable",
+							sourceUsable:
+								source.availability !== "unavailable" &&
+								(await this.catalogue.localSourceAllowed(source, identity)),
 							mediaRef: json({
 								service: source.service,
 								id: source.providerId,
@@ -620,7 +632,12 @@ export class RoomMusic {
 		try {
 			return {
 				video: {
-					...(await this.catalogue.toQueueItem(entry.trackId, entry.sourceId, extras)),
+					...(await this.catalogue.toQueueItem(
+						entry.trackId,
+						entry.sourceId,
+						extras,
+						entry.contributorId,
+					)),
 					entryId: entry.entryId,
 					contributorId: entry.contributorId,
 					origin: entry.origin,
@@ -642,6 +659,7 @@ export class RoomMusic {
 						entry.trackId,
 						source.id,
 						extras,
+						entry.contributorId,
 					);
 					const mediaRef =
 						typeof entry.mediaRef === "object" &&
@@ -707,7 +725,14 @@ export class RoomMusic {
 						source =>
 							source.id === (resolved?.candidate.sourceId ?? current.entry.sourceId),
 					);
-					failed = failed || !source || source.availability === "unavailable";
+					failed =
+						failed ||
+						!source ||
+						source.availability === "unavailable" ||
+						!(await this.catalogue.localSourceAllowed(
+							source,
+							current.entry.contributorId,
+						));
 				}
 				// Rebuild from the committed timeline, never from an earlier speculative start.
 				// The store calls this again after acquiring SQL ownership and doing staged I/O.
@@ -857,7 +882,10 @@ export class RoomMusic {
 					const source = snapshot.sources.find(
 						source => source.id === resolved.candidate.sourceId,
 					);
-					failed = !source || source.availability === "unavailable";
+					failed =
+						!source ||
+						source.availability === "unavailable" ||
+						!(await this.catalogue.localSourceAllowed(source, head.contributorId));
 				}
 				const playbackId = randomUUID();
 				const timeline = (now: number): DurableMusicRoom => {

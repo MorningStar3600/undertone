@@ -116,7 +116,7 @@
 				"
 				ref="player"
 				:service="source.service"
-				:video-url="source.src_url ?? source.id"
+				:video-url="directUrl"
 				:video-mime="source.mime!"
 				:thumbnail="source.thumbnail"
 				:subtitle-url="source.subtitleUrl"
@@ -172,6 +172,7 @@ import {
 	watchEffect,
 } from "vue";
 import { useStore } from "@/store";
+import { directPlaybackUrl } from "@/util/local-media";
 import { isInTimeRanges, secondsToTimestamp } from "@/util/timestamp";
 import {
 	type MediaPlayer,
@@ -206,6 +207,13 @@ const DirectPlayer = defineAsyncComponent(() => import("./DirectPlayer.vue"));
 const PeertubePlayer = defineAsyncComponent(() => import("./PeertubePlayer.vue"));
 
 const store = useStore();
+const directUrl = computed(() =>
+	directPlaybackUrl(
+		props.source,
+		store.state.room.name,
+		(import.meta.env.OTT_BASE_URL as string | undefined) ?? "",
+	),
+);
 
 const player: Ref<MediaPlayer | null> = ref(null);
 const hasPlayerChangedYet = ref(false);

@@ -1,5 +1,6 @@
 <template>
 	<div class="video-add">
+		<LocalLibrary v-if="isMusic" select />
 		<div class="search-sheet">
 			<div class="relative">
 				<Icon
@@ -164,6 +165,7 @@ import toast from "@/util/toast";
 import type { Video, VideoId } from "ott-common/models/video";
 import { QueueMode } from "ott-common/models/types";
 import MusicPreview from "@/components/music/MusicPreview.vue";
+import LocalLibrary from "@/components/music/LocalLibrary.vue";
 import type { OttResponseBody, OttApiResponseAddPreview } from "ott-common/models/rest-api";
 import axios from "axios";
 import AddPreviewHelper from "./AddPreviewHelper.vue";

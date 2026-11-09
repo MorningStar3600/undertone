@@ -10,6 +10,7 @@ import { conf } from "./ott-config.js";
 import announceapi from "./api/announce.js";
 import dataapi from "./api/data.js";
 import musicapi from "./api/music.js";
+import { buildLocalMediaRouter } from "./api/local-media.js";
 
 const log = getLogger("api");
 export function buildApiRouter(): express.Router {
@@ -38,6 +39,7 @@ export function buildApiRouter(): express.Router {
 		})(req, res, next);
 	});
 	router.use(auth.authTokenMiddleware);
+	router.use("/local-media", buildLocalMediaRouter());
 	router.use("/user", usermanager.router);
 	router.use("/user", userapi);
 	router.use("/music", musicapi);

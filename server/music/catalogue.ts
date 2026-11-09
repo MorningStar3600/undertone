@@ -20,6 +20,8 @@ import type { QueueItemExtras, Video, VideoId } from "ott-common/models/video.js
 import * as db from "../models/index.js";
 import type { MusicModels } from "../models/music.js";
 import InfoExtract from "../infoextractor.js";
+import { LOCAL_MEDIA_REFERENCE } from "ott-common/models/local-media.js";
+import { isLocalSource, localMediaLibrary } from "./local-media.js";
 import { getLogger } from "../logger.js";
 
 const log = getLogger("music/catalogue");
@@ -97,7 +99,9 @@ export const MusicReferenceSchema = z
 	.strict()
 	.superRefine((reference, ctx) => {
 		try {
-			if (URL_SERVICES.has(reference.service)) {
+			if (reference.service === "direct" && LOCAL_MEDIA_REFERENCE.test(reference.id)) {
+				return;
+			} else if (URL_SERVICES.has(reference.service)) {
 				validateMusicUrl(reference.id);
 			} else if (reference.service === "odysee") {
 				if (!LBRY_REFERENCE.test(reference.id)) {
@@ -162,6 +166,9 @@ const defaultResolver: CatalogueResolver = {
 		};
 	},
 	async video(source) {
+		if (isLocalSource(source)) {
+			return localMediaLibrary.video(source);
+		}
 		return InfoExtract.getVideoInfo(source.service, source.providerId);
 	},
 };
@@ -182,6 +189,12 @@ async function notify(change: CatalogueChange): Promise<void> {
 		} catch {
 			log.error("Catalogue invalidation listener failed.");
 		}
+	}
+}
+/** Trusted modules publish only after their enclosing transaction committed. */
+export async function notifyCatalogueChanges(changes: CatalogueChange[]): Promise<void> {
+	for (const change of changes) {
+		await notify(change);
 	}
 }
 
@@ -234,6 +247,38 @@ export class MusicCatalogue {
 		private readonly models: () => MusicModels = () => db,
 		private readonly resolver: CatalogueResolver = defaultResolver,
 	) {}
+	/** Narrow local-media seam; provider sources retain their historical policy. */
+	async localSourceAllowed(source: TrackSource, contributorId: string): Promise<boolean> {
+		return localMediaLibrary.sourceAllowed(source, contributorId);
+	}
+	async localSourceOwners(sources: TrackSource[]): Promise<Map<string, number>> {
+		return localMediaLibrary.sourceOwners(sources);
+	}
+	/** In the caller's transaction: capture owners and bump their durable versions once.
+	 * Track fingerprints also cover metadata/availability for occurrences outside libraries. */
+	async invalidateTracks(
+		trackIds: string[],
+		transaction: Transaction,
+	): Promise<CatalogueChange[]> {
+		const changes: CatalogueChange[] = [],
+			owners = new Set<number>();
+		const ids = [...new Set(trackIds)];
+		for (let offset = 0; offset < ids.length; offset += 400) {
+			const links = await this.models().UserLibraryTrack.findAll({
+				where: { trackId: { [Op.in]: ids.slice(offset, offset + 400) } },
+				transaction,
+			});
+			for (const link of links) {
+				const { userId, trackId } = link.get();
+				owners.add(userId);
+				changes.push({ kind: "metadata", userId, trackId, action: "updated" });
+			}
+		}
+		for (const userId of [...owners].sort((a, b) => a - b)) {
+			await this.invalidateRoomUser(userId, transaction);
+		}
+		return changes;
+	}
 
 	private async write<T>(operation: (transaction: Transaction) => Promise<T>): Promise<T> {
 		// SQLite permits a single writer. DB uniqueness also arbitrates between server processes.
@@ -384,7 +429,28 @@ export class MusicCatalogue {
 	/** Trusted server import, also usable for manual room requests without adding a library link. */
 	async resolveTrack(
 		reference: VideoId | { url: string },
+		contributorId?: string,
 	): Promise<{ track: Track; source: TrackSource }> {
+		if (
+			!("url" in reference) &&
+			reference.service === "direct" &&
+			LOCAL_MEDIA_REFERENCE.test(reference.id)
+		) {
+			const row = await this.models().TrackSource.findByPk(
+				LOCAL_MEDIA_REFERENCE.exec(reference.id)![1],
+			);
+			const source = row?.get({ plain: true });
+			if (
+				!source ||
+				!contributorId ||
+				source.providerId !== reference.id ||
+				!(await this.localSourceAllowed(source, contributorId)) ||
+				source.availability !== "available"
+			) {
+				throw new CatalogueException(404, "Playable source not found.");
+			}
+			return { track: await this.getTrack(source.trackId), source };
+		}
 		if ("url" in reference) {
 			AddLibraryTrackSchema.parse(reference);
 		} else {
@@ -810,6 +876,7 @@ export class MusicCatalogue {
 		trackId: string,
 		sourceId: string,
 		extras: QueueItemExtras = {},
+		contributorId?: string,
 	): Promise<MusicQueueItem> {
 		await this.getTrack(trackId);
 		MusicIdSchema.parse(sourceId);
@@ -818,6 +885,12 @@ export class MusicCatalogue {
 			throw new CatalogueException(404, "Playable source not found.");
 		}
 		const source = row.get({ plain: true });
+		if (
+			isLocalSource(source) &&
+			(!contributorId || !(await this.localSourceAllowed(source, contributorId)))
+		) {
+			throw new CatalogueException(404, "Playable source not found.");
+		}
 		const video = await this.resolver.video(source);
 		return { ...video, title: safeTrackTitle(video.title), ...extras, trackId, sourceId };
 	}

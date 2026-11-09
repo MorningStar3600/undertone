@@ -102,7 +102,7 @@ export interface UserLibraryTrack {
 	userId: number;
 	trackId: TrackId;
 	/** Initial provenance: a single provider reference, never an entire cache import. */
-	importKind: "reference" | "catalogue";
+	importKind: "reference" | "catalogue" | "local";
 }
 
 export interface LibraryTrack {

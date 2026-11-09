@@ -8,6 +8,8 @@ First, a base configuration is loaded from `env/base.toml`. Then, based on the v
 
 The config schema is defined in [ott-config.ts](../server/ott-config.ts). Most config options are also overridable using environment variables, which are also included in the schema.
 
+Operator-owned audio folders are disabled by default. See [local audio libraries](local-audio.md) for the explicit `local_media.roots` configuration, scan limits, access rules and single-monolith restriction.
+
 ## Setting up Discord authentication
 
 To enable Discord authentication, you must first create a Discord application. You can do this by going to the [Discord Developer Portal](https://discord.com/developers/applications) and clicking "New Application". Give your application a name, then click "Create".

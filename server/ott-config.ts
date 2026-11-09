@@ -5,6 +5,7 @@ import validator from "validator";
 import convict from "convict";
 import toml from "toml";
 import type winston from "winston";
+import { validateLocalMediaRoots } from "./music/local-media-config.js";
 import { ALL_VIDEO_SERVICES } from "ott-common/constants.js";
 import { type Result, err, ok, intoResult } from "ott-common/result.js";
 
@@ -27,6 +28,14 @@ convict.addFormat({
 });
 
 export const conf = convict({
+	local_media: {
+		roots: {
+			doc: "Operator-owned audio roots: stable id, absolute directory and owning account ID. Empty disables indexing. Single monolith only.",
+			format: validateLocalMediaRoots,
+			default: [] as { id: string; directory: string; ownerId: number }[],
+			sensitive: true,
+		},
+	},
 	env: {
 		doc: "The application environment.",
 		format: ["production", "development", "test"],

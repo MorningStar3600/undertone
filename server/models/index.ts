@@ -8,6 +8,7 @@ import { createModel as createModelCachedVideo } from "./cachedvideo.js";
 import { createMusicModels, type MusicModels } from "./music.js";
 import { musicImportModels } from "./music-imports.js";
 import { musicRecommendationModels } from "./music-recommendations.js";
+import { localMediaModels } from "./local-media.js";
 
 const log = getLogger("db");
 
@@ -106,6 +107,7 @@ export let UserLibraryTrack: MusicModels["UserLibraryTrack"];
 export let UserTrackMood: MusicModels["UserTrackMood"];
 export let UserFavoriteMood: MusicModels["UserFavoriteMood"];
 function buildModels(sequelize: Sequelize.Sequelize) {
+	localMediaModels(sequelize);
 	musicImportModels(sequelize);
 	musicRecommendationModels(sequelize);
 	Room = createModelRoom(sequelize);

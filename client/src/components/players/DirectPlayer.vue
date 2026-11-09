@@ -381,7 +381,7 @@ function setAudioBoost(boost: number): void {
 }
 
 async function loadVideoSource() {
-	console.log("DirectPlayer: loading video source:", videoUrl.value, videoMime.value);
+	console.log("DirectPlayer: loading media source");
 	if (!videoElem.value) {
 		console.error("player not ready");
 		return;

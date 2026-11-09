@@ -1,6 +1,25 @@
 import { BehaviorOption, OttWebsocketError, Role } from "ott-common/models/types";
 
 export default {
+	localMedia: {
+		title: "Local audio library",
+		working: "Scanning or loading local audio. Scans can take up to 30 seconds.",
+		error: "Unable to complete the local library request. Refresh to check its status.",
+		refresh: "Refresh status",
+		scan: "Scan library",
+		noRoots:
+			"No audio folders are configured for your account. An instance operator must configure a library before you can scan it.",
+		balancer:
+			"Local audio is disabled on clustered instances. Your other music sources remain available.",
+		processed: "{count} files processed",
+		status: {
+			idle: "Not scanned",
+			scanning: "Scanning",
+			complete: "Scan complete",
+			partial: "Partial scan; missing files were not changed",
+			failed: "Scan failed; existing files were not changed",
+		},
+	},
 	musicRoom: {
 		mode: "Music",
 		"mode-hint": "Build a shared mix with moods and contribution fairness.",

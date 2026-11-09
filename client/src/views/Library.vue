@@ -10,6 +10,7 @@ import PageHeader from "@/components/PageHeader.vue";
 import LogInForm from "@/components/LogInForm.vue";
 import LibraryImport from "@/components/music/LibraryImport.vue";
 import LibraryImports from "@/components/music/imports/LibraryImports.vue";
+import LocalLibrary from "@/components/music/LocalLibrary.vue";
 import MusicFavorites from "@/components/music/MusicFavorites.vue";
 import MusicFeedback from "@/components/music/MusicFeedback.vue";
 import MusicPagination from "@/components/music/MusicPagination.vue";
@@ -101,6 +102,7 @@ function removeTrack(id: string) {
 				<TabsTrigger value="suggestions">{{ $t("musicRecommendations.title") }}</TabsTrigger>
 			</TabsList>
 			<TabsContent value="library" class="flex min-w-0 flex-col gap-6">
+				<LocalLibrary :key="version" @changed="page.load()" />
 				<LibraryImport :disabled="pending" @import="importTrack" />
 				<MusicFeedback
 					:loading="pending"
