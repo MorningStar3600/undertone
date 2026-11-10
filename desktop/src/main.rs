@@ -188,7 +188,7 @@ impl Player {
         self.playing = false;
     }
 
-    fn disconnect(&mut self) {
+    fn disconnect(&mut self, cx: &mut Context<Self>) {
         self.generation += 1;
         self.connection = None;
         self.connection_ready = false;
@@ -203,6 +203,7 @@ impl Player {
         self.native = NativeState::default();
         self.authority = ui_music::Authority::default();
         self.account_refresh_requested = false;
+        self.clear_native_forms(cx);
     }
 
     fn join(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -210,8 +211,7 @@ impl Player {
             self.notice = text("invalidRoom");
             return;
         };
-        self.disconnect();
-        self.clear_native_forms(cx);
+        self.disconnect(cx);
         self.room_name = address
             .socket
             .path_segments()
@@ -254,8 +254,8 @@ impl Player {
         .detach();
     }
 
-    fn fail(&mut self, code: &str) {
-        self.disconnect();
+    fn fail(&mut self, code: &str, cx: &mut Context<Self>) {
+        self.disconnect(cx);
         self.status = text(code);
     }
 
@@ -357,14 +357,14 @@ impl Player {
         }
         // A full channel already has a wakeup pending. Check before consuming any authority.
         if self.ipc_overflow.swap(false, Ordering::AcqRel) {
-            self.fail("bridgeFailed");
+            self.fail("bridgeFailed", cx);
             self.sync_layout(window);
             cx.notify();
             return;
         }
         let event_authority = self.native.authority();
         match event.kind {
-            EventKind::Failed(code) => self.fail(code),
+            EventKind::Failed(code) => self.fail(code, cx),
             EventKind::Message(message) => {
                 match self.observer.observe(&message) {
                     Ok(Observation::Capability) => {
@@ -381,7 +381,7 @@ impl Player {
                             // Keep exactly one host across consecutive YouTube tracks.
                             if self.webview.is_none() {
                                 if self.start_host(window, event_authority).is_err() {
-                                    self.fail("browserFailed");
+                                    self.fail("browserFailed", cx);
                                 } else {
                                     let generation = self.generation;
                                     let host = self.host_generation;
@@ -395,8 +395,7 @@ impl Player {
                                                 host,
                                             ) && !player.host_ready
                                             {
-                                                player.fail("bridgeFailed");
-                                                player.clear_native_forms(cx);
+                                                player.fail("bridgeFailed", cx);
                                                 player.sync_layout(window);
                                                 cx.notify();
                                             }
@@ -417,8 +416,7 @@ impl Player {
                     }
                     Ok(Observation::Ignore) => {}
                     Err(code) => {
-                        self.fail(code);
-                        self.clear_native_forms(cx);
+                        self.fail(code, cx);
                         self.sync_layout(window);
                         cx.notify();
                         return;
@@ -486,10 +484,6 @@ impl Player {
                 }
             }
         }
-        // Terminal failure also clears native form values and all private UI drafts.
-        if self.connection.is_none() {
-            self.clear_native_forms(cx);
-        }
         // Keep error recovery/join forms visible as well as resizing the provider slot.
         self.sync_layout(window);
         cx.notify();
@@ -520,8 +514,7 @@ impl Player {
                 None
             }
             Control::Disconnect => {
-                self.disconnect();
-                self.clear_native_forms(cx);
+                self.disconnect(cx);
                 None
             }
             Control::PlayPause => {
