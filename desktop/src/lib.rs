@@ -1,5 +1,7 @@
 pub mod bridge;
 pub mod connection;
+pub mod music;
+pub mod session;
 
 use std::{collections::HashMap, sync::LazyLock};
 
