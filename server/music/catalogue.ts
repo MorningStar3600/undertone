@@ -187,13 +187,16 @@ export function subscribeCatalogueChanges(listener: Listener): () => void {
 		listeners.delete(listener);
 	};
 }
-async function notify(change: CatalogueChange): Promise<void> {
+function invalidateEligibility(change: CatalogueChange): void {
 	// Fence in-flight eligibility reads before any asynchronous listener can yield.
 	for (const watch of eligibilityWatches) {
 		if (watch.users.has(change.userId) || watch.tracks.has(change.trackId)) {
 			watch.current = false;
 		}
 	}
+}
+async function notify(change: CatalogueChange): Promise<void> {
+	invalidateEligibility(change);
 	for (const listener of listeners) {
 		try {
 			await listener(change);
@@ -204,6 +207,11 @@ async function notify(change: CatalogueChange): Promise<void> {
 }
 /** Trusted modules publish only after their enclosing transaction committed. */
 export async function notifyCatalogueChanges(changes: CatalogueChange[]): Promise<void> {
+	// The entire batch is already committed. Fence every affected reader before
+	// the first subscriber can yield, including when an unrelated change comes first.
+	for (const change of changes) {
+		invalidateEligibility(change);
+	}
 	for (const change of changes) {
 		await notify(change);
 	}
@@ -684,9 +692,7 @@ export class MusicCatalogue {
 		return { added, trackIds, changes: [...changes.values()] };
 	}
 	async notifyImported(changes: CatalogueChange[]) {
-		for (const change of changes) {
-			await notify(change);
-		}
+		await notifyCatalogueChanges(changes);
 	}
 
 	async addLibraryTrack(userId: number, input: AddLibraryTrackRequest): Promise<Track> {

@@ -109,6 +109,50 @@ describe("previous track regression boundaries", () => {
 		}
 	});
 
+	it.each(["catalogue", "import"])(
+		"fences all %s batch changes before the first subscriber",
+		async route => {
+			const f = await fixture();
+			const trackId = f.room.music!.current!.trackId;
+			const watch = f.catalogue.watchEligibility([1], [trackId]);
+			let release!: () => void;
+			const waiting = new Promise<void>(resolve => {
+				release = resolve;
+			});
+			const observed: boolean[] = [];
+			const stop = subscribeCatalogueChanges(() => {
+				observed.push(watch.isCurrent());
+				return waiting;
+			});
+			let pending: Promise<void> | undefined;
+			try {
+				const changes = [
+					{
+						kind: "metadata" as const,
+						userId: 99,
+						trackId: randomUUID(),
+						action: "updated" as const,
+					},
+					{ kind: "metadata" as const, userId: 1, trackId, action: "updated" as const },
+				];
+				pending =
+					route === "catalogue"
+						? notifyCatalogueChanges(changes)
+						: f.catalogue.notifyImported(changes);
+				expect(watch.isCurrent()).toBe(false);
+				release();
+				await pending;
+				expect(observed).toEqual([false, false]);
+			} finally {
+				release();
+				await pending;
+				stop();
+				watch.release();
+				await f.connection.close();
+			}
+		},
+	);
+
 	it("drops more than five unusable future entries including an unstarted occurrence without charging them", async () => {
 		const f = await fixture();
 		try {
