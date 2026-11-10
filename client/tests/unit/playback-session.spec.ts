@@ -135,6 +135,9 @@ function setup(early = false, earlySync?: LegacyPlaybackSync) {
 		event,
 		tick,
 		bind,
+		elapse: (ms: number) => {
+			time += ms;
+		},
 	};
 }
 // eslint-disable-next-line vitest/require-top-level-describe
@@ -146,6 +149,101 @@ afterEach(() => {
 });
 
 describe("client playback subscription and captured provider integration", () => {
+	it("finishes late readiness on the original surface with the latest paused intent", async () => {
+		const s = setup(true);
+		s.calibrate();
+		const playing = timeline();
+		playing.baseline.state!.isPlaying = true;
+		s.snapshot(playing);
+		await flush();
+		const binding = s.surfaces.surface.value;
+		await s.tick(15_001);
+		expect(s.session.controller.getStatus().code).toBe("buffering");
+		expect(s.surfaces.surface.value).toBe(binding);
+		s.event({
+			epoch: "epoch",
+			occurrenceId: 1,
+			sequence: 2,
+			effectiveAtMs: 16_001,
+			type: "pause",
+		});
+		const player = s.bind();
+		await flush();
+		expect(s.surfaces.surface.value).toBe(binding);
+		expect(player.play).not.toHaveBeenCalled();
+		expect(player.setPosition.mock.lastCall?.[0]).toBeCloseTo(27.001, 9);
+		expect(s.session.controller.getStatus().code).toBe("paused");
+		s.event({
+			epoch: "epoch",
+			occurrenceId: 1,
+			sequence: 3,
+			effectiveAtMs: 16_001,
+			type: "play",
+		});
+		await flush();
+		expect(player.play).toHaveBeenCalledOnce();
+	});
+	it("recovers readiness without a focus event once the background provider becomes usable", async () => {
+		const s = setup(true);
+		s.calibrate();
+		const playing = timeline();
+		playing.baseline.state!.isPlaying = true;
+		s.snapshot(playing);
+		await flush();
+		await s.tick(15_001);
+		const player = s.bind();
+		await flush();
+		expect(player.setPosition.mock.lastCall?.[0]).toBeCloseTo(27.001, 9);
+		expect(player.play).toHaveBeenCalledOnce();
+		expect(s.session.controller.getStatus().code).toBe("playing");
+	});
+	it("holds after a suspended clock expires and reprojects the latest replacement after calibration", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		await flush();
+		const first = s.bind();
+		await flush();
+		s.elapse(31_000); // No callbacks ran during the simulated suspension.
+		s.session.refreshClock();
+		expect(s.session.controller.getStatus().code).toBe("waiting-clock");
+		expect(first.dispose).toHaveBeenCalledOnce();
+		s.event(
+			{
+				epoch: "epoch",
+				occurrenceId: 2,
+				sequence: 2,
+				effectiveAtMs: 31_000,
+				type: "load",
+				media,
+				positionSeconds: 20,
+				isPlaying: true,
+				rate: 1,
+			},
+			attachment(2, 2),
+		);
+		s.calibrate();
+		await flush();
+		const second = s.bind();
+		await flush();
+		expect(second.setPosition).toHaveBeenLastCalledWith(21);
+		expect(second.play).toHaveBeenCalledOnce();
+		expect(s.connection.sent.filter(m => m.action === "playback-command")).toEqual([]);
+	});
+	it("cleans up a timed-out captured readiness surface and ignores its late callback", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		await flush();
+		const binding = s.surfaces.surface.value!;
+		await s.tick(15_001);
+		s.session.dispose();
+		binding.ready();
+		await flush();
+		expect(binding.active).toBe(false);
+		expect(s.surfaces.surface.value).toBeNull();
+		expect(s.session.controller.getStatus().code).toBe("disposed");
+	});
 	it("schedules future authority between session ticks and forwards per-play cancellation", async () => {
 		const s = setup(true);
 		s.calibrate();

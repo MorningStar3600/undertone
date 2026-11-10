@@ -639,7 +639,8 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		}
 		// Visibility and timer throttling do not invalidate a still-fresh estimate.
 		// The estimator itself rejects expired samples and discontinuous clock readings.
-		controller.tick();
+		controller.resume();
+		publish();
 		probe();
 	}
 	function resume() {

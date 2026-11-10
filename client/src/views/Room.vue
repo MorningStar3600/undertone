@@ -585,12 +585,14 @@ export default defineComponent({
 		onMounted(() => {
 			document.addEventListener("visibilitychange", resumePlayback);
 			window.addEventListener("pageshow", resumePlayback);
+			window.addEventListener("focus", resumePlayback);
 		});
 		onUnmounted(() => {
 			roomDisposed = true;
 			playback.dispose();
 			document.removeEventListener("visibilitychange", resumePlayback);
 			window.removeEventListener("pageshow", resumePlayback);
+			window.removeEventListener("focus", resumePlayback);
 		});
 		watch(
 			() => store.state.settings.nativeYoutubeControls,

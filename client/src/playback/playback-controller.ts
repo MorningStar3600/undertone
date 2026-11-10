@@ -14,6 +14,9 @@ import type { ServerClock } from "./server-clock.js";
 
 export type PlaybackResult<T> = T | Promise<T>;
 
+/** A bounded SDK wait elapsed without a provider failure or browser policy rejection. */
+export class PlaybackDeferredError extends Error {}
+
 export interface PlaybackScope {
 	epoch: string;
 	occurrenceId: number;
@@ -126,6 +129,8 @@ export interface PlaybackController {
 	acceptEvent(input: unknown): PlaybackAcceptance["status"] | "rejected";
 	/** Call after clock calibration/reset as well as periodically without a scheduler. */
 	tick(): void;
+	/** Measure promptly after lifecycle resume; at most one deferred retry per generation. */
+	resume(): void;
 	/** Local retry after browser activation; never changes authoritative play intent. */
 	userActivated(): void;
 	/** Explicit retry of a failed adapter/resolver. There are no automatic failure retries. */
@@ -144,6 +149,9 @@ interface Generation<Source> {
 	failed: boolean;
 	buffering: boolean;
 	blocked: boolean;
+	deferred: boolean;
+	resumeRetryUsed: boolean;
+	resumeCheck: boolean;
 	playing: boolean | null;
 	rate: number | null;
 	aligned: number;
@@ -207,6 +215,7 @@ export function createPlaybackController<Source>(
 	let urgent = false;
 	let worker: Promise<void> | null = null;
 	let lastStartedMs = Number.NEGATIVE_INFINITY;
+	let lastResumeMs = Number.NEGATIVE_INFINITY;
 	let timer: { handle: unknown; dueMs: number } | null = null;
 	let status: PlaybackControllerStatus = { code: "waiting-snapshot", scope: null };
 
@@ -305,6 +314,9 @@ export function createPlaybackController<Source>(
 			}
 			if (next.state?.isPlaying !== projection?.state?.isPlaying) {
 				controlAlignment += 1;
+				if (active?.loaded) {
+					active.deferred = false;
+				}
 			}
 			appliedSequence = next.appliedSequence;
 			if (active) {
@@ -382,6 +394,11 @@ export function createPlaybackController<Source>(
 							publish("buffering", g);
 						}
 					} else if (event.type === "resumed") {
+						// Late readiness can finish the original captured surface after its bounded wait.
+						if (g.deferred && !g.loaded) {
+							g.deferred = false;
+							urgent = true;
+						}
 						if (g.buffering) {
 							g.buffering = false;
 							// A seek can itself cause buffering. Measure drift after recovery
@@ -396,6 +413,11 @@ export function createPlaybackController<Source>(
 						g.playing !== event.isPlaying
 					) {
 						g.playing = event.isPlaying;
+						if (event.isPlaying && g.deferred) {
+							g.deferred = false;
+							g.resumeCheck = true;
+							urgent = true;
+						}
 					}
 					tick();
 				},
@@ -406,6 +428,9 @@ export function createPlaybackController<Source>(
 			failed: false,
 			buffering: false,
 			blocked: false,
+			deferred: false,
+			resumeRetryUsed: false,
+			resumeCheck: false,
 			playing: null,
 			rate: null,
 			aligned: -1,
@@ -432,6 +457,9 @@ export function createPlaybackController<Source>(
 		let version = revision;
 		const signal = g.abort.signal;
 		if (!current(g, version)) {
+			return;
+		}
+		if (g.deferred) {
 			return;
 		}
 		try {
@@ -560,6 +588,9 @@ export function createPlaybackController<Source>(
 					g.fineDriftSinceMs !== null &&
 					localNow - g.fineDriftSinceMs >= intervalMs &&
 					localNow - g.lastSeekMs >= Math.max(fineCooldownMs, cooldownMs);
+				// Lifecycle resume is evidence to sample now, not evidence that a seek is needed.
+				const resumeDrift = g.resumeCheck && drift > fineTolerance;
+				g.resumeCheck = false;
 				if (drift <= driftRelease) {
 					g.drifting = false;
 					g.driftSinceMs = null;
@@ -580,6 +611,7 @@ export function createPlaybackController<Source>(
 				if (
 					g.aligned !== alignment ||
 					controlDrift ||
+					resumeDrift ||
 					fineDrift ||
 					(g.drifting &&
 						g.driftSinceMs !== null &&
@@ -658,6 +690,24 @@ export function createPlaybackController<Source>(
 		} catch (error) {
 			// Stale async failures have no bearing on the replacement occurrence.
 			refresh();
+			if (error instanceof PlaybackDeferredError && live(g)) {
+				// Keep the captured surface for late readiness. Ordinary ticks never retry it.
+				if (!g.loaded || projection.state.isPlaying) {
+					g.deferred = true;
+					publish("buffering", g);
+					// A lifecycle signal may have arrived while this bounded SDK wait was pending.
+					if (g.resumeCheck && !g.resumeRetryUsed) {
+						g.resumeRetryUsed = true;
+						g.deferred = false;
+						dirty = true;
+						urgent = true;
+					}
+				} else {
+					dirty = true;
+					urgent = true;
+				}
+				return;
+			}
 			fail(g, error);
 		}
 	};
@@ -798,6 +848,24 @@ export function createPlaybackController<Source>(
 			}
 		},
 		tick,
+		resume: () => {
+			if (disposed) {
+				return;
+			}
+			const now = options.now();
+			if (now - lastResumeMs >= intervalMs) {
+				lastResumeMs = now;
+				if (active) {
+					active.resumeCheck = true;
+					if (active.deferred && !active.resumeRetryUsed) {
+						active.resumeRetryUsed = true;
+						active.deferred = false;
+					}
+				}
+				urgent = true;
+			}
+			tick();
+		},
 		userActivated: () => {
 			if (active?.blocked && !disposed) {
 				const g = active;

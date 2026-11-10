@@ -469,6 +469,28 @@ describe("two-client authoritative timing simulation", () => {
 		expect(uncertain.calls.filter(call => call.type === "seek")).toHaveLength(1);
 		expect(slow.calls.filter(call => call.type === "seek")).toHaveLength(1);
 	});
+	it("measures lifecycle drift against fresh server time without seeking healthy or uncertain peers", async () => {
+		const healthy = client();
+		const delayed = client();
+		const uncertain = client({ uncertaintyMs: 120 });
+		const slow = client({ readMs: 80 });
+		for (const c of [healthy, delayed, uncertain, slow]) {
+			c.controller.installSnapshot(snapshot(true));
+		}
+		await advance(1_000);
+		delayed.jump(-0.08);
+		uncertain.jump(-0.08);
+		for (const c of [healthy, delayed, uncertain, slow]) {
+			c.controller.resume();
+			c.controller.resume();
+		}
+		await advance(100);
+		expect(delayed.position()).toBeCloseTo(healthy.position(), 9);
+		expect(delayed.calls.filter(call => call.type === "seek")).toHaveLength(2);
+		for (const c of [healthy, uncertain, slow]) {
+			expect(c.calls.filter(call => call.type === "seek")).toHaveLength(1);
+		}
+	});
 
 	it("cancels pending play before a replacement surface becomes audible", async () => {
 		const a = client({ playMs: 4_000 });

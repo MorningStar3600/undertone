@@ -14,6 +14,7 @@ import { ToastStyle } from "@/models/toast";
 import type { CaptionTrack } from "@/models/media-tracks";
 import { useCaptions } from "../composables";
 import type { MediaPlayerError } from "../composables/media-player";
+import { PlaybackDeferredError } from "@/playback/playback-controller";
 
 const YOUTUBE_IFRAME_API_URL = "https://www.youtube.com/iframe_api";
 
@@ -284,7 +285,13 @@ function play(signal?: AbortSignal): Promise<void> {
 			cleanup: () => signal?.removeEventListener("abort", cancel),
 		};
 		signal?.addEventListener("abort", cancel, { once: true });
-		playTimeout = setTimeout(onAutoplayBlocked, 4_000);
+		playTimeout = setTimeout(() => {
+			// Hidden iframes can defer PLAYING without rejecting autoplay. Bound the command
+			// and cancel its late effects, but reserve NotAllowedError for the SDK policy event.
+			requestedPlaying = false;
+			settlePlay(new PlaybackDeferredError("YouTube play timeout"));
+			player.value?.pauseVideo();
+		}, 4_000);
 		player.value!.playVideo();
 	});
 }

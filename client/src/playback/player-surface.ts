@@ -1,10 +1,11 @@
 import { shallowRef, type ShallowRef } from "vue";
 import type { QueueItem } from "ott-common/models/video";
 import type { MediaPlayer } from "@/components/composables/media-player";
-import type {
-	PlaybackAdapter,
-	PlaybackAdapterContext,
-	PlaybackAdapterEvent,
+import {
+	PlaybackDeferredError,
+	type PlaybackAdapter,
+	type PlaybackAdapterContext,
+	type PlaybackAdapterEvent,
 } from "./playback-controller";
 
 export interface CapturedPlayer extends MediaPlayer {
@@ -54,7 +55,7 @@ export function createPlayerSurfaces() {
 				};
 				const timeout = setTimeout(() => {
 					waiters.delete(check);
-					reject(new Error("Provider readiness timeout"));
+					reject(new PlaybackDeferredError("Provider readiness timeout"));
 				}, 15_000);
 				waiters.add(check);
 				check();

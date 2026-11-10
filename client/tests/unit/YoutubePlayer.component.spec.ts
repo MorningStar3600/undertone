@@ -3,12 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import YoutubePlayer from "@/components/players/YoutubePlayer.vue";
 import { useCaptions } from "@/components/composables";
 import { getSdk } from "@/util/playerHelper.js";
+import { PlaybackDeferredError } from "@/playback/playback-controller";
 
 vi.mock("@/util/playerHelper.js", () => ({ getSdk: vi.fn() }));
 
 describe("YouTube captions", () => {
 	let events: {
 		onReady: () => void;
+		onAutoplayBlocked: () => void;
 		onApiChange: () => void;
 		onStateChange: (event: { data: number }) => void;
 	};
@@ -86,6 +88,7 @@ describe("YouTube captions", () => {
 	afterEach(() => {
 		wrapper?.unmount();
 		vi.unstubAllGlobals();
+		vi.useRealTimers();
 	});
 
 	const mountPlayer = async (ready = true) => {
@@ -268,6 +271,31 @@ describe("YouTube captions", () => {
 		expect(wrapper.emitted("playing")?.length).toBe(playingEvents + 1);
 	});
 
+	it("bounds a deferred silent start without inventing policy denial or allowing late playback", async () => {
+		const player = await mountPlayer();
+		await wrapper.setProps({ silent: true });
+		vi.useFakeTimers();
+		api.playVideo.mockImplementationOnce(() => undefined);
+		const result = player.play().catch(error => error);
+		await vi.advanceTimersByTimeAsync(4_000);
+		expect(await result).toBeInstanceOf(PlaybackDeferredError);
+		expect(api.pauseVideo).toHaveBeenCalledOnce();
+		const playingEvents = wrapper.emitted("playing")?.length ?? 0;
+		transition(1);
+		expect(wrapper.emitted("playing")?.length ?? 0).toBe(playingEvents);
+		expect(api.pauseVideo).toHaveBeenCalledTimes(2);
+		expect(vi.getTimerCount()).toBe(0);
+		await player.play();
+		expect(wrapper.emitted("playing")?.length).toBe(playingEvents + 1);
+	});
+	it("reserves NotAllowedError for an explicit SDK policy rejection", async () => {
+		const player = await mountPlayer();
+		await wrapper.setProps({ silent: true });
+		vi.useFakeTimers();
+		api.playVideo.mockImplementationOnce(() => events.onAutoplayBlocked());
+		await expect(player.play()).rejects.toMatchObject({ name: "NotAllowedError" });
+		expect(vi.getTimerCount()).toBe(0);
+	});
 	it("settles pending silent play when pause is called directly", async () => {
 		const player = await mountPlayer();
 		await wrapper.setProps({ silent: true });

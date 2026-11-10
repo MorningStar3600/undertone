@@ -153,7 +153,14 @@ requested supported rate; the controller does not pretend a no-op setter works.
 `NotAllowedError` from play reports `autoplay-blocked` and suppresses automatic play/seek retries until
 activation (or authoritative paused state/new generation). Other current-generation failures report
 `error` with the occurrence scope and stop the adapter; only explicit `retry` or replacement recreates
-it. Buffering suppresses position/rate correction, while authoritative play/pause remains usable.
+it. A `PlaybackDeferredError` instead marks a bounded SDK readiness/start timeout, retaining the captured
+surface for late readiness. Ordinary ticks do not retry it. Lifecycle `resume()` can retry a deferred
+operation once per generation, including when the lifecycle signal arrived during the pending wait;
+real policy denial remains latched until activation. A new authoritative play/pause transition can
+supersede deferred play on an already loaded surface. YouTube's four-second start timeout cancels that
+attempt and guards late PLAYING callbacks; only its explicit autoplay-blocked SDK event produces
+`NotAllowedError`. Readiness still waits at most 15 seconds per attempt and settles on disposal.
+Buffering suppresses position/rate correction, while authoritative play/pause remains usable.
 After `report({type: "resumed"})`, measured drift and the latest
 authoritative intent determine which corrections are needed. Recovery alone never forces another seek:
 seeks can themselves trigger buffering. Playback/rate observations retain actual provider state to avoid
@@ -166,6 +173,17 @@ All these events/statuses are local observations. The controller sends no server
 queue, or fairness commands. Clear unloads rendering and says nothing about server play intent.
 Occurrence replacement restarts even identical media; same-occurrence source refresh preserves domain
 identity. Neither awards music playback credit. Volume/captions/quality remain outside this controller.
+
+Room visibility restoration, pageshow and window focus request a prompt measured reconciliation plus
+a rate-limited clock probe. A session timer gap over five seconds does the same. Resume preserves a
+still-fresh common server estimate and healthy provider, refreshes authority across SDK boundaries,
+and corrects actual residuals above 50 ms with the same uncertainty/read-latency guard as fine drift.
+It does not force a seek when already aligned. Lifecycle signals within one controller interval are
+coalesced; a seek consumes the check before provider callbacks to avoid buffering feedback loops.
+Expired/discontinuous clock samples still hold rendering until fresh calibration. No visibility gate
+is applied to incoming events: active background scheduling receives replacements and play/pause
+immediately. Browser suspension or provider iframe deferral cannot be overridden; bounded recovery
+runs on late readiness, lifecycle signals or the session's resumed timer, without a server toggle.
 
 ## Local verification
 

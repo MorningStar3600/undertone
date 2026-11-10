@@ -8,6 +8,7 @@ import {
 } from "ott-common/playback/index.js";
 import {
 	createPlaybackController,
+	PlaybackDeferredError,
 	type PlaybackAdapterContext,
 	type PlaybackControllerOptions,
 	type PlaybackControllerStatus,
@@ -415,6 +416,111 @@ describe("playback controller timeline and scheduling", () => {
 });
 
 describe("playback controller async ownership and local outcomes", () => {
+	it("consumes lifecycle alignment before seek-induced buffering callbacks", async () => {
+		const s = setup();
+		s.controller.installSnapshot(snapshot(load({ isPlaying: false })));
+		await s.idle();
+		const a = s.adapters[0];
+		a.setPosition(9.92);
+		a.seek.mockImplementation(position => {
+			a.setPosition(position);
+			s.contexts[0].report({ type: "buffering" });
+			s.contexts[0].report({ type: "resumed" });
+		});
+		s.controller.resume();
+		await s.idle();
+		await s.advance(2_000);
+		expect(a.seek).toHaveBeenCalledTimes(2);
+		expect(a.pause).toHaveBeenCalledOnce();
+		expect(a.play).not.toHaveBeenCalled();
+		expect(a.dispose).not.toHaveBeenCalled();
+		s.controller.dispose();
+	});
+	it("bounds deferred automatic retry to one per generation despite repeated lifecycle signals", async () => {
+		const a = fakeAdapter();
+		a.play.mockRejectedValue(new PlaybackDeferredError("Deferred start"));
+		const s = setup({ createAdapter: () => a });
+		s.controller.installSnapshot(snapshot(load()));
+		await s.idle();
+		expect(s.controller.getStatus().code).toBe("buffering");
+		await s.advance(1_000);
+		expect(a.play).toHaveBeenCalledOnce();
+		s.controller.resume();
+		s.controller.resume();
+		await s.idle();
+		expect(a.play).toHaveBeenCalledTimes(2);
+		for (let i = 0; i < 5; i++) {
+			await s.advance(1_000);
+			s.controller.resume();
+			await s.idle();
+		}
+		expect(a.play).toHaveBeenCalledTimes(2);
+		expect(a.dispose).not.toHaveBeenCalled();
+		s.controller.acceptEvent(control("pause", 2, 7_000));
+		await s.idle();
+		expect(a.pause).toHaveBeenCalledOnce();
+		expect(s.controller.getStatus().code).toBe("paused");
+		s.controller.dispose();
+	});
+	it("retries once when focus arrived during the pending bounded play wait", async () => {
+		const pending = deferred();
+		const a = fakeAdapter();
+		a.play.mockReturnValueOnce(pending.promise);
+		const s = setup({ createAdapter: () => a });
+		s.controller.installSnapshot(snapshot(load()));
+		for (let i = 0; i < 20; i++) {
+			await Promise.resolve();
+		}
+		expect(a.play).toHaveBeenCalledOnce();
+		s.controller.resume();
+		pending.reject(new PlaybackDeferredError("Deferred start"));
+		await s.idle();
+		expect(a.play).toHaveBeenCalledTimes(2);
+		expect(s.controller.getStatus().code).toBe("playing");
+		s.controller.dispose();
+	});
+	it("does not retry genuine policy denial on lifecycle resume", async () => {
+		const a = fakeAdapter();
+		a.play.mockRejectedValue(new DOMException("Policy", "NotAllowedError"));
+		const s = setup({ createAdapter: () => a });
+		s.controller.installSnapshot(snapshot(load()));
+		await s.idle();
+		for (let i = 0; i < 4; i++) {
+			await s.advance(1_000);
+			s.controller.resume();
+			await s.idle();
+		}
+		expect(a.play).toHaveBeenCalledOnce();
+		expect(a.seek).toHaveBeenCalledOnce();
+		expect(s.controller.getStatus().code).toBe("autoplay-blocked");
+		s.controller.dispose();
+	});
+	it("ignores stale deferred completion and telemetry after occurrence replacement", async () => {
+		const pending = deferred();
+		const s = setup();
+		s.controller.installSnapshot(snapshot(load({ isPlaying: false })));
+		await s.idle();
+		s.adapters[0].play.mockReturnValueOnce(pending.promise);
+		s.controller.acceptEvent(control("play"));
+		for (let i = 0; i < 20; i++) {
+			await Promise.resolve();
+		}
+		s.controller.acceptEvent(load({ sequence: 3, occurrenceId: 2, isPlaying: false }));
+		pending.reject(new PlaybackDeferredError("Stale"));
+		await s.idle();
+		s.contexts[0].report({ type: "resumed" });
+		s.contexts[0].report({ type: "playback-change", isPlaying: true });
+		s.controller.resume();
+		await s.idle();
+		expect(s.adapters).toHaveLength(2);
+		expect(s.adapters[0].dispose).toHaveBeenCalledOnce();
+		expect(s.adapters[1].play).not.toHaveBeenCalled();
+		expect(s.controller.getStatus()).toMatchObject({
+			code: "paused",
+			scope: { occurrenceId: 2 },
+		});
+		s.controller.dispose();
+	});
 	it.each(["setRate", "seek", "play"] as const)(
 		"ignores late %s rejection after a new occurrence",
 		async method => {

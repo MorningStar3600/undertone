@@ -29,15 +29,18 @@ type Events = {
 };
 const providers: { events: Events; api: ReturnType<typeof mockApi> }[] = [];
 let blockPlay = false;
+let deferPlay = false;
 function mockApi(events: Events) {
 	return {
 		cueVideoById: vi.fn(),
 		loadVideoById: vi.fn(),
-		playVideo: vi.fn(() =>
-			blockPlay ? events.onAutoplayBlocked() : events.onStateChange({ data: 1 }),
-		),
+		playVideo: vi.fn(() => {
+			if (!deferPlay) {
+				blockPlay ? events.onAutoplayBlocked() : events.onStateChange({ data: 1 });
+			}
+		}),
 		pauseVideo: vi.fn(() => events.onStateChange({ data: 2 })),
-		seekTo: vi.fn(),
+		seekTo: vi.fn<[number], void>(),
 		getCurrentTime: vi.fn(() => 12),
 		setPlaybackRate: vi.fn(),
 		getPlaybackRate: () => 1,
@@ -291,6 +294,7 @@ describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
 		);
 		providers.length = 0;
 		blockPlay = false;
+		deferPlay = false;
 		vi.spyOn(OttSfx.prototype, "loadSfx").mockResolvedValue();
 		vi.stubGlobal(
 			"matchMedia",
@@ -309,6 +313,7 @@ describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
 		});
 	});
 	afterEach(() => {
+		vi.restoreAllMocks();
 		vi.unstubAllGlobals();
 		vi.useRealTimers();
 	});
@@ -531,6 +536,88 @@ describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
 		expect(s.wrapper.findComponent(OmniPlayer).exists()).toBe(false);
 		s.unmount();
 		expect([...s.handlers.values()].every(handler => handler === null)).toBe(true);
+	});
+	it("recovers deferred background replacement play on focus without room commands", async () => {
+		let time = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => time);
+		const s = await mountRoom(true);
+		const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+		vi.useFakeTimers();
+		deferPlay = true;
+		s.connection.mockReset();
+		s.connection.mockReceive({
+			action: "playback-event",
+			event: {
+				epoch: "epoch",
+				sequence: 2,
+				occurrenceId: 2,
+				effectiveAtMs: 1000,
+				type: "load",
+				media: { service: "adapter", id: "replacement" },
+				positionSeconds: 20,
+				isPlaying: true,
+				rate: 1,
+			},
+			attachment: {
+				epoch: "epoch",
+				sequence: 2,
+				occurrenceId: 2,
+				media: { service: "adapter", id: "replacement" },
+				item: { service: "youtube", id: "background-track", length: 180 },
+			},
+		});
+		await flushPromises();
+		const replacement = providers[1];
+		expect(s.provider.api.destroy).toHaveBeenCalledOnce();
+		replacement.events.onReady();
+		replacement.events.onStateChange({ data: 5 });
+		await flushPromises();
+		// The hidden window receives and commands the new track before any focus event.
+		expect(replacement.api.playVideo).toHaveBeenCalledOnce();
+		time = 4500;
+		await vi.advanceTimersByTimeAsync(4500);
+		await flushPromises();
+		expect(getPlaybackSession(s.connection)?.controller.getStatus().code).not.toBe(
+			"autoplay-blocked",
+		);
+		deferPlay = false;
+		visibility.mockReturnValue("visible");
+		window.dispatchEvent(new Event("focus"));
+		document.dispatchEvent(new Event("visibilitychange"));
+		window.dispatchEvent(new Event("pageshow"));
+		await flushPromises();
+		expect(replacement.api.playVideo).toHaveBeenCalledTimes(2);
+		expect(replacement.api.seekTo).toHaveBeenLastCalledWith(24.5);
+		expect(replacement.api.destroy).not.toHaveBeenCalled();
+		expect(providers).toHaveLength(2);
+		expect(s.connection.sent.filter(m => m.action === "playback-command")).toEqual([]);
+		s.unmount();
+		const calls = replacement.api.getCurrentTime.mock.calls.length;
+		window.dispatchEvent(new Event("focus"));
+		document.dispatchEvent(new Event("visibilitychange"));
+		await flushPromises();
+		expect(replacement.api.getCurrentTime).toHaveBeenCalledTimes(calls);
+		visibility.mockRestore();
+	});
+	it("measures a small actual offset promptly on focus and coalesces lifecycle signals", async () => {
+		vi.spyOn(performance, "now").mockReturnValue(0);
+		const s = await mountRoom(true);
+		s.provider.api.getCurrentTime.mockReturnValue(11.92);
+		s.provider.api.seekTo.mockImplementation(position => {
+			s.provider.api.getCurrentTime.mockReturnValue(position);
+		});
+		s.provider.api.seekTo.mockClear();
+		s.connection.mockReset();
+		window.dispatchEvent(new Event("focus"));
+		document.dispatchEvent(new Event("visibilitychange"));
+		window.dispatchEvent(new Event("pageshow"));
+		await flushPromises();
+		expect(s.provider.api.seekTo).toHaveBeenCalledOnce();
+		expect(s.provider.api.seekTo).toHaveBeenCalledWith(12);
+		expect(s.provider.api.playVideo).toHaveBeenCalledOnce();
+		expect(s.provider.api.pauseVideo).not.toHaveBeenCalled();
+		expect(s.provider.api.destroy).not.toHaveBeenCalled();
+		expect(s.connection.sent.filter(m => m.action === "playback-command")).toEqual([]);
 	});
 	it("preserves the provider when hiding, showing or restoring the page", async () => {
 		const s = await mountRoom(true);
