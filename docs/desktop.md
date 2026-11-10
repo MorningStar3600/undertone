@@ -107,7 +107,19 @@ use. Before host readiness, messages are not replay-buffered: the host requests
 fresh authority. The host publishes native progress only when its displayed
 second or state changes. The shared session/controller timers exist only while
 the YouTube host exists. GPU rendering alone is not a RAM guarantee; no memory or
-idle CPU benchmark has been performed.
+idle CPU guarantee is implied.
+
+An initial Windows debug-build measurement at `a1d3b276` sampled ten seconds after
+startup. Disconnected, the application had about 73 MiB resident memory and 81 MiB
+private committed memory, with 0.31% of one CPU core during that interval. A separate
+muted loopback fixture requesting YouTube created one WebView and its browser
+process tree. The whole owned process tree used about 620 MiB private committed
+memory and 8.59% of one core in its sample. This is a short startup-adjacent observation,
+not a release or steady-playback benchmark; GPU memory is excluded. Summing resident
+sets would double-count shared pages. Native guest authentication, the host's fresh
+subscription, and clock probes were observed; audible playback and successful media
+decoding were not established. The browser cost must not be confused with the 84 KiB
+JavaScript bundle. Measurement artifacts are in ignored `test-results/desktop-*-measurement.json`.
 
 Non-YouTube playback, login/private-room admission, catalogue/search/queue editing,
 audio-only mode, captions controls, and arbitrary seek input are out of scope.
