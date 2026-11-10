@@ -14,12 +14,14 @@ use std::time::Duration;
 use undertone_desktop::{
     bridge::{self, HOST_URL, Ipc, Observation, Observer, RoomAddress},
     connection::{Connection, Event, EventKind, Network, enqueue_ipc},
+    session::{CommandAuthority, NativeState},
     text,
 };
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 mod ui;
 mod ui_input;
+mod ui_music;
 
 #[derive(Clone, Copy)]
 enum Control {
@@ -34,7 +36,6 @@ enum Control {
     Louder,
     Volume(u8),
     ToggleMode,
-    ToggleUpNext,
 }
 
 struct Player {
@@ -48,6 +49,7 @@ struct Player {
     observer: Observer,
     webview: Option<WebView>,
     host_ready: bool,
+    host_authority: Option<CommandAuthority>,
     ipc_overflow: Arc<AtomicBool>,
     status: String,
     title: String,
@@ -61,10 +63,14 @@ struct Player {
     mode: ui::Mode,
     room_name: String,
     details: ui::TrackDetails,
-    room_preferences: ui::RoomPreferences,
     up_next: Vec<ui::UpcomingTrack>,
     show_up_next: bool,
     join_input: Entity<ui_input::NativeInput>,
+    native: NativeState,
+    music_ui: ui_music::MusicUi,
+    authority: ui_music::Authority,
+    observer_sequence: u64,
+    account_refresh_requested: bool,
 }
 
 impl Player {
@@ -91,14 +97,20 @@ impl Player {
         .detach();
         let join_input =
             cx.new(|cx| ui_input::NativeInput::new(text("roomLinkPlaceholder"), false, cx));
-        let focus = cx.focus_handle();
-        window.focus(&focus);
         cx.subscribe_in(&join_input, window, |player, _, event, window, cx| {
             if matches!(event, ui_input::InputEvent::Submit) {
-                player.control(Control::Join, window, cx);
+                player.control(
+                    Control::Join,
+                    player.music_ui.rendered_authority,
+                    window,
+                    cx,
+                );
             }
         })
         .detach();
+        let music_ui = ui_music::MusicUi::new(window, cx);
+        let focus = cx.focus_handle();
+        window.focus(&focus);
         Self {
             focus,
             network: Network::new().expect("desktop network runtime"),
@@ -110,6 +122,7 @@ impl Player {
             observer: Observer::default(),
             webview: None,
             host_ready: false,
+            host_authority: None,
             ipc_overflow: Arc::new(AtomicBool::new(false)),
             status: text("idle"),
             title: String::new(),
@@ -123,10 +136,14 @@ impl Player {
             mode: ui::Mode::Full,
             room_name: String::new(),
             details: ui::TrackDetails::default(),
-            room_preferences: ui::RoomPreferences::default(),
             up_next: Vec::new(),
             show_up_next: true,
             join_input,
+            native: NativeState::default(),
+            music_ui,
+            authority: ui_music::Authority::default(),
+            observer_sequence: 0,
+            account_refresh_requested: false,
         }
     }
 
@@ -140,18 +157,9 @@ impl Player {
     }
 
     fn sync_layout(&self, window: &mut Window) {
-        let (width, mut height) = self.mode.window_size(self.webview.is_some());
-        if self.connection.is_none() {
-            height += 60.;
-        }
-        if self.mode == ui::Mode::Full {
-            if !self.room_preferences.is_empty() {
-                height += 60.;
-            }
-            if self.show_up_next && !self.up_next.is_empty() {
-                height += 120.;
-            }
-        }
+        let (width, height) = self
+            .mode
+            .layout_size(self.webview.is_some(), self.music_ui.panel.is_some());
         let viewport = window.viewport_size();
         if (f32::from(viewport.width) - width).abs() > 0.5
             || (f32::from(viewport.height) - height).abs() > 0.5
@@ -172,6 +180,7 @@ impl Player {
         }
         self.host_generation += 1;
         self.host_ready = false;
+        self.host_authority = None;
         self.ipc_overflow = Arc::new(AtomicBool::new(false));
         self.available = false;
         self.position = 0.;
@@ -189,17 +198,20 @@ impl Player {
         self.title.clear();
         self.room_name.clear();
         self.details = ui::TrackDetails::default();
-        self.room_preferences = ui::RoomPreferences::default();
         self.up_next.clear();
         self.notice.clear();
+        self.native = NativeState::default();
+        self.authority = ui_music::Authority::default();
+        self.account_refresh_requested = false;
     }
 
-    fn join(&mut self, input: &str) {
+    fn join(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(address) = RoomAddress::parse(input) else {
             self.notice = text("invalidRoom");
             return;
         };
         self.disconnect();
+        self.clear_native_forms(cx);
         self.room_name = address
             .socket
             .path_segments()
@@ -214,6 +226,32 @@ impl Player {
             self.network
                 .connect(self.generation, address, self.events.clone()),
         );
+        let mut native = self.connection.as_ref().unwrap().subscribe_native();
+        let generation = self.generation;
+        cx.spawn_in(window, async move |this, cx| {
+            // Clone the watch value before any GUI await; never retain a watch borrow.
+            let initial = native.borrow_and_update().clone();
+            let _ = this.update_in(cx, |player, window, cx| {
+                if player.generation == generation && initial.generation == generation {
+                    player.native_changed(window, cx);
+                }
+            });
+            while native.changed().await.is_ok() {
+                let state = native.borrow_and_update().clone();
+                if this
+                    .update_in(cx, |player, window, cx| {
+                        if player.generation == generation && state.generation == generation {
+                            // Re-read the current connection: an earlier queued GUI snapshot may lag.
+                            player.native_changed(window, cx);
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn fail(&mut self, code: &str) {
@@ -221,7 +259,11 @@ impl Player {
         self.status = text(code);
     }
 
-    fn start_host(&mut self, window: &Window) -> Result<(), wry::Error> {
+    fn start_host(
+        &mut self,
+        window: &Window,
+        authority: CommandAuthority,
+    ) -> Result<(), wry::Error> {
         // The sole WebView allocation site. Only a validated YouTube attachment reaches here.
         self.host_generation += 1;
         let host = self.host_generation;
@@ -273,6 +315,7 @@ impl Player {
             .with_url(HOST_URL)
             .build_as_child(window)?;
         self.webview = Some(view);
+        self.host_authority = Some(authority);
         self.status = text("loading");
         Ok(())
     }
@@ -289,13 +332,29 @@ impl Player {
         }
     }
 
-    fn send(&mut self, message: Value) {
-        if !self.connection.as_ref().is_some_and(|c| c.send(message)) {
-            self.fail("bridgeFailed");
+    fn send(&mut self, authority: CommandAuthority, message: Value) {
+        if !self.connection.as_ref().is_some_and(|c| {
+            self.authority.accepts(&c.native_state()) && c.send(authority, message)
+        }) {
+            // Identity transitions deliberately close playback admission. Never turn a login
+            // into a permanent connection failure or send an old host's probe to a new socket.
+            self.notice = text("commandUnavailable");
         }
     }
 
     fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        if event.generation != self.generation {
+            return;
+        }
+        self.native_changed(window, cx);
+        if let Some(pair) = event.authority
+            && !self
+                .connection
+                .as_ref()
+                .is_some_and(|c| self.authority.accepts_event(&c.native_state(), pair))
+        {
+            return;
+        }
         // A full channel already has a wakeup pending. Check before consuming any authority.
         if self.ipc_overflow.swap(false, Ordering::AcqRel) {
             self.fail("bridgeFailed");
@@ -303,9 +362,7 @@ impl Player {
             cx.notify();
             return;
         }
-        if event.generation != self.generation {
-            return;
-        }
+        let event_authority = self.native.authority();
         match event.kind {
             EventKind::Failed(code) => self.fail(code),
             EventKind::Message(message) => {
@@ -313,10 +370,9 @@ impl Player {
                     Ok(Observation::Capability) => {
                         self.connection_ready = true;
                         self.status = text("connected");
-                        self.send(self.observer.subscribe());
+                        self.send(event_authority, self.observer.subscribe());
                     }
                     Ok(Observation::Source(source)) => {
-                        self.details = ui::TrackDetails::default();
                         self.title = source.as_ref().map(|s| s.title.clone()).unwrap_or_default();
                         if source.as_ref().is_some_and(|s| s.youtube) {
                             if self.title.is_empty() {
@@ -324,7 +380,7 @@ impl Player {
                             }
                             // Keep exactly one host across consecutive YouTube tracks.
                             if self.webview.is_none() {
-                                if self.start_host(window).is_err() {
+                                if self.start_host(window, event_authority).is_err() {
                                     self.fail("browserFailed");
                                 } else {
                                     let generation = self.generation;
@@ -340,6 +396,7 @@ impl Player {
                                             ) && !player.host_ready
                                             {
                                                 player.fail("bridgeFailed");
+                                                player.clear_native_forms(cx);
                                                 player.sync_layout(window);
                                                 cx.notify();
                                             }
@@ -361,6 +418,7 @@ impl Player {
                     Ok(Observation::Ignore) => {}
                     Err(code) => {
                         self.fail(code);
+                        self.clear_native_forms(cx);
                         self.sync_layout(window);
                         cx.notify();
                         return;
@@ -378,12 +436,14 @@ impl Player {
                 }
             }
             EventKind::Ipc { host, data } => {
-                if !bridge::current_generation(
-                    self.generation,
-                    self.host_generation,
-                    event.generation,
-                    host,
-                ) || self.webview.is_none()
+                if !self.authority.accepts(&self.native)
+                    || !bridge::current_generation(
+                        self.generation,
+                        self.host_generation,
+                        event.generation,
+                        host,
+                    )
+                    || self.webview.is_none()
                 {
                     return;
                 }
@@ -393,7 +453,11 @@ impl Player {
                         self.script("setVolume", json!(if self.muted { 0 } else { self.volume }));
                         self.script("start", Value::Null);
                     }
-                    Ipc::Send { message } if self.host_ready => self.send(message),
+                    Ipc::Send { message } if self.host_ready => {
+                        if let Some(authority) = self.host_authority {
+                            self.send(authority, message);
+                        }
+                    }
                     Ipc::State {
                         position,
                         duration,
@@ -422,19 +486,34 @@ impl Player {
                 }
             }
         }
+        // Terminal failure also clears native form values and all private UI drafts.
+        if self.connection.is_none() {
+            self.clear_native_forms(cx);
+        }
         // Keep error recovery/join forms visible as well as resizing the provider slot.
         self.sync_layout(window);
         cx.notify();
     }
 
-    fn control(&mut self, control: Control, window: &mut Window, cx: &mut Context<Self>) {
+    fn control(
+        &mut self,
+        control: Control,
+        authority: CommandAuthority,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !authority.matches_session(&self.native) {
+            self.notice = text("nativeStale");
+            cx.notify();
+            return;
+        }
         let command = match control {
             Control::Join => {
                 let typed = self.join_input.read(cx).value().trim().to_owned();
                 if !typed.is_empty() {
-                    self.join(&typed);
+                    self.join(&typed, window, cx);
                 } else if let Some(input) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.join(&input);
+                    self.join(&input, window, cx);
                 } else {
                     self.notice = text("invalidRoom");
                 }
@@ -442,6 +521,7 @@ impl Player {
             }
             Control::Disconnect => {
                 self.disconnect();
+                self.clear_native_forms(cx);
                 None
             }
             Control::PlayPause => {
@@ -484,14 +564,15 @@ impl Player {
                 self.sync_layout(window);
                 None
             }
-            Control::ToggleUpNext => {
-                self.show_up_next = !self.show_up_next;
-                self.sync_layout(window);
-                None
-            }
         };
         if let Some(command) = command {
-            if self.available && self.host_ready {
+            if self.available
+                && self.host_ready
+                && self
+                    .connection
+                    .as_ref()
+                    .is_some_and(|c| authority.matches_session(&c.native_state()))
+            {
                 self.script("command", command);
             } else {
                 self.notice = text("commandUnavailable");
@@ -569,7 +650,7 @@ fn main() -> anyhow::Result<()> {
             ..Default::default()
         }, move |window, cx| cx.new(|cx| {
             let mut player = Player::new(window, cx, muted);
-            if !smoke && let Some(initial) = initial { player.join(&initial); }
+            if !smoke && let Some(initial) = initial { player.join(&initial, window, cx); }
             player.sync_layout(window);
             if smoke {
                 assert!(player.webview.is_none() && player.connection.is_none() && player.muted);

@@ -8,18 +8,17 @@ use gpui::{
 use std::{borrow::Cow, cell::Cell, rc::Rc};
 use undertone_desktop::text;
 
-const BACKGROUND: u32 = 0x100f0e;
-const TEXT: u32 = 0xf7f0e6;
-const CARD: u32 = 0x1b1917;
-const POPOVER: u32 = 0x24211e;
-const SECONDARY: u32 = 0x302b24;
-const MUTED: u32 = 0xaaa296;
-const BORDER: u32 = 0x39342e;
-const AMBER: u32 = 0xffbe3d;
-const AMBER_TEXT: u32 = 0x271b07;
-const SUCCESS: u32 = 0xa9c6a1;
-const PERSONAL: u32 = 0x8bc0ff;
-const PERSONAL_SURFACE: u32 = 0x20354c;
+pub(super) const BACKGROUND: u32 = 0x100f0e;
+pub(super) const TEXT: u32 = 0xf7f0e6;
+pub(super) const CARD: u32 = 0x1b1917;
+pub(super) const POPOVER: u32 = 0x24211e;
+pub(super) const SECONDARY: u32 = 0x302b24;
+pub(super) const MUTED: u32 = 0xaaa296;
+pub(super) const BORDER: u32 = 0x39342e;
+pub(super) const AMBER: u32 = 0xffbe3d;
+pub(super) const AMBER_TEXT: u32 = 0x271b07;
+pub(super) const PERSONAL: u32 = 0x8bc0ff;
+pub(super) const PERSONAL_SURFACE: u32 = 0x20354c;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
@@ -45,14 +44,20 @@ impl Mode {
     }
 
     pub fn window_size(self, provider: bool) -> (f32, f32) {
+        self.layout_size(provider, false)
+    }
+    pub fn layout_size(self, provider: bool, detail: bool) -> (f32, f32) {
         match self {
-            Self::Full => (840., 620.),
-            Self::Compact => (440., if provider { 704. } else { 480. }),
+            Self::Full => (880., 680.),
+            Self::Compact => (
+                if detail { 840. } else { 440. },
+                if provider || detail { 680. } else { 480. },
+            ),
         }
     }
 
     pub fn padding(self) -> f32 {
-        if self == Self::Compact { 20. } else { 24. }
+        if self == Self::Compact { 12. } else { 16. }
     }
 
     /// Keep a visible provider surface in both modes, above YouTube's 200×200 minimum.
@@ -60,15 +65,15 @@ impl Mode {
     pub fn provider_rect(self, width: f32) -> ProviderRect {
         match self {
             Self::Full => ProviderRect {
-                x: width - 344.,
-                y: 124.,
+                x: width - 336.,
+                y: 88.,
                 width: 320.,
                 height: 224.,
             },
             Self::Compact => ProviderRect {
-                x: 20.,
-                y: 448.,
-                width: width - 40.,
+                x: 12.,
+                y: 278.,
+                width: 416.,
                 height: 224.,
             },
         }
@@ -82,18 +87,6 @@ pub struct TrackDetails {
     pub tags: Vec<String>,
     /// Populate only from an authenticated account's own track tags.
     pub personal_tags: Option<Vec<String>>,
-}
-
-#[derive(Default)]
-pub struct RoomPreferences {
-    pub include: Vec<String>,
-    pub exclude: Vec<String>,
-}
-
-impl RoomPreferences {
-    pub fn is_empty(&self) -> bool {
-        self.include.is_empty() && self.exclude.is_empty()
-    }
 }
 
 pub struct UpcomingTrack {
@@ -229,9 +222,10 @@ impl Player {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let label = text(id);
+        let authority = self.native.authority();
         div()
             .id(id)
-            .size(px(if primary { 56. } else { 36. }))
+            .size(px(if primary { 48. } else { 28. }))
             .flex_shrink_0()
             .rounded_full()
             .flex()
@@ -259,7 +253,7 @@ impl Player {
             .child(icon(glyph, if primary { 24. } else { 18. }))
             .on_click(cx.listener(move |player, _, window, cx| {
                 if enabled {
-                    player.control(control, window, cx);
+                    player.control(control, authority, window, cx);
                 }
             }))
     }
@@ -280,16 +274,22 @@ impl Player {
     }
 
     fn progress_bar(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        let authority = self.native.authority();
         let enabled = safe_seek(
             self.position,
             self.duration,
             self.available && self.host_ready,
         )
         .is_some();
-        let width = f32::from(window.viewport_size().width) - 2. * self.mode.padding();
+        let width = if self.mode == Mode::Compact {
+            416.
+        } else {
+            f32::from(window.viewport_size().width)
+                - if self.webview.is_some() { 368. } else { 32. }
+        };
         let padding = self.mode.padding();
         column()
-            .h(px(44.))
+            .h(px(32.))
             .flex_shrink_0()
             .gap(px(4.))
             .child(
@@ -327,6 +327,7 @@ impl Player {
                                     ((f32::from(position.x) - padding) / width).clamp(0., 1.);
                                 player.control(
                                     Control::Seek(f64::from(fraction) * player.duration),
+                                    authority,
                                     window,
                                     cx,
                                 );
@@ -342,7 +343,12 @@ impl Player {
                                     _ => return,
                                 };
                                 cx.stop_propagation();
-                                player.control(Control::Seek(player.position + delta), window, cx);
+                                player.control(
+                                    Control::Seek(player.position + delta),
+                                    authority,
+                                    window,
+                                    cx,
+                                );
                             }
                         },
                     )),
@@ -364,7 +370,7 @@ impl Player {
     fn transport(&self, cx: &Context<Self>) -> impl IntoElement {
         let enabled = self.available && self.host_ready;
         row()
-            .h(px(56.))
+            .h(px(48.))
             .flex_shrink_0()
             .justify_center()
             .gap(px(24.))
@@ -388,11 +394,12 @@ impl Player {
     }
 
     fn volume_control(&self, cx: &Context<Self>) -> impl IntoElement {
+        let authority = self.native.authority();
         let audible = if self.muted { 0 } else { self.volume };
         let slider_bounds = Rc::new(Cell::new(None::<gpui::Bounds<gpui::Pixels>>));
         let measured_bounds = slider_bounds.clone();
         row()
-            .h(px(36.))
+            .h(px(28.))
             .flex_shrink_0()
             .justify_center()
             .gap(px(8.))
@@ -455,21 +462,21 @@ impl Player {
                                 let fraction = f32::from(position.x - bounds.origin.x)
                                     / f32::from(bounds.size.width);
                                 let volume = (fraction.clamp(0., 1.) * 100.).round() as u8;
-                                player.control(Control::Volume(volume), window, cx);
+                                player.control(Control::Volume(volume), authority, window, cx);
                             }
                         }),
                     )
-                    .on_key_down(
-                        cx.listener(|player, event: &gpui::KeyDownEvent, window, cx| {
+                    .on_key_down(cx.listener(
+                        move |player, event: &gpui::KeyDownEvent, window, cx| {
                             let volume = match event.keystroke.key.as_str() {
                                 "left" => player.volume.saturating_sub(5),
                                 "right" => player.volume.saturating_add(5),
                                 _ => return,
                             };
                             cx.stop_propagation();
-                            player.control(Control::Volume(volume), window, cx);
-                        }),
-                    ),
+                            player.control(Control::Volume(volume), authority, window, cx);
+                        },
+                    )),
             )
             .child(self.ui_button(
                 "louder",
@@ -489,233 +496,183 @@ impl Player {
     }
 
     fn now_playing(&self) -> Div {
-        let compact = self.mode == Mode::Compact;
-        let title = if self.title.is_empty() {
-            text(if self.connection.is_some() {
-                "waitingTitle"
-            } else {
-                "welcomeTitle"
-            })
-        } else {
-            self.title.clone()
-        };
-        let mut metadata = column()
-            .min_w_0()
-            .flex_1()
-            .child(muted_label(text(if self.title.is_empty() {
-                "listeningTogether"
-            } else {
-                "nowPlaying"
-            })))
-            .child(
-                div()
-                    .text_size(px(if compact { 18. } else { 26. }))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .line_height(relative(1.15))
-                    .truncate()
-                    .child(title),
-            )
-            .when_some(self.details.artist.clone(), |s, artist| {
-                s.child(muted_label(artist))
-            });
-        if !compact && self.details.personal_tags.is_none() && !self.details.tags.is_empty() {
-            metadata = metadata.child(muted_label(text("trackMoods"))).child(
-                row()
-                    .gap(px(8.))
-                    .flex_wrap()
-                    .children(self.details.tags.iter().take(4).map(|tag| {
-                        div()
-                            .px(px(8.))
-                            .py(px(4.))
-                            .rounded_full()
-                            .bg(rgb(SECONDARY))
-                            .text_size(px(11.))
-                            .text_color(rgb(TEXT))
-                            .child(tag.clone())
-                    })),
-            );
-        }
-        if !compact && let Some(tags) = &self.details.personal_tags {
-            metadata = metadata.child(muted_label(text("personalMoods"))).child(
-                row()
-                    .gap(px(8.))
-                    .flex_wrap()
-                    .children(tags.iter().take(3).map(|tag| {
-                        div()
-                            .px(px(8.))
-                            .py(px(4.))
-                            .rounded_full()
-                            .bg(rgb(PERSONAL_SURFACE))
-                            .text_size(px(11.))
-                            .text_color(rgb(PERSONAL))
-                            .child(tag.clone())
-                    })),
-            );
-        }
         row()
-            .h(px(if compact { 72. } else { 224. }))
+            .h(px(64.))
             .flex_shrink_0()
-            .gap(px(16.))
-            .when(!compact, |s| {
-                s.p(px(16.))
-                    .bg(rgb(CARD))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .rounded(px(12.))
-            })
-            .child(artwork(if compact { 72. } else { 96. }))
-            .child(metadata)
+            .gap(px(12.))
+            .child(artwork(56.))
+            .child(
+                column()
+                    .min_w_0()
+                    .flex_1()
+                    .child(muted_label(text(if self.title.is_empty() {
+                        "listeningTogether"
+                    } else {
+                        "nowPlaying"
+                    })))
+                    .child(
+                        div()
+                            .text_size(px(20.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .truncate()
+                            .child(if self.title.is_empty() {
+                                text(if self.connection.is_some() {
+                                    "waitingTitle"
+                                } else {
+                                    "welcomeTitle"
+                                })
+                            } else {
+                                self.title.clone()
+                            }),
+                    )
+                    .when_some(self.details.artist.clone(), |s, artist| {
+                        s.child(div().truncate().child(muted_label(artist)))
+                    }),
+            )
     }
 }
 
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use super::ui_music::Action;
+        self.music_ui.rendered_authority = self.native.authority();
         let compact = self.mode == Mode::Compact;
         let provider = self.webview.is_some();
-        let room_label = if self.room_name.is_empty() {
-            text("noRoom")
-        } else {
-            self.room_name.clone()
-        };
-        let mut body = column()
-            .p(px(self.mode.padding()))
-            .gap(px(16.))
+        let detail = self.music_ui.panel.is_some();
+        let room = row()
+            .h(px(24.))
+            .flex_shrink_0()
+            .justify_between()
             .child(
-                row()
-                    .h(px(20.))
-                    .flex_shrink_0()
-                    .justify_between()
-                    .child(
-                        row()
-                            .min_w_0()
-                            .gap(px(8.))
-                            .child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(rgb(
-                                if self.connection_ready {
-                                    SUCCESS
-                                } else {
-                                    MUTED
-                                },
-                            )))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(MUTED))
-                                    .child(room_label),
-                            ),
-                    )
-                    .child(self.labeled_button(
-                        if self.connection.is_some() {
-                            "disconnect"
-                        } else {
-                            "join"
-                        },
-                        if self.connection.is_some() {
-                            "disconnect"
-                        } else {
-                            "link"
-                        },
-                        if self.connection.is_some() {
-                            Control::Disconnect
-                        } else {
-                            Control::Join
-                        },
-                        cx,
-                    )),
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child(if self.room_name.is_empty() {
+                        text("noRoom")
+                    } else {
+                        self.room_name.clone()
+                    }),
             )
-            .child(if compact {
-                self.now_playing()
-            } else {
-                row()
-                    .h(px(224.))
-                    .flex_shrink_0()
-                    .items_start()
-                    .gap(px(16.))
-                    .child(div().min_w_0().flex_1().child(self.now_playing()))
-                    .when(provider, |s| {
-                        s.child(
-                            div()
-                                .w(px(320.))
-                                .h(px(224.))
-                                .flex_shrink_0()
-                                .bg(rgb(CARD))
-                                .rounded(px(12.)),
-                        )
-                    })
-            })
+            .child(self.labeled_button(
+                if self.connection.is_some() {
+                    "disconnect"
+                } else {
+                    "join"
+                },
+                if self.connection.is_some() {
+                    "disconnect"
+                } else {
+                    "link"
+                },
+                if self.connection.is_some() {
+                    Control::Disconnect
+                } else {
+                    Control::Join
+                },
+                cx,
+            ));
+        let controls = column()
+            .gap(px(6.))
+            .min_w_0()
+            .flex_1()
+            .child(self.now_playing())
             .child(self.progress_bar(window, cx))
             .child(self.transport(cx))
-            .child(self.volume_control(cx))
-            .child(
-                column()
-                    .h(px(48.))
-                    .flex_shrink_0()
-                    .gap(px(4.))
-                    .text_size(px(12.))
-                    .child(
-                        div()
-                            .text_color(rgb(if self.notice.is_empty() { MUTED } else { AMBER }))
-                            .child(if self.notice.is_empty() {
-                                self.status.clone()
-                            } else {
-                                self.notice.clone()
-                            }),
-                    )
-                    .when(self.connection.is_none() && self.notice.is_empty(), |s| {
-                        s.child(muted_label(text("joinHint")))
-                    }),
-            );
+            .child(self.volume_control(cx));
+        let provider_slot = || {
+            div()
+                .h(px(224.))
+                .flex_shrink_0()
+                .bg(rgb(CARD))
+                .rounded(px(12.))
+        };
+        let playback = if compact {
+            controls.flex_none().h(px(190.))
+        } else {
+            row()
+                .h(px(224.))
+                .flex_shrink_0()
+                .items_start()
+                .gap(px(16.))
+                .child(controls)
+                .when(provider, |s| s.child(provider_slot().w(px(320.))))
+        };
+        let mut primary = column()
+            .gap(px(if compact { 6. } else { 8. }))
+            .min_h_0()
+            .flex_1()
+            .child(room)
+            .child(playback);
+        // The child HWND owns a fixed rectangle; no native overlay crosses it.
         if compact && provider {
-            body = body.child(
-                div()
-                    .h(px(224.))
-                    .flex_shrink_0()
-                    .bg(rgb(CARD))
-                    .rounded(px(12.)),
-            );
+            primary = primary.child(provider_slot());
         }
-        if self.connection.is_none() {
-            body = body.child(self.join_input.clone());
-        }
-        // Separate room preference summaries from track metadata. Neither claims ownership
-        // of personal tags, and neither offers a mutation without a real authorization path.
-        if !compact && !self.room_preferences.is_empty() {
-            body = body.child(
-                column()
-                    .gap(px(4.))
-                    .when(!self.room_preferences.include.is_empty(), |s| {
-                        s.child(muted_label(format!(
-                            "{}: {}",
-                            text("roomInclude"),
-                            self.room_preferences.include.join(" · ")
-                        )))
-                    })
-                    .when(!self.room_preferences.exclude.is_empty(), |s| {
-                        s.child(muted_label(format!(
-                            "{}: {}",
-                            text("roomExclude"),
-                            self.room_preferences.exclude.join(" · ")
-                        )))
-                    }),
-            );
-        }
-        if !compact && self.show_up_next && !self.up_next.is_empty() {
-            body = body.child(column().child(muted_label(text("upNext"))).children(
-                self.up_next.iter().take(2).map(|track| {
-                    row().child(artwork(36.)).child(
-                        column()
-                            .min_w_0()
-                            .child(div().truncate().child(track.title.clone()))
-                            .when_some(track.artist.clone(), |s, artist| {
-                                s.child(muted_label(artist))
-                            }),
-                    )
+        primary = primary.child(
+            div()
+                .h(px(28.))
+                .flex_shrink_0()
+                .text_size(px(11.))
+                .overflow_hidden()
+                .text_color(rgb(if self.notice.is_empty() { MUTED } else { AMBER }))
+                .child(if self.notice.is_empty() {
+                    self.status.clone()
+                } else {
+                    self.notice.clone()
                 }),
-            ));
+        );
+        if self.connection.is_none() {
+            primary = primary.child(self.join_input.clone());
         }
+        primary = primary.child(self.panel_navigation(cx));
+        if !compact && detail {
+            primary = primary.child(self.detail_panel(cx));
+        } else {
+            primary = primary.child(
+                div()
+                    .id("player-summary")
+                    .min_h_0()
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(self.native_status())
+                    .when(self.show_up_next, |s| {
+                        s.child(muted_label(text("upNext"))).children(
+                            self.up_next.iter().take(2).map(|t| {
+                                column()
+                                    .child(t.title.clone())
+                                    .when_some(t.artist.clone(), |s, a| s.child(muted_label(a)))
+                            }),
+                        )
+                    })
+                    .child(self.recovery_controls(cx)),
+            );
+        }
+        let body = row()
+            .items_start()
+            .gap(px(12.))
+            .min_h_0()
+            .flex_1()
+            .p(px(self.mode.padding()))
+            .child(
+                primary
+                    .h_full()
+                    .when(compact, |s| s.flex_none().w(px(416.))),
+            )
+            .when(compact && detail, |s| {
+                s.child(self.detail_panel(cx).h_full())
+            });
         div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .bg(rgb(BACKGROUND))
+            .font_family("Segoe UI")
+            .text_color(rgb(TEXT))
+            .text_size(px(13.))
             .track_focus(&self.focus)
-            .on_key_down(|event, window, cx| {
+            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
                 if event.keystroke.key == "tab"
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.alt
@@ -728,48 +685,36 @@ impl Render for Player {
                     }
                     cx.stop_propagation();
                 }
-            })
-            .size_full()
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .bg(rgb(BACKGROUND))
-            .when(compact, |s| s.bg(rgb(CARD)).rounded(px(20.)))
-            .font_family("Segoe UI")
-            .text_color(rgb(TEXT))
-            .text_size(px(13.))
+            }))
             .child(
                 row()
-                    .h(px(if compact { 56. } else { 64. }))
+                    .h(px(40.))
                     .flex_shrink_0()
-                    .px(px(self.mode.padding()))
+                    .px(px(12.))
                     .justify_between()
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(
                         row()
                             .gap(px(8.))
-                            .child(div().text_color(rgb(AMBER)).child(icon("brand", 22.)))
-                            .child(
-                                div()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_size(px(16.))
-                                    .child(text("app")),
-                            ),
+                            .child(div().text_color(rgb(AMBER)).child(icon("brand", 20.)))
+                            .child(text("app")),
                     )
                     .child(
                         row()
-                            .gap(px(8.))
-                            .when(!self.up_next.is_empty() && !compact, |s| {
-                                s.child(self.ui_button(
-                                    "upNext",
-                                    "queue",
-                                    Control::ToggleUpNext,
-                                    true,
-                                    false,
-                                    cx,
-                                ))
-                            })
+                            .gap(px(6.))
+                            .child(self.action_button(
+                                "header-upcoming",
+                                text(if self.show_up_next {
+                                    "hideUpcoming"
+                                } else {
+                                    "showUpcoming"
+                                }),
+                                Action::ToggleUpcoming,
+                                true,
+                                false,
+                                cx,
+                            ))
                             .child(self.labeled_button(
                                 if compact { "expand" } else { "compact" },
                                 if compact { "expand" } else { "compact" },
@@ -778,14 +723,7 @@ impl Render for Player {
                             )),
                     ),
             )
-            .child(
-                div()
-                    .id("player-body")
-                    .min_h_0()
-                    .flex_1()
-                    .overflow_hidden()
-                    .child(body),
-            )
+            .child(body)
     }
 }
 
@@ -824,6 +762,25 @@ mod tests {
             assert_eq!(mode.toggled().toggled(), mode);
         }
         assert!(Mode::Compact.window_size(false).1 < Mode::Compact.window_size(true).1);
+    }
+
+    #[test]
+    fn detail_panels_are_bounded_and_leave_the_widget_provider_in_place() {
+        for mode in [Mode::Full, Mode::Compact] {
+            for provider in [false, true] {
+                let (width, height) = mode.layout_size(provider, true);
+                assert!(height <= 680.);
+                let rect = mode.provider_rect(width);
+                assert!(rect.y + rect.height < height);
+                assert!(rect.x + rect.width <= width);
+            }
+        }
+        let closed = Mode::Compact.provider_rect(Mode::Compact.layout_size(true, false).0);
+        let open = Mode::Compact.provider_rect(Mode::Compact.layout_size(true, true).0);
+        assert_eq!(
+            (closed.x, closed.y, closed.width, closed.height),
+            (open.x, open.y, open.width, open.height)
+        );
     }
 
     #[test]

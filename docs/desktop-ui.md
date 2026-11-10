@@ -1,111 +1,141 @@
 # Undertone native player and Windows widget
 
-The native GPUI presentation follows the existing Windows widget design reference
-(`node_modules/.cache/undertone-widget-design/widget.html`), without its demonstration
-tracks, images or actions. Both sizes use warm dark surfaces, amber playback controls,
-Segoe UI, 8/12/16/24 spacing, round transport buttons, 12 px cards, quiet borders and
-neutral record artwork. Blue is reserved for account-owned personal mood summaries
-and native input selection/composition. No external fonts, artwork requests, animation,
-UI framework or additional dependencies were added.
+The native GPUI UI uses warm dark `#100f0e`, card `#1b1917`, amber `#ffbe3d`
+controls, Segoe UI, and blue `#8bc0ff` only for confirmed personal Active tags
+(and native input selection). No external artwork, fonts, UI framework or new
+runtime dependency is introduced. This is a Windows desktop window and widget.
 
-## Working controls
+## Layout and provider ownership
 
-- **Widget / Full player** changes the size and native composition of the same window.
-  The room connection, player, volume and browser controller are retained. Full mode
-  places the provider next to the now-playing card; the widget stacks it below the
-  controls. The widget becomes shorter without a provider. Window sizes are bounded
-  presets rather than an arbitrarily resizable layout.
-- **Join room** accepts the native room-link field; Enter in the field also joins. An
-  empty field keeps the original clipboard-join fallback. Room URL validation remains
-  in `RoomAddress`. Disconnect releases the existing connection and provider.
-- The circular primary control submits play/pause. Previous/next use the same timeline
-  command path. Controls remain disabled without an available host/session. The server
-  retains permission enforcement; no new playback IPC messages were introduced.
-- Progress displays the host's actual position, without an extra native clock. Clicking
-  the bar seeks only when controls are available and duration is known and finite.
-  Focus the bar and press Left/Right for a bounded ten-second seek.
-- Mute, volume buttons and the volume bar affect this device. Volume-bar Left/Right
-  changes volume by five; pointer input uses measured native element bounds. Raising
-  volume unmutes. Unmuting at zero restores the default volume of 50.
-- The app explicitly routes Tab/Shift+Tab through GPUI's focus traversal, with enabled
-  controls and input focus handles registered as tab stops. GPUI supplies Enter/Space
-  button activation. Icons are small embedded
-  SVGs with localized tooltips; the join, disconnect and mode controls also have labels.
+Full player is 880 x 680 logical pixels. The widget is 440 x 680 with a provider,
+or 440 x 480 without one. Opening a widget detail panel widens the same window to
+840 x 680; closing it restores the compact width. Full-player panels occupy the
+bounded space below playback. Widget panels occupy a scrolling side column.
+Panel navigation, playback and the visible provider remain separate native slots.
+All detail contents use native vertical scrolling; forms do not grow window height.
 
-Empty rooms and disconnected states have a native now-playing card instead of a black
-video placeholder. Connected states contain no CLI instructions. Playback failures and
-room rejections use human-readable English text. Successful commands do not create a
-persistent success notice.
+Full provider bounds are `(width - 336, 88, 320, 224)`. Widget provider bounds
+are `(12, 278, 416, 224)`, unchanged when its side panel opens. These child-HWND
+slots never scroll beneath native content. Switching presentation and opening
+panels only move the existing controller with `set_bounds`; they do not allocate
+another browser, reload its document, reconnect the room or duplicate sound.
+The lazy allocation site still requires a validated YouTube attachment. The
+provider activation control stays visible and usable. No native overlay tries
+to paint over WebView2.
 
-## Provider lifecycle and limits
+## Working native flows
 
-The single lazy WebView allocation still requires an observed, validated YouTube source.
-Full mode keeps a 320 × 224 provider surface; the widget keeps a 400 × 224 surface.
-Changing size moves that controller with `set_bounds`; it does not hide the iframe,
-load a new document, reconnect the socket or recreate audio. The local **Enable playback
-on this device** DOM control remains present and usable when activation is required.
-Only its CSS changed. The local activation and IPC overflow protections from `10185d90`
-remain intact. No audio-only, resolution-selection or successful live playback claim
-is made.
+- Join accepts a typed room link and Enter, retaining the empty-field clipboard
+  fallback. Disconnect drops the one connection/host and clears native forms,
+  private summaries and drafts. The title bar and header use Undertone.
+- Playback, seeking, mute and local volume retain the playback-only host path.
+  Transport buttons and sliders explicitly opt into Tab traversal. The root
+  handles Tab / Shift+Tab; the independently maintained input handles IME and
+  Unicode boundaries. Enter/Space activates focused GPUI buttons.
+- Account has username/email and masked password fields. Submit copies the
+  native input into the command and immediately clears its display before
+  dispatch. Credentials never enter browser markup, IPC, diagnostics or events.
+  Guest, account, pending and expired states are distinct. Only password account
+  login is offered. Errors localize HTTPS requirements, 401, 429 and numeric
+  Retry-After. Check account and Refresh room are explicit recovery operations.
+- Track moods is available from both modes. It displays contributor priority
+  moods and the complement of loaded own tags/favorite shortcuts. Only confirmed
+  own Active tags use blue. Unknown tags cannot be toggled until an explicit
+  refresh or Load more establishes their state. Tags require the current stable
+  catalogue UUID and captured track generation. Guests can inspect public moods
+  and see why personal writes need an account. No ID is inferred or imported.
+- First tags, favorites and vocabulary pages load sequentially when needed.
+  Search filters loaded vocabulary locally. Load more never drains subsequent
+  pages automatically. Failed pages need explicit refresh; failed writes do not
+  automatically retry. Successful tag/favorite writes reload their stale first
+  page once, including when the user has closed the panel. Creating a named mood
+  uses a native selection from the allowed icon keys and performs no tag or
+  favorite write. The created row offers those two separate explicit actions.
+- Room preferences are a separate draft: Include, Neutral and Exclude are visible
+  buttons, including a keyboard-accessible exclusion action. Defaults, server
+  public custom vocabulary and loaded catalogue moods are available. Unknown
+  saved IDs remain in the draft and visible until explicitly changed. Save Keep
+  and Save Renew are distinct operations with an explanation of Renew. Live
+  membership, Music mode and `can.preferences` gate writes. Conflicts/uncertainty
+  expose Retry saved intent and Refresh room; no mutation is automatically replayed.
+- Add music previews one URL and displays the real title. Mix and Next are explicit,
+  permission-gated actions using the native stored reference; no whole preview
+  payload or library checkbox is submitted. Displayed previews have a local
+  version, so editing the URL invalidates their actions. New requests receive a
+  new ID; native Retry preserves the original request ID and reference.
+- Confirmation renders the authoritative participant names and moods from the
+  offer. Its action captures the opaque `ConfirmationOffer` shown at render and
+  requires `can.confirm`. Native code rejects replaced offers/revisions. Cancel,
+  pending count, explicit pending-page refresh and page navigation support recovery.
+  Missing conflict metadata disables confirmation. Other requests remain cancellable.
+- Upcoming uses actual public queue entries and optional supplied artists. The
+  expanded Queue panel navigates real native pages. Show/Hide upcoming works in
+  both modes and only affects this window. Local Settings stays separate from
+  room preferences. No fabricated duration, artwork or inactive management control
+  is shown. Legacy/non-Music rooms retain playback and explain collective-control
+  restrictions; no room mode or content is changed automatically.
 
-Always-on-top is omitted: pinned GPUI 0.2.2 has no public Windows topmost setter. This
-implementation does not add platform-specific window manipulation or replace the normal
-window with a popup. The widget is a compact Windows window, not a mobile implementation.
+## Native session and authority wiring
 
-## Native integration seams
+`main.rs` owns the one Network/Connection, observer and lazy host. `ui.rs` owns
+presentation and bounded geometry. `ui_music.rs` owns forms, localized status,
+small projection/action helpers, page admission and preference drafts.
+`ui_input.rs` remains the parent's independently reviewed native input.
 
-`desktop/src/ui.rs` owns presentation; `main.rs` retains the existing lifecycle and
-command routing. The parent integration can populate these fields from its typed,
-validated native events, then call `sync_layout(window)` and `cx.notify()`:
+Each Join subscribes to the native watch channel. Values are cloned before GUI
+updates; no watch borrow crosses an await. Every task checks the outer room
+generation. GUI deliveries read the current connection snapshot rather than
+applying an older queued watch value. Initial RefreshAccount is requested once
+per outer Join at a connected safe point, including with a cached account. It is
+not retriggered by account-generation changes.
 
-- `Player.details: ui::TrackDetails`: optional artist, aggregate `tags`, and optional
-  `personal_tags`. `personal_tags` must only be `Some` after resolving the authenticated
-  account's own tags for the current track. It uses blue chips labelled **Your moods**;
-  otherwise aggregate tags use neutral chips labelled **Track moods**. A guest is never
-  assigned fabricated personal tags. Source changes clear current track details.
-- `Player.room_preferences: ui::RoomPreferences`: separate `include` and `exclude`
-  summaries, with distinct labels. These are not personal track tags.
-- `Player.up_next: Vec<ui::UpcomingTrack>`: title and optional artist. Only supplied data
-  is shown, up to two entries in full mode. A header control toggles visibility when
-  entries exist. Disconnect clears metadata and queue summaries.
+Before consuming any playback message, both event authority values are compared
+against current native account/socket authority. Watch and playback paths share
+one last-applied pair, so a fresh capability processed before a delayed watch
+notification is not reset a second time. Changed authority and connected-false
+reset observer, old host/IPC generation, availability and position. Native identity
+requests proactively fence/drop the old host before enqueue and wait for fresh
+capabilities. A deliberately refused playback send does not permanently disconnect
+a login transition.
 
-These summaries are read-only. Add/login/mood mutations and their permission checks
-remain with the parent's typed native integration. No speculative HTTP contract,
-authentication path, fake management control or additional IPC was added.
+Rendered controls retain the originating `CommandAuthority`; native input Submit
+uses the last rendered form authority. Automatic page decisions capture the
+snapshot that produced the decision. Every host retains its creation authority
+for all outgoing IPC, surviving track changes while fenced across account/socket
+changes. Connection rejects stale commands both at enqueue and dequeue. Confirmation
+retains its displayed opaque offer. Browser forwarding and IPC remain playback-only.
+Account/socket context changes clear private UI drafts/forms and preview choices;
+track changes fence track actions and reset tag-page loading without changing room
+preferences. The typed native server API remains authoritative for permissions.
 
-`desktop/src/ui_input.rs` provides `NativeInput::new(localized_placeholder, masked, cx)`
-for room links and future add/login/create-mood forms. Use `value()` for an in-memory
-native submit, `clear(cx)` after handling sensitive values, and subscribe to the
-payload-free `InputEvent::{Changed, Submit}` using `cx.subscribe_in`. It implements
-`Focusable` and GPUI's `EntityInputHandler`, including UTF-16 range conversion, marked
-composition, IME candidate bounds, selection, mouse placement, horizontal scrolling,
-Home/End, Delete/Backspace and Ctrl+A. Inputs are single-line and bounded to 8192 UTF-8
-bytes. Left/Right deletion moves by Unicode scalar boundaries. Enter does not submit
-during an active IME composition.
-Text edits invalidate cached shaping before the next pointer event, and incoming
-hit-test indices are clamped to current UTF-8 character boundaries.
+Local admission latches disable repeated actions before a busy snapshot arrives.
+State watch delivery is coalesced; an identical refresh result can omit both its
+intermediate busy state and a distinguishable completion. A 25-second GUI timeout
+releases only the local admission latch and shows an outcome-unknown refresh hint.
+It neither marks success nor replays anything; native busy state still gates actions.
+Failed identity requests may leave playback fenced until explicit Check account or
+Refresh room recovery establishes a fresh socket.
 
-Masked fields paint bullets and return masked text to native text-range queries; they
-reject clipboard paste. No field exports values to the clipboard. Ordinary fields
-support Ctrl+V. Values are ordinary native in-memory strings, without persistence or
-logging; this is not a secure-memory/zeroization facility. Password form wiring must
-keep credentials in the native API path, never the playback WebView or its IPC.
+Always-on-top and opacity hacks are omitted; pinned GPUI has no public Windows
+topmost setter. Native input memory is not a cryptographic zeroization facility.
+Masked-field paste behavior stays with the parent's input implementation.
 
 ## Verification
 
-Terminal-only checks use `node scripts/build-desktop-player.mjs` first, then Cargo with
-`--locked --jobs 2`. Native tests cover safe seeking, bounded progress, provider bounds
-in both modes, time formatting, Unicode/UTF-16 mapping, input size limits and masked
-password presentation. Existing offline bridge and transport tests cover source fencing,
-strict message validation, bounded IPC overflow and fixture-based guest connections.
+Terminal-only validation builds the embedded host first with
+`node scripts/build-desktop-player.mjs`, then uses Cargo `--locked --jobs 2` and
+the existing shared target cache. Pure UI tests cover bounded provider/panel
+geometry, seeking/progress, input boundaries, partial-page Unknown states, failed
+page recovery without pagination draining, preserving unknown draft IDs, stale
+account/socket playback and capability-before-watch ordering. Existing native
+library and isolated loopback HTTP/WebSocket fixture tests cover typed actions,
+credential/session fencing, exact confirmation consent and transport behavior.
 
-For this implementation, the embedded-host bundle, `cargo fmt --check`, strict
-`cargo clippy --all-targets -- -D warnings`, and `cargo build` passed. All 19 Rust tests
-and all 9 existing mocked desktop host/adapter tests passed. Cargo used two jobs and
-the previously built target cache; no Cargo dependency or lockfile change was needed.
-
-No GUI, browser, CUA, clipboard automation, audible playback or existing-room operations
-were used for this implementation. The binary was not launched, including smoke mode.
-Compilation and pure/fixture tests do not establish visual layout quality, interactive
-IME behavior or live YouTube playback; those still require a separate authorized manual
-verification session.
+No GUI, native app/smoke mode, browser, CUA, audio, existing room, running development
+server, database or Redis is used. The root executable is not replaced. Compilation
+and pure/fixture tests do not establish visual polish, interactive IME behavior,
+provider activation or live YouTube playback; those require a separately authorized
+manual check. The host bundle, format check, strict all-target Clippy and native build passed.
+The complete Rust suite passed 44 tests; the final focused native binary suite
+passed 15 tests after adding the participant-sync regression (45 tests across
+these suites). No Cargo dependency or lockfile change was needed.
