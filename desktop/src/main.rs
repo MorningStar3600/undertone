@@ -2,8 +2,8 @@
 
 use async_channel::Sender;
 use gpui::{
-    App, AppContext, Application, Bounds, Context, Entity, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, px, size,
+    App, AppContext, Application, Bounds, Context, Entity, FocusHandle, TitlebarOptions, Window,
+    WindowBounds, WindowOptions, px, size,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -38,6 +38,7 @@ enum Control {
 }
 
 struct Player {
+    focus: FocusHandle,
     network: Network,
     events: Sender<Event>,
     connection: Option<Connection>,
@@ -90,6 +91,8 @@ impl Player {
         .detach();
         let join_input =
             cx.new(|cx| ui_input::NativeInput::new(text("roomLinkPlaceholder"), false, cx));
+        let focus = cx.focus_handle();
+        window.focus(&focus);
         cx.subscribe_in(&join_input, window, |player, _, event, window, cx| {
             if matches!(event, ui_input::InputEvent::Submit) {
                 player.control(Control::Join, window, cx);
@@ -97,6 +100,7 @@ impl Player {
         })
         .detach();
         Self {
+            focus,
             network: Network::new().expect("desktop network runtime"),
             events,
             connection: None,

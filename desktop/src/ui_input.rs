@@ -41,7 +41,15 @@ fn from_utf16(value: &str, offset: usize) -> usize {
 }
 
 fn to_utf16(value: &str, offset: usize) -> usize {
-    value[..offset].encode_utf16().count()
+    value[..char_boundary(value, offset)].encode_utf16().count()
+}
+
+fn char_boundary(value: &str, offset: usize) -> usize {
+    let mut offset = offset.min(value.len());
+    while !value.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
 }
 
 fn fits_input(content: usize, removed: usize, added: usize) -> bool {
@@ -59,7 +67,7 @@ fn masked_text(value: &str, utf16: bool) -> String {
 impl NativeInput {
     pub fn new(placeholder: String, masked: bool, cx: &mut Context<Self>) -> Self {
         Self {
-            focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
             content: String::new(),
             placeholder,
             masked,
@@ -97,6 +105,8 @@ impl NativeInput {
     }
 
     fn select(&mut self, offset: usize, extend: bool) {
+        let offset = char_boundary(&self.content, offset);
+        self.anchor = char_boundary(&self.content, self.anchor);
         if !extend {
             self.anchor = offset;
         }
@@ -122,7 +132,7 @@ impl NativeInput {
 
     fn index_at(&self, position: Point<Pixels>) -> usize {
         let (Some(bounds), Some(line)) = (self.bounds, self.layout.as_ref()) else {
-            return 0;
+            return char_boundary(&self.content, self.cursor());
         };
         let index = line.closest_index_for_x(position.x - bounds.left() + self.scroll);
         if self.masked {
@@ -131,7 +141,7 @@ impl NativeInput {
                 .nth(index / '•'.len_utf8())
                 .map_or(self.content.len(), |(index, _)| index)
         } else {
-            index.min(self.content.len())
+            char_boundary(&self.content, index)
         }
     }
 
@@ -142,6 +152,8 @@ impl NativeInput {
             return;
         }
         self.content.replace_range(range.clone(), &value);
+        // Hit-testing must never use shaped byte offsets from the previous string.
+        self.layout = None;
         self.select(range.start + value.len(), false);
         self.marked = None;
         cx.emit(InputEvent::Changed);
@@ -151,6 +163,9 @@ impl NativeInput {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Composition belongs to the OS input handler. Do not commit/submit a preedit.
         if self.marked.is_some() {
+            if event.keystroke.key == "tab" {
+                cx.stop_propagation();
+            }
             return;
         }
         let key = event.keystroke.key.as_str();
@@ -496,6 +511,22 @@ impl Render for NativeInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_hit_offsets_are_clamped_to_current_unicode_boundaries() {
+        let current = "éa🎵";
+        // The old shaped line for "a" reports byte 1, now inside the initial é.
+        assert_eq!(char_boundary(current, 1), 0);
+        for offset in (0..=current.len() + 1).chain([usize::MAX]) {
+            let safe = char_boundary(current, offset);
+            assert!(current.is_char_boundary(safe));
+            assert!(safe <= current.len());
+            assert_eq!(
+                to_utf16(current, offset),
+                current[..safe].encode_utf16().count()
+            );
+        }
+    }
 
     #[test]
     fn ime_ranges_map_utf16_without_slicing_inside_unicode() {

@@ -27,7 +27,9 @@ UI framework or additional dependencies were added.
 - Mute, volume buttons and the volume bar affect this device. Volume-bar Left/Right
   changes volume by five; pointer input uses measured native element bounds. Raising
   volume unmutes. Unmuting at zero restores the default volume of 50.
-- GPUI supplies Tab focus and Enter/Space button activation. Icons are small embedded
+- The app explicitly routes Tab/Shift+Tab through GPUI's focus traversal, with enabled
+  controls and input focus handles registered as tab stops. GPUI supplies Enter/Space
+  button activation. Icons are small embedded
   SVGs with localized tooltips; the join, disconnect and mode controls also have labels.
 
 Empty rooms and disconnected states have a native now-playing card instead of a black
@@ -80,6 +82,8 @@ composition, IME candidate bounds, selection, mouse placement, horizontal scroll
 Home/End, Delete/Backspace and Ctrl+A. Inputs are single-line and bounded to 8192 UTF-8
 bytes. Left/Right deletion moves by Unicode scalar boundaries. Enter does not submit
 during an active IME composition.
+Text edits invalidate cached shaping before the next pointer event, and incoming
+hit-test indices are clamped to current UTF-8 character boundaries.
 
 Masked fields paint bullets and return masked text to native text-range queries; they
 reject clipboard paste. No field exports values to the clipboard. Ordinary fields

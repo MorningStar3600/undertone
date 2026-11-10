@@ -251,6 +251,7 @@ impl Player {
                 button
                     .cursor_pointer()
                     .focusable()
+                    .tab_stop(true)
                     .hover(|s| s.bg(rgb(if primary { 0xffcf70 } else { SECONDARY })))
                     .focus(|s| s.border_color(rgb(AMBER)))
             })
@@ -301,6 +302,7 @@ impl Player {
                     .when(enabled, |s| {
                         s.cursor_pointer()
                             .focusable()
+                            .tab_stop(true)
                             .focus(|s| s.bg(rgb(SECONDARY)))
                     })
                     .tooltip(|_, cx| cx.new(|_| Tip(text("seekHint"))).into())
@@ -419,6 +421,7 @@ impl Player {
                     .items_center()
                     .cursor_pointer()
                     .focusable()
+                    .tab_stop(true)
                     .focus(|s| s.bg(rgb(SECONDARY)))
                     .tooltip(|_, cx| cx.new(|_| Tip(text("localVolume"))).into())
                     .relative()
@@ -711,6 +714,21 @@ impl Render for Player {
             ));
         }
         div()
+            .track_focus(&self.focus)
+            .on_key_down(|event, window, cx| {
+                if event.keystroke.key == "tab"
+                    && !event.keystroke.modifiers.control
+                    && !event.keystroke.modifiers.alt
+                    && !event.keystroke.modifiers.platform
+                {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev();
+                    } else {
+                        window.focus_next();
+                    }
+                    cx.stop_propagation();
+                }
+            })
             .size_full()
             .flex()
             .flex_col()
