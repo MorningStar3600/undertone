@@ -119,8 +119,13 @@ impl AssetSource for Assets {
     }
 }
 
-pub(super) fn icon(name: &'static str, size: f32) -> impl IntoElement {
-    svg().path(name).size(px(size)).flex_shrink_0()
+pub(super) fn icon(name: &'static str, size: f32) -> gpui::Svg {
+    // GPUI's SVG painter reads its own style color, not the inherited text color.
+    svg()
+        .path(name)
+        .size(px(size))
+        .flex_shrink_0()
+        .text_color(rgb(TEXT))
 }
 
 fn row() -> Div {
@@ -171,7 +176,7 @@ pub(super) fn artwork(edge: f32, image: Option<std::sync::Arc<gpui::RenderImage>
                 .child(
                     div()
                         .text_color(rgb(AMBER))
-                        .child(icon("brand", edge * 0.30)),
+                        .child(icon("brand", edge * 0.30).text_color(rgb(AMBER))),
                 ),
         )
 }
@@ -204,6 +209,13 @@ impl Player {
     ) -> Stateful<Div> {
         let label = text(id);
         let authority = self.native.authority();
+        let foreground = if !enabled {
+            MUTED
+        } else if primary {
+            AMBER_TEXT
+        } else {
+            TEXT
+        };
         div()
             .id(id)
             .size(px(if primary { 48. } else { 28. }))
@@ -213,13 +225,7 @@ impl Player {
             .items_center()
             .justify_center()
             .bg(rgb(if primary && enabled { AMBER } else { CARD }))
-            .text_color(rgb(if !enabled {
-                BORDER
-            } else if primary {
-                AMBER_TEXT
-            } else {
-                TEXT
-            }))
+            .text_color(rgb(foreground))
             .border_1()
             .border_color(rgb(if primary && enabled { AMBER } else { BORDER }))
             .when(enabled, |button| {
@@ -231,7 +237,7 @@ impl Player {
                     .focus(|s| s.border_color(rgb(AMBER)))
             })
             .tooltip(move |_, cx| cx.new(|_| Tip(label.clone())).into())
-            .child(icon(glyph, if primary { 24. } else { 18. }))
+            .child(icon(glyph, if primary { 24. } else { 18. }).text_color(rgb(foreground)))
             .on_click(cx.listener(move |player, _, window, cx| {
                 if enabled {
                     player.control(control, authority, window, cx);
@@ -659,7 +665,7 @@ impl Render for Player {
                     .child(
                         row()
                             .gap(px(8.))
-                            .child(div().text_color(rgb(AMBER)).child(icon("brand", 20.)))
+                            .child(icon("brand", 20.).text_color(rgb(AMBER)))
                             .child(text("app")),
                     )
                     .child(

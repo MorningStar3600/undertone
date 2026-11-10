@@ -208,6 +208,14 @@ impl Widget {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let label = text(key);
+        let primary = matches!(&route, Route::Playback(Control::PlayPause));
+        let foreground = if primary {
+            ui::AMBER_TEXT
+        } else if enabled {
+            ui::TEXT
+        } else {
+            ui::MUTED
+        };
         div()
             .id(id)
             .size(px(32.))
@@ -216,16 +224,20 @@ impl Widget {
             .flex()
             .items_center()
             .justify_center()
-            .text_color(rgb(if enabled { ui::MUTED } else { ui::BORDER }))
+            .text_color(rgb(foreground))
             .when(enabled, |s| {
                 s.cursor_pointer()
                     .focusable()
                     .tab_stop(true)
-                    .hover(|s| s.bg(rgb(ui::SECONDARY)))
-                    .focus(|s| s.bg(rgb(ui::SECONDARY)))
+                    .hover(move |s| s.bg(rgb(if primary { 0xffcf70 } else { ui::SECONDARY })))
+                    .focus(move |s| {
+                        s.border_1()
+                            .border_color(rgb(ui::AMBER))
+                            .bg(rgb(if primary { 0xffcf70 } else { ui::SECONDARY }))
+                    })
             })
             .tooltip(move |_, cx| cx.new(|_| ui::Tip(label.clone())).into())
-            .child(ui::icon(glyph, 18.))
+            .child(ui::icon(glyph, 18.).text_color(rgb(foreground)))
             .on_click(cx.listener(move |widget, _, _, cx| {
                 if enabled {
                     widget.route(route.clone(), authority, cx);
@@ -311,7 +323,11 @@ impl Render for Widget {
                     .tab_stop(true)
                     .focus(|s| s.border_1().border_color(rgb(ui::AMBER)))
                     .tooltip(|_, cx| cx.new(|_| ui::Tip(text("widgetPin"))).into())
-                    .child(ui::icon("pin", 18.))
+                    .child(ui::icon("pin", 18.).text_color(rgb(if self.pinned {
+                        ui::AMBER
+                    } else {
+                        ui::TEXT
+                    })))
                     .on_click(cx.listener(|widget, _, window, cx| {
                         if native_window::pin(window, !widget.pinned).is_ok() {
                             widget.pinned = !widget.pinned;
@@ -356,7 +372,7 @@ impl Render for Widget {
                     .child(
                         div()
                             .text_color(rgb(ui::AMBER))
-                            .child(ui::icon("brand", 18.)),
+                            .child(ui::icon("brand", 18.).text_color(rgb(ui::AMBER))),
                     )
                     .child(
                         div()
@@ -906,7 +922,7 @@ impl Render for Widget {
                     .border_t_1()
                     .border_color(rgb(ui::BORDER))
                     .bg(rgb(ui::BACKGROUND))
-                    .child(ui::icon("headphones", 11.))
+                    .child(ui::icon("headphones", 11.).text_color(rgb(ui::MUTED)))
                     .child(quiet(footer_text, 9.)),
             )
             .into_any_element()
