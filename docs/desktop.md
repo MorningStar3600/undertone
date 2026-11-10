@@ -1,7 +1,10 @@
 # Undertone desktop preview (Windows)
 
 This is a runnable native GPUI player for **timeline protocol v1 and YouTube only**.
-It does not boot the Vue app, implement the catalogue, or support legacy playback.
+It does not boot the Vue app or support legacy playback. Native account, moods,
+favorites, room preferences, URL admission and queue panels reuse the existing
+server APIs. The full player and compact desktop widget share one playback host.
+See [native UI](desktop-ui.md) and [account/music contracts](desktop-music.md).
 The standalone `desktop/Cargo.toml` workspace and lockfile do not change the root
 balancer workspace or its dependency features. Published upstream GPUI is pinned
 to `0.2.2`; Wry is pinned to `0.57.2`. No UI component framework is used.
@@ -22,9 +25,8 @@ cargo build --manifest-path desktop/Cargo.toml --locked
 .\desktop\target\debug\undertone-desktop.exe
 ```
 
-Copy a full room URL such as `http://localhost:3000/room/my-room`, then select
-**Paste room URL and join** in the native window. The clipboard button is the
-native join flow in this preview; there is no text editor widget. HTTPS and
+Enter a full room URL such as `http://localhost:3000/room/my-room`, then select
+**Join** or press Enter. With an empty field, Join can read a copied room URL. HTTPS and
 deployment subpaths such as `https://example.com/ott/room/my-room` work. URLs with
 embedded credentials, fragments, or query strings are rejected. Use the public
 server port (or a running Vite proxy), not a static-only frontend server.
@@ -35,10 +37,10 @@ Alternatively:
 .\desktop\target\debug\undertone-desktop.exe --server http://localhost:3000 --room my-room --muted
 ```
 
-This connects to the named room as a new temporary guest and can play the room's
+The first connection obtains a temporary guest session and can play the room's
 current YouTube track. The app defaults to volume 50; `--muted` starts silently.
-Mute and volume are local. Native play/pause, previous/next, and ±10 second seek
-buttons submit timeline intentions through the shared session. The server still
+Mute and volume are local. Native play/pause, previous/next and the seek bar
+submit timeline intentions through the shared session. The server still
 authorizes commands. Rejections appear in the native window. Controls remain
 disabled until the session has a usable snapshot and clock. **Disconnect** closes
 the socket and disposes the player. Join again to reconnect; there is no automatic
@@ -55,9 +57,10 @@ is included.
 ## Ownership and lifecycle
 
 Rust owns one room WebSocket and obtains a guest credential from `GET
-/api/auth/grant`, then sends the existing `{action:"auth",token}` frame. The token
-is kept only in native request memory; it is never persisted, logged, rendered,
-or passed to JavaScript. No existing browser login/session is imported.
+/api/auth/grant`, then sends the existing `{action:"auth",token}` frame. Password
+login upgrades that same session through the native Account panel. The token is
+held only in Rust memory and retained across same-server reconnects; it is never
+persisted, logged, rendered or passed to JavaScript. No browser session is imported.
 
 After a valid capability announcement, native source discovery subscribes with
 its own nonce. It observes only atomic snapshot/event `attachment.item` metadata
@@ -123,8 +126,11 @@ subscription, and clock probes were observed; audible playback and successful me
 decoding were not established. The browser cost must not be confused with the 84 KiB
 JavaScript bundle. Measurement artifacts are in ignored `test-results/desktop-*-measurement.json`.
 
-Non-YouTube playback, login/private-room admission, catalogue/search/queue editing,
-audio-only mode, captions controls, and arbitrary seek input are out of scope.
+Non-YouTube playback, OAuth/Discord login, private-room password admission,
+audio-only mode, captions controls and arbitrary seek text input are out of scope.
+Music panels require a Music-mode room and the relevant server permissions;
+joining never changes room mode. Personal tagging requires an account and a real
+catalogue track ID. Mood search filters loaded pages, with explicit Load more.
 Previous/Next are available for an active YouTube session; there are no playback
 controls for empty or unsupported sources. Sources can still change from another
 client, and the native observer will create/dispose the YouTube host accordingly.
