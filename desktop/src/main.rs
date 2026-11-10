@@ -2,8 +2,8 @@
 
 use async_channel::Sender;
 use gpui::{
-    App, Application, Bounds, Context, IntoElement, Render, TitlebarOptions, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, AppContext, Application, Bounds, Context, Entity, TitlebarOptions, Window, WindowBounds,
+    WindowOptions, px, size,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -18,6 +18,9 @@ use undertone_desktop::{
 };
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
+mod ui;
+mod ui_input;
+
 #[derive(Clone, Copy)]
 enum Control {
     Join,
@@ -25,17 +28,20 @@ enum Control {
     PlayPause,
     Previous,
     Next,
-    Back,
-    Forward,
+    Seek(f64),
     Mute,
     Quieter,
     Louder,
+    Volume(u8),
+    ToggleMode,
+    ToggleUpNext,
 }
 
 struct Player {
     network: Network,
     events: Sender<Event>,
     connection: Option<Connection>,
+    connection_ready: bool,
     generation: u64,
     host_generation: u64,
     observer: Observer,
@@ -51,6 +57,13 @@ struct Player {
     available: bool,
     volume: u8,
     muted: bool,
+    mode: ui::Mode,
+    room_name: String,
+    details: ui::TrackDetails,
+    room_preferences: ui::RoomPreferences,
+    up_next: Vec<ui::UpcomingTrack>,
+    show_up_next: bool,
+    join_input: Entity<ui_input::NativeInput>,
 }
 
 impl Player {
@@ -71,7 +84,15 @@ impl Player {
         .detach();
         cx.observe_window_bounds(window, |player, window, _| {
             if let Some(view) = &player.webview {
-                let _ = view.set_bounds(Self::video_bounds(window));
+                let _ = view.set_bounds(player.video_bounds(window));
+            }
+        })
+        .detach();
+        let join_input =
+            cx.new(|cx| ui_input::NativeInput::new(text("roomLinkPlaceholder"), false, cx));
+        cx.subscribe_in(&join_input, window, |player, _, event, window, cx| {
+            if matches!(event, ui_input::InputEvent::Submit) {
+                player.control(Control::Join, window, cx);
             }
         })
         .detach();
@@ -79,6 +100,7 @@ impl Player {
             network: Network::new().expect("desktop network runtime"),
             events,
             connection: None,
+            connection_ready: false,
             generation: 0,
             host_generation: 0,
             observer: Observer::default(),
@@ -94,18 +116,47 @@ impl Player {
             available: false,
             volume: 50,
             muted,
+            mode: ui::Mode::Full,
+            room_name: String::new(),
+            details: ui::TrackDetails::default(),
+            room_preferences: ui::RoomPreferences::default(),
+            up_next: Vec::new(),
+            show_up_next: true,
+            join_input,
         }
     }
 
-    fn video_bounds(window: &Window) -> wry::Rect {
+    fn video_bounds(&self, window: &Window) -> wry::Rect {
         let viewport = window.viewport_size();
+        let rect = self.mode.provider_rect(f32::from(viewport.width));
         wry::Rect {
-            position: wry::dpi::LogicalPosition::new(16., 132.).into(),
-            size: wry::dpi::LogicalSize::new(
-                (f64::from(viewport.width) - 32.).max(1.),
-                (f64::from(viewport.height) - 324.).max(1.),
-            )
-            .into(),
+            position: wry::dpi::LogicalPosition::new(rect.x, rect.y).into(),
+            size: wry::dpi::LogicalSize::new(rect.width, rect.height).into(),
+        }
+    }
+
+    fn sync_layout(&self, window: &mut Window) {
+        let (width, mut height) = self.mode.window_size(self.webview.is_some());
+        if self.connection.is_none() {
+            height += 60.;
+        }
+        if self.mode == ui::Mode::Full {
+            if !self.room_preferences.is_empty() {
+                height += 60.;
+            }
+            if self.show_up_next && !self.up_next.is_empty() {
+                height += 120.;
+            }
+        }
+        let viewport = window.viewport_size();
+        if (f32::from(viewport.width) - width).abs() > 0.5
+            || (f32::from(viewport.height) - height).abs() > 0.5
+        {
+            window.resize(size(px(width), px(height)));
+        }
+        if let Some(view) = &self.webview {
+            // Move the same controller; changing presentation never remounts the browser.
+            let _ = view.set_bounds(self.video_bounds(window));
         }
     }
 
@@ -127,10 +178,15 @@ impl Player {
     fn disconnect(&mut self) {
         self.generation += 1;
         self.connection = None;
+        self.connection_ready = false;
         self.dispose_host();
         self.observer = Observer::default();
         self.status = text("idle");
         self.title.clear();
+        self.room_name.clear();
+        self.details = ui::TrackDetails::default();
+        self.room_preferences = ui::RoomPreferences::default();
+        self.up_next.clear();
         self.notice.clear();
     }
 
@@ -140,6 +196,14 @@ impl Player {
             return;
         };
         self.disconnect();
+        self.room_name = address
+            .socket
+            .path_segments()
+            .and_then(|mut p| p.next_back())
+            .unwrap_or_default()
+            .chars()
+            .take(80)
+            .collect();
         self.observer = Observer::new(self.generation);
         self.status = text("connecting");
         self.connection = Some(
@@ -171,7 +235,7 @@ impl Player {
             })
             .with_default_context_menus(false)
             .with_focused(false)
-            .with_bounds(Self::video_bounds(window))
+            .with_bounds(self.video_bounds(window))
             .with_custom_protocol("undertone".into(), |_, request| {
                 let (content_type, body, status) = match request.uri().path() {
                     "/index.html" => (
@@ -231,6 +295,7 @@ impl Player {
         // A full channel already has a wakeup pending. Check before consuming any authority.
         if self.ipc_overflow.swap(false, Ordering::AcqRel) {
             self.fail("bridgeFailed");
+            self.sync_layout(window);
             cx.notify();
             return;
         }
@@ -242,10 +307,12 @@ impl Player {
             EventKind::Message(message) => {
                 match self.observer.observe(&message) {
                     Ok(Observation::Capability) => {
+                        self.connection_ready = true;
                         self.status = text("connected");
                         self.send(self.observer.subscribe());
                     }
                     Ok(Observation::Source(source)) => {
+                        self.details = ui::TrackDetails::default();
                         self.title = source.as_ref().map(|s| s.title.clone()).unwrap_or_default();
                         if source.as_ref().is_some_and(|s| s.youtube) {
                             if self.title.is_empty() {
@@ -258,9 +325,9 @@ impl Player {
                                 } else {
                                     let generation = self.generation;
                                     let host = self.host_generation;
-                                    cx.spawn(async move |this, cx| {
+                                    cx.spawn_in(window, async move |this, cx| {
                                         gpui::Timer::after(Duration::from_secs(15)).await;
-                                        let _ = this.update(cx, |player, cx| {
+                                        let _ = this.update_in(cx, |player, window, cx| {
                                             if bridge::current_generation(
                                                 player.generation,
                                                 player.host_generation,
@@ -269,6 +336,7 @@ impl Player {
                                             ) && !player.host_ready
                                             {
                                                 player.fail("bridgeFailed");
+                                                player.sync_layout(window);
                                                 cx.notify();
                                             }
                                         });
@@ -284,10 +352,12 @@ impl Player {
                                 "unsupportedSource"
                             });
                         }
+                        self.sync_layout(window);
                     }
                     Ok(Observation::Ignore) => {}
                     Err(code) => {
                         self.fail(code);
+                        self.sync_layout(window);
                         cx.notify();
                         return;
                     }
@@ -348,13 +418,18 @@ impl Player {
                 }
             }
         }
+        // Keep error recovery/join forms visible as well as resizing the provider slot.
+        self.sync_layout(window);
         cx.notify();
     }
 
-    fn control(&mut self, control: Control, cx: &mut Context<Self>) {
+    fn control(&mut self, control: Control, window: &mut Window, cx: &mut Context<Self>) {
         let command = match control {
             Control::Join => {
-                if let Some(input) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                let typed = self.join_input.read(cx).value().trim().to_owned();
+                if !typed.is_empty() {
+                    self.join(&typed);
+                } else if let Some(input) = cx.read_from_clipboard().and_then(|item| item.text()) {
                     self.join(&input);
                 } else {
                     self.notice = text("invalidRoom");
@@ -370,31 +445,44 @@ impl Player {
             }
             Control::Previous => Some(json!({"command":"previous"})),
             Control::Next => Some(json!({"command":"next"})),
-            Control::Back | Control::Forward => {
-                let delta = if matches!(control, Control::Back) {
-                    -10.
-                } else {
-                    10.
-                };
-                let mut position = (self.position + delta).max(0.);
-                if self.duration > 0. {
-                    position = position.min(self.duration);
-                }
-                Some(json!({"command":"seek", "positionSeconds":position}))
+            Control::Seek(position) => {
+                ui::safe_seek(position, self.duration, self.available && self.host_ready)
+                    .map(|position| json!({"command":"seek", "positionSeconds":position}))
             }
             Control::Mute => {
                 self.muted = !self.muted;
+                if !self.muted && self.volume == 0 {
+                    self.volume = 50;
+                }
                 self.update_volume();
                 None
             }
             Control::Quieter => {
                 self.volume = self.volume.saturating_sub(10);
+                self.muted = self.volume == 0;
                 self.update_volume();
                 None
             }
             Control::Louder => {
                 self.volume = self.volume.saturating_add(10).min(100);
+                self.muted = self.volume == 0;
                 self.update_volume();
+                None
+            }
+            Control::Volume(volume) => {
+                self.volume = volume.min(100);
+                self.muted = self.volume == 0;
+                self.update_volume();
+                None
+            }
+            Control::ToggleMode => {
+                self.mode = self.mode.toggled();
+                self.sync_layout(window);
+                None
+            }
+            Control::ToggleUpNext => {
+                self.show_up_next = !self.show_up_next;
+                self.sync_layout(window);
                 None
             }
         };
@@ -405,34 +493,17 @@ impl Player {
                 self.notice = text("commandUnavailable");
             }
         }
+        if matches!(control, Control::Join | Control::Disconnect) {
+            if matches!(control, Control::Join) && self.connection.is_some() {
+                self.join_input.update(cx, |input, cx| input.clear(cx));
+            }
+            self.sync_layout(window);
+        }
         cx.notify();
     }
 
     fn update_volume(&mut self) {
         self.script("setVolume", json!(if self.muted { 0 } else { self.volume }));
-    }
-
-    fn button(
-        &self,
-        id: &'static str,
-        control: Control,
-        enabled: bool,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .px_3()
-            .py_2()
-            .rounded_md()
-            .bg(rgb(if enabled { 0x303b4b } else { 0x20242c }))
-            .text_color(rgb(if enabled { 0xf1f4f8 } else { 0x777d89 }))
-            .cursor_pointer()
-            .child(text(id))
-            .on_click(cx.listener(move |player, _, _, cx| {
-                if enabled {
-                    player.control(control, cx);
-                }
-            }))
     }
 }
 
@@ -440,112 +511,6 @@ impl Drop for Player {
     fn drop(&mut self) {
         self.connection = None;
         self.dispose_host();
-    }
-}
-
-fn time(seconds: f64) -> String {
-    let seconds = seconds as u64;
-    format!("{}:{:02}", seconds / 60, seconds % 60)
-}
-
-impl Render for Player {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let controls = self.available && self.host_ready;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .p_4()
-            .gap_4()
-            .bg(rgb(0x12161e))
-            .text_color(rgb(0xe5eaf1))
-            .text_sm()
-            .child(
-                div()
-                    .h(px(100.))
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().text_xl().child(text("app")))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(self.button("join", Control::Join, true, cx))
-                            .child(self.button(
-                                "disconnect",
-                                Control::Disconnect,
-                                self.connection.is_some(),
-                                cx,
-                            )),
-                    )
-                    .child(div().text_color(rgb(0xa4afbf)).child(text("joinHint"))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(rgb(0x0b0d12))
-                    .child(if self.webview.is_none() {
-                        self.status.clone()
-                    } else {
-                        String::new()
-                    }),
-            )
-            .child(
-                div()
-                    .h(px(160.))
-                    .flex_shrink_0()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(div().truncate().text_lg().child(self.title.clone()))
-                    .child(div().truncate().child(self.status.clone()))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(format!("{} / {}", time(self.position), time(self.duration)))
-                            .child(if self.muted {
-                                text("muted")
-                            } else {
-                                format!("{} {}%", text("volume"), self.volume)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(self.button("previous", Control::Previous, controls, cx))
-                            .child(self.button("back", Control::Back, controls, cx))
-                            .child(self.button(
-                                if self.playing { "pause" } else { "play" },
-                                Control::PlayPause,
-                                controls,
-                                cx,
-                            ))
-                            .child(self.button("forward", Control::Forward, controls, cx))
-                            .child(self.button("next", Control::Next, controls, cx))
-                            .child(self.button(
-                                if self.muted { "unmute" } else { "mute" },
-                                Control::Mute,
-                                true,
-                                cx,
-                            ))
-                            .child(self.button("quieter", Control::Quieter, true, cx))
-                            .child(self.button("louder", Control::Louder, true, cx)),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_color(rgb(0xe4bc80))
-                            .child(self.notice.clone()),
-                    ),
-            )
     }
 }
 
@@ -588,17 +553,20 @@ fn main() -> anyhow::Result<()> {
         _ => anyhow::bail!("{}", text("help")),
     };
     // Smoke mode is always offline, even when other CLI parameters were supplied.
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(ui::Assets).run(move |cx: &mut App| {
         cx.on_window_closed(|cx| { if cx.windows().is_empty() { cx.quit(); } }).detach();
-        let bounds = Bounds::centered(None, size(px(960.), px(700.)), cx);
+        let (width, height) = ui::Mode::Full.window_size(false);
+        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         cx.open_window(WindowOptions {
             titlebar: Some(TitlebarOptions { title: Some(text("app").into()), ..Default::default() }),
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(900.), px(600.))),
+            window_min_size: Some(size(px(440.), px(480.))),
+            is_resizable: false,
             ..Default::default()
         }, move |window, cx| cx.new(|cx| {
             let mut player = Player::new(window, cx, muted);
             if !smoke && let Some(initial) = initial { player.join(&initial); }
+            player.sync_layout(window);
             if smoke {
                 assert!(player.webview.is_none() && player.connection.is_none() && player.muted);
                 cx.spawn(async |this, cx| {
