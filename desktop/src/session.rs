@@ -21,6 +21,7 @@ pub enum NativeCommand {
     Music(MusicCommand),
     SearchMusic {
         input: String,
+        request_id: u64,
     },
     /// Input edits revoke displayed results and cancel an outstanding search.
     InvalidatePreview,
@@ -111,6 +112,8 @@ pub struct NativeState {
     pub track_generation: u64,
     pub preview: Option<PreviewResults>,
     pub preview_generation: u64,
+    pub preview_request_id: Option<u64>,
+    pub preview_completed_id: Option<u64>,
     pub created_mood: Option<Mood>,
     pub http_busy: bool,
     pub error: Option<NativeError>,
@@ -178,6 +181,9 @@ impl NativeState {
         self.invalidate_preview();
     }
     pub(crate) fn invalidate_preview(&mut self) {
+        if let Some(request_id) = self.preview_request_id.take() {
+            self.preview_completed_id = Some(request_id);
+        }
         self.preview_generation = self.preview_generation.wrapping_add(1);
         self.preview = None;
     }
@@ -346,7 +352,7 @@ pub(crate) fn prepare(
         }
         NativeCommand::Logout => Ok((RestKind::Logout, auth(Method::POST, "user/logout")?)),
         NativeCommand::RefreshAccount => Ok((RestKind::Account, auth(Method::GET, "user/")?)),
-        NativeCommand::SearchMusic { input } => {
+        NativeCommand::SearchMusic { input, .. } => {
             if !state.can().add_mix {
                 return Err(NativeError::new(ErrorCode::Unavailable));
             }

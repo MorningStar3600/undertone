@@ -161,13 +161,22 @@ enum HttpWork {
     Tag,
     Favorite,
     Create,
-    Preview,
+    Preview(u64),
     Identity,
 }
 struct PendingHttp {
     work: HttpWork,
     saw_busy: bool,
     before: String,
+}
+impl PendingHttp {
+    fn completed(&mut self, state: &NativeState) -> bool {
+        if let HttpWork::Preview(request_id) = self.work {
+            return state.preview_completed_id == Some(request_id);
+        }
+        self.saw_busy |= state.http_busy;
+        !state.http_busy && (self.saw_busy || marker(self.work, state) != self.before)
+    }
 }
 fn room_marker(s: &NativeState) -> String {
     format!(
@@ -204,7 +213,7 @@ fn marker(work: HttpWork, s: &NativeState) -> String {
             .as_ref()
             .map(|m| m.id.clone())
             .unwrap_or_default(),
-        HttpWork::Preview => format!(
+        HttpWork::Preview(_) => format!(
             "{}:{:?}",
             s.preview_generation,
             s.preview.as_ref().map(|p| p.items.len())
@@ -263,7 +272,7 @@ impl MusicUi {
                         || p.music_ui
                             .pending_http
                             .as_ref()
-                            .is_some_and(|pending| matches!(pending.work, HttpWork::Preview))
+                            .is_some_and(|pending| matches!(pending.work, HttpWork::Preview(_)))
                     {
                         p.native_submit(
                             p.music_ui.rendered_authority,
@@ -416,27 +425,25 @@ impl Player {
             }
             self.music_ui.context = Some(context);
         }
-        if let Some(pending) = &mut self.music_ui.pending_http {
-            pending.saw_busy |= state.http_busy;
-            if !state.http_busy
-                && (pending.saw_busy || marker(pending.work, &state) != pending.before)
-            {
-                if matches!(pending.work, HttpWork::Preview) {
-                    self.music_ui.preview_valid = state.preview.is_some()
-                        && state.error.is_none()
-                        && self.music_ui.preview_version == self.music_ui.url_version;
-                }
-                if matches!(pending.work, HttpWork::Tag) && state.tags.stale {
-                    self.music_ui.reload[0] = true;
-                }
-                if matches!(pending.work, HttpWork::Favorite) && state.favorites.stale {
-                    self.music_ui.reload[1] = true;
-                }
-                if matches!(pending.work, HttpWork::Create) && state.created_mood.is_some() {
-                    self.music_ui.reload[2] = true;
-                }
-                self.music_ui.pending_http = None;
+        if let Some(pending) = &mut self.music_ui.pending_http
+            && pending.completed(&state)
+        {
+            if let HttpWork::Preview(request_id) = pending.work {
+                self.music_ui.preview_valid = state.preview.is_some()
+                    && state.preview_request_id == Some(request_id)
+                    && state.error.is_none()
+                    && self.music_ui.preview_version == self.music_ui.url_version;
             }
+            if matches!(pending.work, HttpWork::Tag) && state.tags.stale {
+                self.music_ui.reload[0] = true;
+            }
+            if matches!(pending.work, HttpWork::Favorite) && state.favorites.stale {
+                self.music_ui.reload[1] = true;
+            }
+            if matches!(pending.work, HttpWork::Create) && state.created_mood.is_some() {
+                self.music_ui.reload[2] = true;
+            }
+            self.music_ui.pending_http = None;
         }
         if let Some((before, saw_busy)) = &mut self.music_ui.pending_room {
             *saw_busy |= state.room.busy;
@@ -737,12 +744,13 @@ impl Player {
             Action::ResetDraft => self.music_ui.draft.read(&self.native, true),
             Action::Preview if free && can.add_mix => {
                 let input = self.music_ui.url.read(cx).value().trim().to_owned();
+                let request_id = self.music_ui.command_sequence.wrapping_add(1);
                 self.music_ui.preview_valid = false;
                 self.music_ui.preview_version = self.music_ui.url_version;
                 self.native_submit(
                     authority,
-                    NativeCommand::SearchMusic { input },
-                    Some(HttpWork::Preview),
+                    NativeCommand::SearchMusic { input, request_id },
+                    Some(HttpWork::Preview(request_id)),
                 );
             }
             Action::Request(intent, reference, version)
@@ -1554,6 +1562,44 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_snapshot_cannot_complete_a_newer_search() {
+        let mut state = NativeState {
+            preview_request_id: Some(10),
+            preview_completed_id: Some(10),
+            ..NativeState::default()
+        };
+        let mut pending = PendingHttp {
+            work: HttpWork::Preview(11),
+            saw_busy: false,
+            before: marker(HttpWork::Preview(11), &state),
+        };
+        // The queued input edit arrives after submission but before search 11 starts.
+        state.preview_generation += 1;
+        state.preview_request_id = None;
+        assert!(!pending.completed(&state));
+        // Neither another operation's error nor the search's busy snapshot completes it.
+        state.error = Some(undertone_desktop::session::NativeError {
+            code: undertone_desktop::session::ErrorCode::Busy,
+            retry_after_seconds: None,
+        });
+        assert!(!pending.completed(&state));
+        state.preview_request_id = Some(11);
+        state.http_busy = true;
+        assert!(!pending.completed(&state));
+        state.http_busy = false;
+        state.error = None;
+        state.preview_completed_id = Some(11);
+        assert!(pending.completed(&state));
+        // Coalesced success, empty result, or failure also completes without observing busy.
+        let mut coalesced = PendingHttp {
+            work: HttpWork::Preview(11),
+            saw_busy: false,
+            before: String::new(),
+        };
+        assert!(coalesced.completed(&state));
+    }
     #[test]
     fn partial_tags_are_unknown_and_stale_active_tags_are_not_blue() {
         let moods = undertone_desktop::music::default_moods();

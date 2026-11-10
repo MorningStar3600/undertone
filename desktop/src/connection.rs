@@ -300,11 +300,16 @@ async fn run(
                 }
                 command = native.recv() => {
                     let Some(envelope) = command else { return Ok(()); };
+                    let search_request = match &envelope.command {
+                        NativeCommand::SearchMusic { request_id, .. } => Some(*request_id),
+                        _ => None,
+                    };
                     if !envelope.authority.matches_native(&state, &envelope.command) {
                         state.error = Some(NativeError::new(ErrorCode::Stale));
                     } else {
                         if matches!(envelope.command, NativeCommand::SearchMusic { .. } | NativeCommand::InvalidatePreview) {
                             state.invalidate_preview();
+                            state.preview_request_id = search_request;
                             // A new query/edit supersedes only search work, never account work.
                             if search_busy {
                                 rest = None;
@@ -357,9 +362,14 @@ async fn run(
                             }
                         }
                     }
+                    if let Some(request_id) = search_request
+                        && (!search_busy || state.preview_request_id != Some(request_id)) {
+                        state.preview_completed_id = Some(request_id);
+                    }
                     state_events.send_replace(state.clone());
                 }
                 done = async { rest.as_mut().unwrap().await }, if rest.is_some() => {
+                    if search_busy { state.preview_completed_id = state.preview_request_id; }
                     rest=None; state.http_busy=false; identity_busy=false; search_busy=false;
                     let identity=done.kind.identity();
                     if done.account==state.account_generation && done.result.as_ref().is_err_and(|e|e.code==ErrorCode::Auth) {
@@ -415,8 +425,11 @@ async fn run(
                             if text.len() > MAX_MESSAGE { return Err("invalidTimeline"); }
                             let message: Value = serde_json::from_str(&text).map_err(|_| "invalidTimeline")?;
                             if matches!(message["action"].as_str(),Some("sync"|"user"|"you"|"music-result")) {
+                            let previous_can = state.can();
                             state.room.project(&message,state.account_generation);
-                            if !state.can().add_mix && (state.preview.is_some() || search_busy) {
+                            let current_can = state.can();
+                            if (!current_can.add_mix || (previous_can.add_next && !current_can.add_next))
+                                && (state.preview.is_some() || search_busy) {
                                 state.invalidate_preview();
                                 if search_busy { rest=None; state.http_busy=false; search_busy=false; }
                             }

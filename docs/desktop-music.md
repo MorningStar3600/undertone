@@ -193,7 +193,11 @@ service/id remains the fallback. An invalid supplied original reference fails th
 response rather than silently choosing playback metadata. Selection binds the
 exact reference plus the query generation captured by `CommandAuthority`. A new
 query, input edit, room/grant loss, disconnect or account transition revokes older
-result authority. Queued old choices fail again at dequeue; delayed HTTP work is
+result authority. Losing the Next/order grant also revokes old choices even when
+Mix remains allowed; restoring grants does not revive them. Each submitted search
+has a completion ID, so a queued input-edit snapshot cannot consume the completion
+of a later search, including when busy updates are coalesced.
+Queued old choices fail again at dequeue; delayed HTTP work is
 cancelled and generation checked before application. A rejected busy operation
 cannot leave an otherwise successful search marked failed.
 

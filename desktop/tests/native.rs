@@ -143,7 +143,11 @@ async fn native_search_selects_exact_results_and_fences_queries_edits_and_teardo
         ws.send(Message::Text(json!({"action":"sync","grants":[[0,40]]}).to_string().into())).await.unwrap();
         until(&mut native, |s| s.can().add_next).await;
 
-        let search = |input: &str| NativeCommand::SearchMusic { input: input.into() };
+        let search_sequence = std::cell::Cell::new(0u64);
+        let search = |input: &str| {
+            search_sequence.set(search_sequence.get() + 1);
+            NativeCommand::SearchMusic { input: input.into(), request_id: search_sequence.get() }
+        };
         let reference = |id: &str| Reference { service: "youtube".into(), id: id.into() };
         let choose = |id: &str, intent| NativeCommand::Music(MusicCommand::RequestPreview {
             request_id: format!("pick-{id}-{intent:?}"), intent, reference: reference(id),
@@ -159,6 +163,7 @@ async fn native_search_selects_exact_results_and_fences_queries_edits_and_teardo
         ])).await;
         let results = until(&mut native, |s| s.preview.is_some() && !s.http_busy).await;
         assert!(results.error.is_none(), "a rejected concurrent operation must not poison a successful search");
+        assert_eq!(results.preview_completed_id, Some(1));
         assert_eq!(results.preview.as_ref().unwrap().items.len(), 2);
         // An arbitrary reference must never borrow the authority of a displayed result.
         assert!(c.send_native(results.authority(), choose("not-in-results", Intent::Mix)));
@@ -174,6 +179,15 @@ async fn native_search_selects_exact_results_and_fences_queries_edits_and_teardo
             until(&mut native, |s| !s.room.busy && s.room.status == Some(MusicStatus::Applied)).await;
         }
 
+        // Order-only loss must revoke displayed selection authority even though Mix remains.
+        ws.send(Message::Text(json!({"action":"sync","grants":[[0,8]]}).to_string().into())).await.unwrap();
+        let revoked = until(&mut native, |s| s.can().add_mix && !s.can().add_next).await;
+        assert!(revoked.preview_generation > results.preview_generation);
+        assert!(revoked.preview.is_none());
+        ws.send(Message::Text(json!({"action":"sync","grants":[[0,40]]}).to_string().into())).await.unwrap();
+        until(&mut native, |s| s.can().add_next).await;
+        assert!(!c.send_native(results.authority(), choose("first", Intent::Next)));
+
         // New searches revoke old admission immediately and supersede an outstanding query.
         assert!(c.send_native(results.authority(), search("older query")));
         let mut older = search_socket(&listener, "older query").await;
@@ -183,6 +197,7 @@ async fn native_search_selects_exact_results_and_fences_queries_edits_and_teardo
         let mut newer = search_socket(&listener, "newer query").await;
         search_reply(&mut newer, json!([])).await;
         let empty = until(&mut native, |s| s.preview.as_ref().is_some_and(|p| p.items.is_empty()) && !s.http_busy).await;
+        assert_eq!(empty.preview_completed_id, Some(3));
         search_reply(&mut older, json!([{"service":"youtube","id":"obsolete"}])).await;
         assert!(c.send_native(empty.authority(), choose("obsolete", Intent::Mix)));
         until(&mut native, |s| s.room.status == Some(MusicStatus::Unavailable)).await;
@@ -238,7 +253,8 @@ async fn native_search_failure_and_logout_clear_previous_results() {
         assert!(c.send_native(
             original.authority(),
             NativeCommand::SearchMusic {
-                input: "song".into()
+                input: "song".into(),
+                request_id: 1,
             }
         ));
         let mut http = search_socket(&listener, "song").await;
@@ -247,7 +263,8 @@ async fn native_search_failure_and_logout_clear_previous_results() {
         assert!(c.send_native(
             displayed.authority(),
             NativeCommand::SearchMusic {
-                input: "failure".into()
+                input: "failure".into(),
+                request_id: 2,
             }
         ));
         request(
@@ -267,12 +284,14 @@ async fn native_search_failure_and_logout_clear_previous_results() {
         .await;
         assert!(failed.preview.is_none());
         assert!(!failed.http_busy);
+        assert_eq!(failed.preview_completed_id, Some(2));
         assert_eq!(failed.error.unwrap().retry_after_seconds, Some(7));
         assert!(!format!("{:?}", c.native_state()).contains("private-provider-url"));
         assert!(c.send_native(
             c.native_state().authority(),
             NativeCommand::SearchMusic {
-                input: "pending".into()
+                input: "pending".into(),
+                request_id: 3,
             }
         ));
         let mut pending = search_socket(&listener, "pending").await;
@@ -484,9 +503,13 @@ async fn same_token_login_logout_refresh_401_and_playback_privacy() {
         .unwrap();
     while let Ok(event) = playback.try_recv() {
         assert!([22, 23].contains(&event.generation));
-        assert!(
-            matches!(event.kind,EventKind::Message(ref v) if v["action"]=="playback-capabilities")
-        );
+        match event.kind {
+            EventKind::Message(v) => assert_eq!(v["action"], "playback-capabilities"),
+            // The fixture has closed its socket; delivery of this terminal event races
+            // this drain. It is not an account payload crossing the playback boundary.
+            EventKind::Failed(code) => assert_eq!(code, "connectionFailed"),
+            other => panic!("unexpected playback event: {other:?}"),
+        }
     }
 }
 
