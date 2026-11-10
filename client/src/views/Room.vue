@@ -5,6 +5,7 @@
 			class="room-content group/room p-4 max-xl:p-0 data-[fullscreen=true]:p-0 data-[layout=theater]:p-0"
 			:data-fullscreen="store.state.fullscreen"
 			:data-layout="store.state.settings.roomLayout"
+			:data-media-mode="mediaMode"
 			v-if="!showDisconnectedOverlay"
 		>
 			<div
@@ -23,6 +24,23 @@
 					}}
 				</h1>
 				<ClientSettingsDialog />
+				<ToggleGroup
+					type="single"
+					size="sm"
+					variant="outline"
+					:model-value="mediaMode"
+					:aria-label="$t('room.media-mode.label')"
+					@update:model-value="setMediaMode"
+				>
+					<ToggleGroupItem value="audio" data-cy="room-mode-audio">
+						<Headphones aria-hidden="true" />
+						{{ $t("room.media-mode.audio") }}
+					</ToggleGroupItem>
+					<ToggleGroupItem value="video" data-cy="room-mode-video">
+						<Video aria-hidden="true" />
+						{{ $t("room.media-mode.video") }}
+					</ToggleGroupItem>
+				</ToggleGroup>
 				<ChatPlacementToggle :in-video-allowed="inVideoChatAllowed" class="ml-2" />
 				<div class="flex items-center text-sm font-medium uppercase ml-auto">
 					<Tooltip>
@@ -68,20 +86,65 @@
 			<div class="room-media-grid">
 				<div class="relative z-31 min-h-0 min-w-0">
 					<div class="relative size-full">
-						<OmniPlayer
-							v-if="!timelineEstablished || playbackSurface"
-							:key="timelineEstablished ? playbackSurface?.key : 'legacy'"
-							:surface="timelineEstablished ? playbackSurface : null"
-							:source="
-								timelineEstablished
-									? playbackSurface?.source.value
-									: store.state.room.currentSource
+						<div
+							class="room-video-surface"
+							data-cy="room-video-surface"
+							:aria-hidden="mediaMode === 'audio' ? true : undefined"
+							:inert="mediaMode === 'audio' || currentSource?.service === 'youtube'"
+						>
+							<OmniPlayer
+								v-if="!timelineEstablished || playbackSurface"
+								:key="timelineEstablished ? playbackSurface?.key : 'legacy'"
+								:surface="timelineEstablished ? playbackSurface : null"
+								:source="
+									timelineEstablished
+										? playbackSurface?.source.value
+										: store.state.room.currentSource
+								"
+								@apiready="onPlayerApiReady"
+								@playing="onPlaybackChange(true)"
+								@paused="onPlaybackChange(false)"
+								@ready="onPlayerReady"
+							/>
+						</div>
+						<Card
+							v-if="mediaMode === 'audio'"
+							class="h-full justify-center"
+							data-cy="room-audio-view"
+						>
+							<CardHeader class="justify-items-center text-center">
+								<Headphones class="size-10" aria-hidden="true" />
+								<CardTitle>{{ $t("room.media-mode.audio-title") }}</CardTitle>
+								<CardDescription>{{
+									$t("room.media-mode.audio-description")
+								}}</CardDescription>
+							</CardHeader>
+						</Card>
+						<Button
+							v-if="
+								mediaMode === 'video' &&
+								currentSource?.service === 'youtube' &&
+								!mediaPlaybackBlocked
 							"
-							@apiready="onPlayerApiReady"
-							@playing="onPlaybackChange(true)"
-							@paused="onPlaybackChange(false)"
-							@ready="onPlayerReady"
-						/>
+							data-cy="room-video-toggle"
+							variant="ghost"
+							class="group/video-toggle absolute inset-0 size-full rounded-none"
+							:aria-label="
+								$t(store.state.room.isPlaying ? 'common.pause' : 'common.play')
+							"
+							:disabled="!granted('playback.play-pause')"
+							@click="onVideoSurfaceClick"
+						>
+							<span
+								class="flex items-center gap-2 opacity-0 group-hover/video-toggle:opacity-100 group-focus-visible/video-toggle:opacity-100"
+							>
+								<Pause v-if="store.state.room.isPlaying" aria-hidden="true" />
+								<Play v-else aria-hidden="true" />
+								{{
+									$t(store.state.room.isPlaying ? "common.pause" : "common.play")
+								}}
+							</span>
+						</Button>
 						<div
 							class="pointer-events-none absolute bottom-20 right-0 h-[70%] min-h-17.5 w-100 px-2.5 py-1.25 max-lg:w-62.5"
 							v-if="showInVideoChat"
@@ -306,7 +369,9 @@
 <script lang="ts">
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Headphones, Video, Play, Pause } from "@lucide/vue";
 import { Icon } from "@/components/ui/icon";
 import {
 	Tabs,
@@ -394,6 +459,13 @@ type QueueTab = (typeof QUEUE_TABS)[number];
 export default defineComponent({
 	name: "room",
 	components: {
+		ToggleGroup,
+		ToggleGroupItem,
+		Headphones,
+		Video,
+		Play,
+		Pause,
+		CardDescription,
 		RoomMusicQueue,
 		RoomMusicFilters,
 		RoomMusicSettings,
@@ -443,6 +515,13 @@ export default defineComponent({
 		const musicRoom = provideMusicRoom();
 		const granted = useGrants();
 		const surfaces = createPlayerSurfaces();
+		const mediaMode = ref<"audio" | "video">("audio");
+		function setMediaMode(value: unknown) {
+			// A single-choice toggle can emit an empty value when clicked again.
+			if (value === "audio" || value === "video") {
+				mediaMode.value = value;
+			}
+		}
 		const timelineEstablished = ref(false);
 		const mediaPlaybackBlocked = ref(false);
 		const playbackStatus = ref<PlaybackStatusCode>("waiting-snapshot");
@@ -493,6 +572,7 @@ export default defineComponent({
 				) {
 					return;
 				}
+				mediaMode.value = "audio";
 				connection.disconnect();
 				connection.connect(roomId);
 			},
@@ -713,6 +793,11 @@ export default defineComponent({
 				roomapi.pause();
 			} else {
 				roomapi.play();
+			}
+		}
+		function onVideoSurfaceClick() {
+			if (granted("playback.play-pause")) {
+				togglePlayback();
 			}
 		}
 
@@ -965,7 +1050,9 @@ export default defineComponent({
 
 		// chat placement
 		// YouTube's terms don't allow drawing anything over its player, so chat can't go in-video there.
-		const inVideoChatAllowed = computed(() => currentSource.value?.service !== "youtube");
+		const inVideoChatAllowed = computed(
+			() => mediaMode.value === "video" && currentSource.value?.service !== "youtube",
+		);
 		const chatPlacement = computed(() =>
 			inVideoChatAllowed.value ? store.state.settings.chatPlacement : ChatPlacement.panel,
 		);
@@ -1009,6 +1096,8 @@ export default defineComponent({
 		const gitCommit = __COMMIT_HASH__;
 
 		return {
+			mediaMode,
+			setMediaMode,
 			timelineEstablished,
 			playbackSurface,
 			playbackStatus,
@@ -1033,6 +1122,7 @@ export default defineComponent({
 			player,
 			volume,
 			togglePlayback,
+			onVideoSurfaceClick,
 			onPlayerApiReady,
 			onPlayerReady,
 			onPlaybackChange,
@@ -1082,6 +1172,16 @@ export default defineComponent({
 </script>
 
 <style scoped>
+.room-video-surface {
+	height: 100%;
+}
+.room-content[data-media-mode="audio"] .room-video-surface {
+	/* Keep the same provider and its dimensions alive; only hide its visual output. */
+	position: absolute;
+	inset: 0;
+	opacity: 0;
+	pointer-events: none;
+}
 .room-media-grid {
 	display: grid;
 	width: 100%;
@@ -1092,12 +1192,18 @@ export default defineComponent({
 .room-content[data-layout="theater"] .room-media-grid {
 	grid-template-rows: minmax(400px, 85vh);
 }
+.room-content[data-media-mode="audio"] .room-media-grid {
+	grid-template-rows: minmax(240px, 40vh);
+}
 @media (max-width: 1023px) {
 	/* Keep a real source surface, including YouTube's 200px minimum height. */
 	.room-media-grid,
 	.room-content[data-layout="theater"] .room-media-grid {
 		grid-template-columns: minmax(0, 1fr);
 		grid-template-rows: max(200px, min(50dvh, 56.25vw)) auto;
+	}
+	.room-content[data-media-mode="audio"] .room-media-grid {
+		grid-template-rows: 240px auto;
 	}
 }
 .room-content[data-fullscreen="true"] .room-media-grid {

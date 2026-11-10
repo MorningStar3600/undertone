@@ -25,6 +25,8 @@ async function mountRoom() {
 	// These layout/chat cases run on an authenticated legacy server after negotiation.
 	mounted.connection.mockReceive({ action: "sync", currentSource: null });
 	await vi.advanceTimersByTimeAsync(1_000);
+	// These existing chat/layout cases exercise the visible-video layout.
+	await mounted.wrapper.get('[data-cy="room-mode-video"]').trigger("click");
 	return mounted;
 }
 

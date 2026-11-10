@@ -148,6 +148,81 @@ async function mountRoom(playing = false) {
 	return { ...mounted, connection, provider, handlers, snapshot };
 }
 describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
+	it("defaults to audio and switches display without replacing or commanding the player", async () => {
+		const s = await mountRoom(true);
+		const source = s.wrapper.getComponent(OmniPlayer).vm;
+		const calls = {
+			play: s.provider.api.playVideo.mock.calls.length,
+			pause: s.provider.api.pauseVideo.mock.calls.length,
+			seek: s.provider.api.seekTo.mock.calls.length,
+		};
+		s.connection.mockReset();
+		expect(s.wrapper.get('[data-cy="room-mode-audio"]').attributes("aria-pressed")).toBe(
+			"true",
+		);
+		expect(s.wrapper.get('[data-cy="room-video-surface"]').attributes("aria-hidden")).toBe(
+			"true",
+		);
+		expect(s.wrapper.find('[data-cy="room-audio-view"]').exists()).toBe(true);
+		await s.wrapper.get('[data-cy="room-mode-audio"]').trigger("click");
+		expect(s.wrapper.get('[data-cy="room-mode-audio"]').attributes("aria-pressed")).toBe(
+			"true",
+		);
+		await s.wrapper.get('[data-cy="room-mode-video"]').trigger("click");
+		expect(s.wrapper.find('[data-cy="room-audio-view"]').exists()).toBe(false);
+		expect(
+			s.wrapper.get('[data-cy="room-video-surface"]').attributes("aria-hidden"),
+		).toBeUndefined();
+		await s.wrapper.get('[data-cy="room-mode-audio"]').trigger("click");
+		await flushPromises();
+		expect(s.wrapper.getComponent(OmniPlayer).vm).toBe(source);
+		expect(providers).toHaveLength(1);
+		expect(s.provider.api.destroy).not.toHaveBeenCalled();
+		expect(s.provider.api.playVideo).toHaveBeenCalledTimes(calls.play);
+		expect(s.provider.api.pauseVideo).toHaveBeenCalledTimes(calls.pause);
+		expect(s.provider.api.seekTo).toHaveBeenCalledTimes(calls.seek);
+		expect(
+			s.connection.sent.filter(m => m.action === "playback-command" || m.action === "req"),
+		).toEqual([]);
+		expect(s.store.state.room.isPlaying).toBe(true);
+	});
+	it("starts a newly entered room in audio mode", async () => {
+		const s = await mountRoom();
+		await s.wrapper.get('[data-cy="room-mode-video"]').trigger("click");
+		await s.router.push("/room/another");
+		await s.wrapper.vm.$nextTick();
+		expect(s.wrapper.get('[data-cy="room-mode-audio"]').attributes("aria-pressed")).toBe(
+			"true",
+		);
+	});
+	it("routes clicks over YouTube through room authority without directly controlling the SDK", async () => {
+		const s = await mountRoom(true);
+		await s.wrapper.get('[data-cy="room-mode-video"]').trigger("click");
+		expect(s.wrapper.get('[data-cy="room-video-surface"]').attributes("inert")).toBeDefined();
+		s.connection.mockReset();
+		s.provider.api.playVideo.mockClear();
+		s.provider.api.pauseVideo.mockClear();
+		const button = s.wrapper.get('[data-cy="room-video-toggle"]');
+		expect(button.attributes("aria-label")).toBe("Pause");
+		await button.trigger("click");
+		expect(sentMessage(s.connection, "playback-command").command.command).toBe("pause");
+		expect(s.provider.api.pauseVideo).not.toHaveBeenCalled();
+		s.connection.mockReceive({
+			action: "playback-event",
+			event: {
+				epoch: "epoch",
+				sequence: 2,
+				occurrenceId: 1,
+				effectiveAtMs: 1000,
+				type: "pause",
+			},
+		});
+		await vi.waitFor(() => expect(s.provider.api.pauseVideo).toHaveBeenCalledOnce());
+		expect(button.attributes("aria-label")).toBe("Play");
+		await button.trigger("click");
+		expect(sentMessage(s.connection, "playback-command").command.command).toBe("play");
+		expect(s.provider.api.playVideo).not.toHaveBeenCalled();
+	});
 	it("shows the authoritative rate applied to the captured provider", async () => {
 		const s = await mountRoom();
 		s.connection.mockReceive({

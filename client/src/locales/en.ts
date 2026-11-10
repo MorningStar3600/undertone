@@ -492,6 +492,13 @@ export default {
 		"nothing-playing": "Nothing playing.",
 	},
 	room: {
+		"media-mode": {
+			label: "Playback display",
+			audio: "Audio",
+			video: "Video",
+			"audio-title": "Listen together",
+			"audio-description": "Audio mode. Switch to Video to watch.",
+		},
 		"title-temp": "Temporary Room",
 		"kick-me": "Kick me",
 		rewind: "Rewind 10s",
