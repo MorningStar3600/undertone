@@ -418,10 +418,6 @@ export function createPlaybackController<Source>(
 			}
 			// Position/play controls can change during startup without restarting source work.
 			version = revision;
-			if (g.buffering) {
-				publish("buffering", g);
-				return;
-			}
 			let state = projection.state;
 			if (!adapter.supportsRate(state.rate)) {
 				if (g.playing !== false) {
@@ -438,37 +434,44 @@ export function createPlaybackController<Source>(
 				publish("autoplay-blocked", g);
 				return;
 			}
-			if (g.rate !== state.rate) {
-				await adapter.setRate(state.rate, signal);
+			// Buffering suspends position corrections, not authoritative play/pause.
+			// Some providers cannot finish a seek from a cued state until play is sent.
+			if (!g.buffering) {
+				if (g.rate !== state.rate) {
+					await adapter.setRate(state.rate, signal);
+					if (!current(g, version)) {
+						return;
+					}
+					g.rate = state.rate;
+				}
+				const position = await adapter.getPosition(signal);
 				if (!current(g, version)) {
 					return;
 				}
-				g.rate = state.rate;
-			}
-			const position = await adapter.getPosition(signal);
-			if (!current(g, version)) {
-				return;
-			}
-			if (!Number.isFinite(position) || position < 0) {
-				throw new RangeError("Invalid adapter media position");
-			}
-			state = projection.state!;
-			const drift = Math.abs(position - state.positionSeconds);
-			if (drift <= driftRelease) {
-				g.drifting = false;
-			} else if (drift >= driftThreshold) {
-				g.drifting = true;
-			}
-			const localNow = options.now();
-			if (g.aligned !== alignment || (g.drifting && localNow - g.lastSeekMs >= cooldownMs)) {
-				// Reserve the correction before the SDK can synchronously report buffering.
-				// A failed seek tears down this generation; explicit later seeks advance alignment.
-				g.aligned = alignment;
-				g.lastSeekMs = localNow;
-				g.drifting = false;
-				await adapter.seek(state.positionSeconds, signal);
-				if (!current(g, version)) {
-					return;
+				if (!Number.isFinite(position) || position < 0) {
+					throw new RangeError("Invalid adapter media position");
+				}
+				state = projection.state!;
+				const drift = Math.abs(position - state.positionSeconds);
+				if (drift <= driftRelease) {
+					g.drifting = false;
+				} else if (drift >= driftThreshold) {
+					g.drifting = true;
+				}
+				const localNow = options.now();
+				if (
+					g.aligned !== alignment ||
+					(g.drifting && localNow - g.lastSeekMs >= cooldownMs)
+				) {
+					// Reserve the correction before the SDK can synchronously report buffering.
+					// A failed seek tears down this generation; explicit later seeks advance alignment.
+					g.aligned = alignment;
+					g.lastSeekMs = localNow;
+					g.drifting = false;
+					await adapter.seek(state.positionSeconds, signal);
+					if (!current(g, version)) {
+						return;
+					}
 				}
 			}
 			state = projection.state!;
@@ -498,7 +501,7 @@ export function createPlaybackController<Source>(
 				}
 			}
 			g.blocked = false;
-			publish(state.isPlaying ? "playing" : "paused", g);
+			publish(state.isPlaying ? (g.buffering ? "buffering" : "playing") : "paused", g);
 		} catch (error) {
 			// Stale async failures have no bearing on the replacement occurrence.
 			refresh();

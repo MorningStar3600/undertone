@@ -699,6 +699,37 @@ describe("playback controller async ownership and local outcomes", () => {
 		expect(s.controller.getStatus().code).toBe("playing");
 	});
 
+	it.each([true, false])(
+		"applies playback intent after a seek stalls, playing=%s",
+		async isPlaying => {
+			const s = setup({
+				createAdapter: context => {
+					const adapter = fakeAdapter();
+					s.adapters.push(adapter);
+					adapter.seek.mockImplementation(position => {
+						adapter.setPosition(position);
+						context.report({ type: "buffering" });
+						// A cued YouTube player can remain UNSTARTED after seeking.
+						// It will not emit resumed until play is explicitly requested.
+					});
+					adapter.play.mockImplementation(() => context.report({ type: "resumed" }));
+					return adapter;
+				},
+			});
+			s.controller.installSnapshot(snapshot(load({ isPlaying })));
+			await s.idle();
+			await s.advance();
+			expect(s.adapters[0][isPlaying ? "play" : "pause"]).toHaveBeenCalledOnce();
+			expect(s.adapters[0].seek).toHaveBeenCalledOnce();
+			s.controller.acceptEvent(control("play"));
+			await s.advance();
+			expect(s.adapters[0].play).toHaveBeenCalledOnce();
+			await s.advance();
+			expect(s.controller.getStatus().code).toBe("playing");
+			expect(s.adapters[0].seek).toHaveBeenCalledOnce();
+		},
+	);
+
 	it("uses drift tolerance, hysteresis and cooldown instead of repeated seeks", async () => {
 		const s = setup();
 		s.controller.installSnapshot(snapshot(load({ isPlaying: false })));
@@ -731,16 +762,16 @@ describe("playback controller async ownership and local outcomes", () => {
 		await s.advance();
 		expect(s.adapters[0].setRate).toHaveBeenCalledTimes(2);
 	});
-	it("applies a pause received while buffering once the provider resumes", async () => {
+	it("applies a pause received while buffering without waiting for the provider", async () => {
 		const s = setup();
 		s.controller.installSnapshot(snapshot(load()));
 		await s.idle();
 		s.contexts[0].report({ type: "buffering" });
 		s.controller.acceptEvent(control("pause"));
 		await s.advance();
-		expect(s.adapters[0].pause).not.toHaveBeenCalled();
+		expect(s.adapters[0].pause).toHaveBeenCalledOnce();
 		s.contexts[0].report({ type: "resumed" });
-		s.contexts[0].report({ type: "playback-change", isPlaying: true });
+		s.contexts[0].report({ type: "playback-change", isPlaying: false });
 		await s.advance();
 		expect(s.adapters[0].pause).toHaveBeenCalledOnce();
 		expect(s.controller.getStatus().code).toBe("paused");
