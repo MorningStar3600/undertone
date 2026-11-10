@@ -2,9 +2,9 @@
 
 `client/src/playback/playback-controller.ts` is an opt-in, framework/provider/transport-independent
 renderer for the [timeline contract](playback-timeline-contract.md). It consumes the existing
-[server clock](playback-clock.md); it does not implement another clock estimator. This lot does not
-wire Room.vue, OmniPlayer, connection, stores, providers, authentication, or protocol. Ordinary public
-YouTube playback remains on its existing path and needs no new login.
+[server clock](playback-clock.md); it does not implement another clock estimator. The playback session
+wires it to the room connection and captured provider surfaces. Ordinary public YouTube playback
+needs no new login.
 
 ## Integration API
 
@@ -68,9 +68,15 @@ that SDK instance instead of reusing its element. The factory must not return a 
 older generation. Even `source` events with identical public media allocate a fresh generation.
 
 AbortSignal is a cancellation **notification**, not proof an arbitrary SDK promise was cancelled.
-The controller never races away from a pending method: it owns one serialized worker and awaits that
-method's settlement, checking ownership and current authority before/after each async boundary. Local
-clear/replacement/disposal immediately aborts and disposes the captured adapter even during that wait.
+The controller owns one serialized worker and awaits each method's settlement, checking ownership and
+current authority before/after each async boundary. `play(signal)` receives a separate command signal:
+new effective pause, unsupported rate, clear, replacement, clock loss or disposal aborts a pending play.
+Adapters must stop pending playback and settle on this signal. YouTube cancels its pending play promise,
+clears the autoplay timeout/listener, issues pause, and rejects late PLAYING callbacks while pause is
+still intended. The captured surface and OmniPlayer forward the signal to the exact provider instance.
+The worker consumes cancellation without publishing stale autoplay failure or starting another worker.
+Other SDKs that ignore per-play abort can still delay subsequent work until their promise settles.
+Local clear/replacement/disposal immediately aborts and disposes the captured adapter during the wait.
 All injected resolver/adapter operations must settle promptly on abort/dispose (resolve or reject),
 remove readiness watchers/listeners, and drain their own work. A noncooperative never-settling promise
 blocks subsequent source startup; it cannot spawn replacement pipelines or unbounded detached
@@ -103,17 +109,35 @@ estimate catches up. This freezes authoritative projection rather than undoing a
 events or querying before the core's supported range; a playing local device may drift while projection
 is frozen and is corrected under normal drift policy. There is no accumulated media-time integration.
 
-There is one timer and one worker. Defaults: 250 ms reconciliation interval (minimum configurable
-interval 50 ms), 1.5 s drift detection, 0.5 s release band, and 2 s seek cooldown. Future transitions are
-observed on the next tick at/after their effective time; timer granularity, browser throttling, in-flight
-SDK calls, and rate limiting can delay application. The scheduler does not promise exact-time playback.
+There is one controller timer and one worker. Defaults: 250 ms periodic reconciliation (minimum
+configurable interval 50 ms), 0.3 s drift detection, 0.1 s release band, 1 s routine seek cooldown, and
+0.1 s paused-anchor/slow-command tolerance. Drift must remain outside the release band for at least
+one sample interval after detection before correction, in the same direction; an isolated noisy sample
+or oscillating sample direction cannot trigger a routine seek.
+Newly effective authority, generation startup and activation bypass the periodic throttle. Duplicates,
+ordinary ticks and provider telemetry do not. New authority supersedes work after its current awaited
+operation settles; cooperative play cancellation avoids waiting for the YouTube 4 s autoplay timeout.
+The session supplies a scheduler; its next deadline is the earlier of the periodic tick and the next
+future event's effective time. Extra ticks never postpone an existing earlier deadline. Browser timer
+granularity/throttling, clock uncertainty and in-flight SDK calls can still delay application.
 Source invalidation/clear/clock loss are synchronous on observation even if the worker is blocked.
 Tick/event storms only mark pending work; they do not run parallel reconciliations. At most one new
-pass starts per interval. Explicit tick owners must continue ticking when work is deferred by the
+routine pass starts per interval. Explicit tick owners must continue ticking when work is deferred by the
 interval. Provider callbacks must represent actual state changes, not continuously emitted telemetry.
 
-Initial alignment, authoritative seek and activation retries force alignment. Routine
-position drift uses the detection/release bands and cooldown; it does not seek on every position read.
+Initial alignment, authoritative seek and activation retries force alignment. A change from paused to
+playing aligns once to the latest projected server position, including delivery latency smaller than
+the routine tolerance; repeated play events with unchanged intent do not force another alignment.
+Pause issues the SDK pause before reading position, then corrects the fixed authoritative pause anchor
+only if error exceeds 0.1 s. It never adds delivery/elapsed time to a paused anchor. Resume while already
+buffering sends play first and consumes that control alignment, preserving cued-provider recovery.
+Following a slow seek/play operation, refresh authority and take at most one extra measured catch-up
+seek for that operation if both elapsed media time and residual error exceed 0.1 s. A catch-up seek does
+not recursively trigger another catch-up check. A startup pass can therefore issue the initial seek
+plus at most two catch-ups if both its original seek and play were slow. Buffering suppresses these
+checks; further residuals use routine measured drift and cooldown. There is no fine-grained rate nudge.
+Routine position drift uses detection/release bands, sample confirmation and cooldown; it does not
+seek on every position read. The bounds limit correction churn rather than guaranteeing physical sync.
 Rate support is explicit: an unsupported desired rate pauses/holds locally and reports
 `unsupported-rate`. No play, rate setter, or correction seeks emulate that rate. A later supported rate
 resumes normal reconciliation. Adapters must accurately advertise rate 1 if supported and apply the
@@ -122,7 +146,8 @@ requested supported rate; the controller does not pretend a no-op setter works.
 `NotAllowedError` from play reports `autoplay-blocked` and suppresses automatic play/seek retries until
 activation (or authoritative paused state/new generation). Other current-generation failures report
 `error` with the occurrence scope and stop the adapter; only explicit `retry` or replacement recreates
-it. Buffering suppresses commands until `report({type: "resumed"})`, then measured drift and the latest
+it. Buffering suppresses position/rate correction, while authoritative play/pause remains usable.
+After `report({type: "resumed"})`, measured drift and the latest
 authoritative intent determine which corrections are needed. Recovery alone never forces another seek:
 seeks can themselves trigger buffering. Playback/rate observations retain actual provider state to avoid
 repeating successful commands. Use captured reports for `buffering`, `resumed`, `playback-change`,
@@ -165,3 +190,33 @@ else {
 
 No end-to-end/browser/provider behavior is established until adapters and transport are integrated and
 verified separately.
+
+### Deterministic two-client evidence
+
+`client/tests/unit/playback-sync.spec.ts` uses two controllers with independent provider state and
+different local monotonic origins, a shared simulated server time estimate, delayed event delivery,
+and delayed SDK readiness/position/seek/play operations. It performs no network or browser actions.
+
+- A play effective at server-relative ms 1 and delivered at ms 15 issues the receiver's play at receipt
+  with no added controller polling delay, seeking to anchor + 0.014 s at rate 1 (0.028 s at rate 2).
+- Pause delayed 140 ms stops on receipt and realigns both providers to the fixed pause anchor; two
+  seconds paused adds no media time. Resume delayed 150 ms again projects to the common server time.
+- A future pause effective at ms 123 is applied by both clients at ms 123, between periodic ticks,
+  with no early pause. In the real session, a future play at ms 123 also runs before its 250 ms tick.
+- Startup delayed 80 ms seeks to anchor + 0.080 s. An additional 400 ms seek delay and 150 ms play
+  delay are measured and compensated with two bounded catch-ups, bringing the simulated positions
+  together. A 40 ms position read and delayed explicit seek likewise use the projection at completion.
+- A 0.6 s sustained offset is corrected after two 250 ms samples, within 500 ms of the injected offset
+  in the fixture. Alternating 450 ms/20 ms or +450 ms/-450 ms sampling noise causes no extra seeks.
+  Continuous injected drift cannot cause routine correction seeks more often than once per second.
+- New pause received while play waits 4 s cancels play and issues pause at receipt in both clients;
+  pending replacement cancels the old generation before starting its successor. Neither late work nor
+  seek-induced buffering starts another audible instance or repeatedly sends play/rate commands.
+
+These are simulation observations with an exact injected clock and cooperative provider, not live
+audible-output bounds. Production clock estimates have uncertainty, SDK position reads may be cached
+or coarse, seek completion and decoder/audio-device latency are provider/browser dependent, and
+background throttling may delay timers. Corrections remain thresholded and bounded, so a residual under
+the threshold can remain. The official YouTube API exposes no separate audio/video presentation
+timestamps or precise audible-output clock. No sample-perfect sync, millisecond physical-output
+guarantee, forced 144p, audio-only stream, or new browser measurement is claimed.

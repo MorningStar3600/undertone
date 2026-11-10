@@ -102,7 +102,7 @@ describe("YouTube captions", () => {
 		return wrapper.vm.$.exposed as unknown as {
 			setCaptionsEnabled: (enabled: boolean) => void;
 			isCaptionsEnabled: () => boolean;
-			play: () => Promise<void>;
+			play: (signal?: AbortSignal) => Promise<void>;
 			pause: () => void;
 			setPosition: (position: number) => void;
 		};
@@ -248,5 +248,33 @@ describe("YouTube captions", () => {
 		await player.play();
 		expect(player.isCaptionsEnabled()).toBe(true);
 		expect(visible).toBe(true);
+	});
+
+	it("cancels pending silent play on pause and rejects stale PLAYING callbacks", async () => {
+		const player = await mountPlayer();
+		await wrapper.setProps({ silent: true });
+		api.playVideo.mockImplementationOnce(() => undefined);
+		const command = new AbortController();
+		const result = player.play(command.signal).catch(error => error);
+		command.abort();
+		expect((await result).name).toBe("AbortError");
+		expect(api.pauseVideo).toHaveBeenCalledOnce();
+		const playingEvents = wrapper.emitted("playing")?.length ?? 0;
+		transition(1);
+		expect(api.pauseVideo).toHaveBeenCalledTimes(2);
+		expect(wrapper.emitted("playing")?.length ?? 0).toBe(playingEvents);
+		// A fresh play is independent of the old abort signal and old timeout.
+		await player.play(new AbortController().signal);
+		expect(wrapper.emitted("playing")?.length).toBe(playingEvents + 1);
+	});
+
+	it("settles pending silent play when pause is called directly", async () => {
+		const player = await mountPlayer();
+		await wrapper.setProps({ silent: true });
+		api.playVideo.mockImplementationOnce(() => undefined);
+		const result = player.play().catch(error => error);
+		player.pause();
+		expect((await result).name).toBe("AbortError");
+		expect(api.pauseVideo).toHaveBeenCalledOnce();
 	});
 });

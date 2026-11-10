@@ -337,6 +337,7 @@ describe("playback controller timeline and scheduling", () => {
 		{ intervalMs: 49 },
 		{ intervalMs: 2_147_483_648 },
 		{ driftThresholdSeconds: NaN },
+		{ controlToleranceSeconds: NaN },
 		{ driftReleaseSeconds: 2 },
 		{ seekCooldownMs: -1 },
 	])("rejects invalid controller configuration %j", options => {
@@ -459,11 +460,9 @@ describe("playback controller async ownership and local outcomes", () => {
 		s.controller.acceptEvent({ ...control("play"), type: "seek", positionSeconds: 80 });
 		pending.resolve(10);
 		await s.idle();
-		expect(a.seek).not.toHaveBeenCalled();
-		expect(a.play).not.toHaveBeenCalled();
-		await s.advance();
 		expect(a.seek).toHaveBeenCalledOnce();
-		expect(a.seek).toHaveBeenCalledWith(80.25, expect.anything());
+		expect(a.seek).toHaveBeenCalledWith(80, expect.anything());
+		expect(a.play).toHaveBeenCalledOnce();
 		expect(a.load).toHaveBeenCalledOnce();
 	});
 
@@ -569,7 +568,7 @@ describe("playback controller async ownership and local outcomes", () => {
 			await s.advance();
 			expect(old.play).not.toHaveBeenCalled();
 			expect(old.seek).not.toHaveBeenCalled();
-			expect(fresh.seek).toHaveBeenCalledWith(30.25, factory.mock.calls[1][0].signal);
+			expect(fresh.seek).toHaveBeenCalledWith(30, factory.mock.calls[1][0].signal);
 			expect(fresh.play).toHaveBeenCalledOnce();
 			expect(s.recoveries).toEqual([]);
 		},
@@ -660,10 +659,12 @@ describe("playback controller async ownership and local outcomes", () => {
 		expect(s.controller.getStatus().code).toBe("buffering");
 		s.contexts[0].report({ type: "resumed" });
 		await s.advance();
-		expect(s.adapters[0].seek).toHaveBeenLastCalledWith(13.25, s.contexts[0].signal);
+		expect(s.adapters[0].seek).toHaveBeenCalledOnce();
+		await s.advance();
+		expect(s.adapters[0].seek).toHaveBeenLastCalledWith(13.5, s.contexts[0].signal);
 		expect(s.adapters[0].play).toHaveBeenCalledOnce();
 		expect(s.adapters[0].setRate).toHaveBeenCalledOnce();
-		s.controller.acceptEvent(load({ sequence: 2, occurrenceId: 2, effectiveAtMs: 4_250 }));
+		s.controller.acceptEvent(load({ sequence: 2, occurrenceId: 2, effectiveAtMs: 4_500 }));
 		await s.advance();
 		s.contexts[0].report({ type: "error", error: "stale failure" });
 		s.contexts[0].report({ type: "buffering" });
@@ -718,10 +719,15 @@ describe("playback controller async ownership and local outcomes", () => {
 			});
 			s.controller.installSnapshot(snapshot(load({ isPlaying })));
 			await s.idle();
+			expect(s.adapters[0][isPlaying ? "play" : "pause"]).toHaveBeenCalledOnce();
+			s.adapters[0].setPosition(10.25);
 			await s.advance();
 			expect(s.adapters[0][isPlaying ? "play" : "pause"]).toHaveBeenCalledOnce();
 			expect(s.adapters[0].seek).toHaveBeenCalledOnce();
 			s.controller.acceptEvent(control("play"));
+			await s.idle();
+			expect(s.adapters[0].play).toHaveBeenCalledOnce();
+			s.adapters[0].setPosition(isPlaying ? 10.5 : 10.25);
 			await s.advance();
 			expect(s.adapters[0].play).toHaveBeenCalledOnce();
 			await s.advance();
@@ -731,13 +737,19 @@ describe("playback controller async ownership and local outcomes", () => {
 	);
 
 	it("uses drift tolerance, hysteresis and cooldown instead of repeated seeks", async () => {
-		const s = setup();
+		const s = setup({
+			driftThresholdSeconds: 1.5,
+			driftReleaseSeconds: 0.5,
+			seekCooldownMs: 2_000,
+		});
 		s.controller.installSnapshot(snapshot(load({ isPlaying: false })));
 		await s.idle();
 		s.adapters[0].setPosition(9);
 		await s.advance(2_000);
 		expect(s.adapters[0].seek).toHaveBeenCalledOnce();
 		s.adapters[0].setPosition(7);
+		await s.advance();
+		expect(s.adapters[0].seek).toHaveBeenCalledOnce();
 		await s.advance();
 		expect(s.adapters[0].seek).toHaveBeenCalledTimes(2);
 		s.adapters[0].setPosition(7);

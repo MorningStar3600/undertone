@@ -140,12 +140,14 @@ const queuedVolume = ref<number | null>(null);
 const captionsEnabled = ref(false);
 const isApiReady = ref(false);
 let disposed = false;
-let pendingPlay: { resolve(): void; reject(error: unknown): void } | null = null;
+let pendingPlay: { resolve(): void; reject(error: unknown): void; cleanup(): void } | null = null;
+let requestedPlaying: boolean | null = null;
 let playTimeout: ReturnType<typeof setTimeout> | undefined;
 function settlePlay(error?: unknown) {
 	clearTimeout(playTimeout);
 	const pending = pendingPlay;
 	pendingPlay = null;
+	pending?.cleanup();
 	if (error) {
 		pending?.reject(error);
 	} else {
@@ -260,7 +262,11 @@ watch(
 	},
 );
 
-function play(): Promise<void> {
+function play(signal?: AbortSignal): Promise<void> {
+	if (disposed || signal?.aborted) {
+		return Promise.reject(new DOMException("Play cancelled", "AbortError"));
+	}
+	requestedPlaying = true;
 	if (!player.value) {
 		queuedPlaying.value = true;
 		return Promise.resolve();
@@ -269,18 +275,23 @@ function play(): Promise<void> {
 		player.value.playVideo();
 		return Promise.resolve();
 	}
-	if (disposed) {
-		return Promise.reject(new DOMException("Player disposed", "AbortError"));
-	}
 	return new Promise<void>((resolve, reject) => {
 		settlePlay();
-		pendingPlay = { resolve, reject };
+		const cancel = () => pause();
+		pendingPlay = {
+			resolve,
+			reject,
+			cleanup: () => signal?.removeEventListener("abort", cancel),
+		};
+		signal?.addEventListener("abort", cancel, { once: true });
 		playTimeout = setTimeout(onAutoplayBlocked, 4_000);
 		player.value!.playVideo();
 	});
 }
 
 function pause(): void {
+	requestedPlaying = false;
+	settlePlay(new DOMException("Play cancelled by pause", "AbortError"));
 	if (!player.value) {
 		queuedPlaying.value = false;
 		return;
@@ -428,6 +439,11 @@ function onStateChange(event: YoutubeStateChangeEvent): void {
 		return;
 	}
 	youtubeState.value = event.data;
+	// A late PLAYING callback from an aborted attempt cannot undo newer pause intent.
+	if (props.silent && requestedPlaying === false && event.data === YOUTUBE_STATUS_PLAYING) {
+		player.value.pauseVideo();
+		return;
+	}
 	if (event.data === YOUTUBE_STATUS_PLAYING) {
 		settlePlay();
 	}

@@ -259,6 +259,10 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 		return createPlaybackController<QueueItem>({
 			clock,
 			now,
+			scheduler: {
+				setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+				clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+			},
 			createAdapter: options.createAdapter,
 			resolveSource(media, context) {
 				const attachment = attachments.get(

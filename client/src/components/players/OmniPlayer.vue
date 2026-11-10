@@ -371,7 +371,7 @@ async function onApiReady() {
 	}
 	const captured = player.value;
 	props.surface?.bind({
-		play: () => captured.play(),
+		play: signal => captured.play(signal),
 		pause: () => captured.pause(),
 		getPosition: () => captured.getPosition(),
 		setPosition: value => captured.setPosition(value),

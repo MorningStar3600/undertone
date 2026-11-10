@@ -48,7 +48,7 @@ export interface MediaPlayer {
 	 *
 	 * Some browsers emit promises for this, and some don't.
 	 */
-	play(): void | Promise<void>;
+	play(signal?: AbortSignal): void | Promise<void>;
 	/**
 	 * Pause the video.
 	 *

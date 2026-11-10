@@ -146,7 +146,7 @@ export function createPlayerSurfaces() {
 						throw new Error("Unsupported playback rate");
 					}
 				}),
-			play: () => call(p => p.play()),
+			play: signal => call(p => p.play(signal)),
 			pause: () => call(p => p.pause()),
 			activate() {
 				if (!dead) {

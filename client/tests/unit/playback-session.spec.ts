@@ -106,7 +106,7 @@ function setup(early = false, earlySync?: LegacyPlaybackSync) {
 			throw new Error("Missing surface");
 		}
 		const player = {
-			play: vi.fn(),
+			play: vi.fn<[AbortSignal?], void | Promise<void>>(),
 			pause: vi.fn(),
 			getPosition: vi.fn(() => 12),
 			setPosition: vi.fn(),
@@ -146,6 +146,49 @@ afterEach(() => {
 });
 
 describe("client playback subscription and captured provider integration", () => {
+	it("schedules future authority between session ticks and forwards per-play cancellation", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		await flush();
+		const player = s.bind();
+		await flush();
+		player.play.mockImplementationOnce(
+			signal =>
+				new Promise<void>((_resolve, reject) => {
+					signal?.addEventListener(
+						"abort",
+						() => reject(new DOMException("Cancelled", "AbortError")),
+						{ once: true },
+					);
+				}),
+		);
+		s.event({
+			epoch: "epoch",
+			occurrenceId: 1,
+			sequence: 2,
+			effectiveAtMs: 1_123,
+			type: "play",
+		});
+		await s.tick(122);
+		expect(player.play).not.toHaveBeenCalled();
+		await s.tick(1);
+		expect(player.play).toHaveBeenCalledOnce();
+		const signal = player.play.mock.calls[0][0];
+		expect(signal?.aborted).toBe(false);
+		s.event({
+			epoch: "epoch",
+			occurrenceId: 1,
+			sequence: 3,
+			effectiveAtMs: 1_123,
+			type: "pause",
+		});
+		expect(signal?.aborted).toBe(true);
+		await flush();
+		expect(player.pause).toHaveBeenCalledTimes(2);
+		expect(s.session.controller.getStatus().code).toBe("paused");
+	});
+
 	it("keeps legacy requests on servers without capability after authenticated negotiation", async () => {
 		const { api, connection, tick } = setup();
 		connection.mockReceive({ action: "sync" });

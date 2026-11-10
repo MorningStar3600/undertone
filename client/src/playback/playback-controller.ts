@@ -48,6 +48,7 @@ export interface PlaybackAdapter<Source> {
 	seek(positionSeconds: number, signal: AbortSignal): PlaybackResult<void>;
 	supportsRate(rate: number): boolean;
 	setRate(rate: number, signal: AbortSignal): PlaybackResult<void>;
+	/** Per-command signal: abort must cancel pending playback and settle promptly. */
 	play(signal: AbortSignal): PlaybackResult<void>;
 	pause(signal: AbortSignal): PlaybackResult<void>;
 	/** Optional synchronous browser-gesture unlock; must not change authoritative intent. */
@@ -110,11 +111,13 @@ export interface PlaybackControllerOptions<Source> {
 	createAdapter(context: PlaybackAdapterContext): PlaybackAdapter<Source>;
 	onRecovery(recovery: PlaybackRecovery): void;
 	onStatus?(status: PlaybackControllerStatus): void;
-	/** At least 50 ms; also bounds automatic reconciliation and future-event timer frequency. */
+	/** At least 50 ms; bounds periodic drift work, not newly effective authority. */
 	intervalMs?: number;
 	driftThresholdSeconds?: number;
 	driftReleaseSeconds?: number;
 	seekCooldownMs?: number;
+	/** Pause/resume alignment ignores smaller SDK sampling differences. */
+	controlToleranceSeconds?: number;
 }
 
 export interface PlaybackController {
@@ -146,6 +149,10 @@ interface Generation<Source> {
 	aligned: number;
 	lastSeekMs: number;
 	drifting: boolean;
+	driftDirection: number;
+	driftSinceMs: number | null;
+	controlAligned: number;
+	playAbort: AbortController | null;
 }
 
 const cursor = (timeline: PlaybackTimeline): number =>
@@ -171,9 +178,13 @@ export function createPlaybackController<Source>(
 	if (intervalMs < 50 || intervalMs > 2_147_483_647) {
 		throw new RangeError("intervalMs must be between 50 and 2147483647");
 	}
-	const driftThreshold = positive(options.driftThresholdSeconds ?? 1.5, "driftThresholdSeconds");
-	const driftRelease = positive(options.driftReleaseSeconds ?? 0.5, "driftReleaseSeconds");
-	const cooldownMs = positive(options.seekCooldownMs ?? 2_000, "seekCooldownMs");
+	const driftThreshold = positive(options.driftThresholdSeconds ?? 0.3, "driftThresholdSeconds");
+	const driftRelease = positive(options.driftReleaseSeconds ?? 0.1, "driftReleaseSeconds");
+	const cooldownMs = positive(options.seekCooldownMs ?? 1_000, "seekCooldownMs");
+	const controlTolerance = positive(
+		options.controlToleranceSeconds ?? 0.1,
+		"controlToleranceSeconds",
+	);
 	if (driftRelease >= driftThreshold) {
 		throw new RangeError("driftReleaseSeconds must be below driftThresholdSeconds");
 	}
@@ -183,13 +194,15 @@ export function createPlaybackController<Source>(
 	let generation = 0;
 	let revision = 0;
 	let alignment = 0;
+	let controlAlignment = 0;
 	let appliedSequence = 0;
 	let recovering = false;
 	let disposed = false;
 	let dirty = false;
+	let urgent = false;
 	let worker: Promise<void> | null = null;
 	let lastStartedMs = Number.NEGATIVE_INFINITY;
-	let timer: { handle: unknown } | null = null;
+	let timer: { handle: unknown; dueMs: number } | null = null;
 	let status: PlaybackControllerStatus = { code: "waiting-snapshot", scope: null };
 
 	const publish = (
@@ -218,6 +231,7 @@ export function createPlaybackController<Source>(
 	};
 
 	const teardown = (g: Generation<Source>): void => {
+		g.playAbort?.abort();
 		g.abort.abort();
 		const adapter = g.adapter;
 		g.adapter = null;
@@ -284,12 +298,23 @@ export function createPlaybackController<Source>(
 			if (newlyEffective.some(event => event.type === "seek")) {
 				alignment += 1;
 			}
+			if (next.state?.isPlaying !== projection?.state?.isPlaying) {
+				controlAlignment += 1;
+			}
 			appliedSequence = next.appliedSequence;
 			revision += 1;
 			dirty = true;
+			urgent = true;
 		}
 		projection = next;
 		timeline = compactPlaybackTimeline(timeline, queryMs);
+		if (
+			next.state &&
+			active?.playAbort &&
+			(!next.state.isPlaying || !active.adapter?.supportsRate(next.state.rate))
+		) {
+			active.playAbort.abort();
+		}
 		if (!next.state) {
 			retire();
 			publish("idle");
@@ -341,6 +366,10 @@ export function createPlaybackController<Source>(
 						if (!g.buffering) {
 							g.buffering = true;
 							revision += 1;
+							// Continue a startup/control pass interrupted by a seek's buffering callback.
+							if (g.loaded && g.playing !== projection?.state?.isPlaying) {
+								urgent = true;
+							}
 							publish("buffering", g);
 						}
 					} else if (event.type === "resumed") {
@@ -373,6 +402,10 @@ export function createPlaybackController<Source>(
 			aligned: -1,
 			lastSeekMs: Number.NEGATIVE_INFINITY,
 			drifting: false,
+			driftDirection: 0,
+			driftSinceMs: null,
+			controlAligned: -1,
+			playAbort: null,
 		};
 		active = g;
 		return g;
@@ -419,6 +452,32 @@ export function createPlaybackController<Source>(
 			// Position/play controls can change during startup without restarting source work.
 			version = revision;
 			let state = projection.state;
+			// One measured catch-up per slow seek/play; never recurse after the catch-up seek.
+			const catchUp = async (startedMs: number): Promise<boolean> => {
+				if (!current(g, version)) {
+					return false;
+				}
+				const latest = projection!.state!;
+				if (
+					g.buffering ||
+					!latest.isPlaying ||
+					(options.now() - startedMs) * latest.rate < controlTolerance * 1_000
+				) {
+					return true;
+				}
+				const position = await adapter.getPosition(signal);
+				if (!current(g, version)) {
+					return false;
+				}
+				if (!Number.isFinite(position) || position < 0) {
+					throw new RangeError("Invalid adapter media position");
+				}
+				if (Math.abs(position - projection!.state!.positionSeconds) > controlTolerance) {
+					g.lastSeekMs = options.now();
+					await adapter.seek(projection!.state!.positionSeconds, signal);
+				}
+				return current(g, version);
+			};
 			if (!adapter.supportsRate(state.rate)) {
 				if (g.playing !== false) {
 					g.playing = false;
@@ -433,6 +492,14 @@ export function createPlaybackController<Source>(
 			if (g.blocked && state.isPlaying) {
 				publish("autoplay-blocked", g);
 				return;
+			}
+			// Stop promptly, before an asynchronous position sample or alignment seek.
+			if (!state.isPlaying && g.playing !== false) {
+				g.playing = false;
+				await adapter.pause(signal);
+				if (!current(g, version)) {
+					return;
+				}
 			}
 			// Buffering suspends position corrections, not authoritative play/pause.
 			// Some providers cannot finish a seek from a cued state until play is sent.
@@ -453,23 +520,41 @@ export function createPlaybackController<Source>(
 				}
 				state = projection.state!;
 				const drift = Math.abs(position - state.positionSeconds);
+				const direction = Math.sign(position - state.positionSeconds);
+				const localNow = options.now();
 				if (drift <= driftRelease) {
 					g.drifting = false;
+					g.driftSinceMs = null;
 				} else if (drift >= driftThreshold) {
+					if (!g.drifting || g.driftDirection !== direction) {
+						g.driftSinceMs = localNow;
+					}
 					g.drifting = true;
+					g.driftDirection = direction;
+				} else if (g.driftDirection !== direction) {
+					g.drifting = false;
+					g.driftSinceMs = null;
 				}
-				const localNow = options.now();
+				const controlDrift =
+					g.controlAligned !== controlAlignment &&
+					(state.isPlaying || drift > controlTolerance);
+				g.controlAligned = controlAlignment;
 				if (
 					g.aligned !== alignment ||
-					(g.drifting && localNow - g.lastSeekMs >= cooldownMs)
+					controlDrift ||
+					(g.drifting &&
+						g.driftSinceMs !== null &&
+						localNow - g.driftSinceMs >= intervalMs &&
+						localNow - g.lastSeekMs >= cooldownMs)
 				) {
 					// Reserve the correction before the SDK can synchronously report buffering.
 					// A failed seek tears down this generation; explicit later seeks advance alignment.
 					g.aligned = alignment;
 					g.lastSeekMs = localNow;
 					g.drifting = false;
+					g.driftSinceMs = null;
 					await adapter.seek(state.positionSeconds, signal);
-					if (!current(g, version)) {
+					if (!(await catchUp(localNow))) {
 						return;
 					}
 				}
@@ -477,9 +562,34 @@ export function createPlaybackController<Source>(
 			state = projection.state!;
 			if (g.playing !== state.isPlaying) {
 				g.playing = state.isPlaying;
+				if (state.isPlaying && g.buffering) {
+					// Do not turn recovery from a cued/buffering play into a second forced seek.
+					g.controlAligned = controlAlignment;
+				}
+				const startedMs = options.now();
 				try {
 					if (state.isPlaying) {
-						await adapter.play(signal);
+						const command = new AbortController();
+						g.playAbort = command;
+						try {
+							await adapter.play(command.signal);
+							if (command.signal.aborted) {
+								if (g.playing) {
+									g.playing = null;
+								}
+								return;
+							}
+						} catch (error) {
+							if (command.signal.aborted) {
+								if (g.playing) {
+									g.playing = null;
+								}
+								return;
+							}
+							throw error;
+						} finally {
+							g.playAbort = null;
+						}
 					} else {
 						await adapter.pause(signal);
 					}
@@ -499,6 +609,9 @@ export function createPlaybackController<Source>(
 				if (!current(g, version)) {
 					return;
 				}
+				if (state.isPlaying && !(await catchUp(startedMs))) {
+					return;
+				}
 			}
 			g.blocked = false;
 			publish(state.isPlaying ? (g.buffering ? "buffering" : "playing") : "paused", g);
@@ -514,11 +627,12 @@ export function createPlaybackController<Source>(
 			return;
 		}
 		const now = options.now();
-		if (!Number.isFinite(now) || now - lastStartedMs < intervalMs) {
+		if (!Number.isFinite(now) || (!urgent && now - lastStartedMs < intervalMs)) {
 			return;
 		}
 		lastStartedMs = now;
 		dirty = false;
+		urgent = false;
 		worker = Promise.resolve()
 			.then(reconcile)
 			.finally(() => {
@@ -527,21 +641,43 @@ export function createPlaybackController<Source>(
 			});
 	};
 
+	function schedule(): void {
+		if (!options.scheduler || !timeline || disposed) {
+			return;
+		}
+		const estimate = options.clock.getEstimate();
+		const nextEvent = timeline.events[0];
+		const delay =
+			estimate.ready && nextEvent
+				? Math.min(intervalMs, Math.max(1, nextEvent.effectiveAtMs - estimate.serverNowMs))
+				: intervalMs;
+		const dueMs = options.now() + delay;
+		if (timer && timer.dueMs <= dueMs) {
+			return;
+		}
+		if (timer) {
+			options.scheduler.clearTimeout(timer.handle);
+		}
+		timer = {
+			dueMs,
+			handle: options.scheduler.setTimeout(() => {
+				timer = null;
+				tick();
+			}, delay),
+		};
+	}
+
 	function tick(): void {
 		if (disposed) {
 			return;
 		}
 		refresh();
+		if (projection?.state && !active) {
+			urgent = true;
+		}
 		dirty = true;
 		pump();
-		if (options.scheduler && timeline && !timer) {
-			timer = {
-				handle: options.scheduler.setTimeout(() => {
-					timer = null;
-					tick();
-				}, intervalMs),
-			};
-		}
+		schedule();
 	}
 
 	return {
@@ -638,6 +774,7 @@ export function createPlaybackController<Source>(
 				active.playing = null;
 				alignment += 1;
 				revision += 1;
+				urgent = true;
 				tick();
 			}
 		},
