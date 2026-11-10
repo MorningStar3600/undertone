@@ -417,7 +417,7 @@ describe("two-client authoritative timing simulation", () => {
 	);
 
 	it.each([true, false])(
-		"corrects a persistent 80ms residual on the five-second check (playing=%s)",
+		"leaves an 80ms residual alone without periodic audible seeks (playing=%s)",
 		async playing => {
 			const a = client();
 			const b = client();
@@ -425,17 +425,16 @@ describe("two-client authoritative timing simulation", () => {
 			b.controller.installSnapshot(snapshot(playing));
 			await advance(1_000);
 			b.jump(-0.08);
-			await advance(3_999);
+			await advance(30_000);
 			expect(a.position() - b.position()).toBeCloseTo(0.08, 9);
-			await advance(1);
-			expect(b.position()).toBeCloseTo(a.position(), 9);
-			expect(b.calls.filter(call => call.type === "seek")).toHaveLength(2);
-			await advance(10_000);
-			expect(b.calls.filter(call => call.type === "seek")).toHaveLength(2);
+			expect(b.calls.filter(call => call.type === "seek")).toHaveLength(1);
+			b.controller.resume();
+			await flush();
+			expect(b.calls.filter(call => call.type === "seek")).toHaveLength(1);
 		},
 	);
 
-	it("bounds repeated fine corrections and ignores alternating sampling noise", async () => {
+	it("ignores small persistent offsets and alternating sampling noise", async () => {
 		const b = client();
 		b.controller.installSnapshot(snapshot(true));
 		await flush();
@@ -451,15 +450,11 @@ describe("two-client authoritative timing simulation", () => {
 			// Keep a small residual instead of accumulating into the fast drift policy.
 			b.jump(10 + Date.now() / 1_000 - b.position());
 		}
-		const seeks = b.calls.filter(call => call.type === "seek").slice(1);
-		expect(seeks.length).toBeGreaterThanOrEqual(2);
-		for (let i = 1; i < seeks.length; i++) {
-			expect(seeks[i].at - seeks[i - 1].at).toBeGreaterThanOrEqual(5_000);
-		}
+		expect(b.calls.filter(call => call.type === "seek")).toHaveLength(1);
 	});
 
-	it("does not treat clock uncertainty or slow position sampling as fine drift", async () => {
-		const uncertain = client({ uncertaintyMs: 120 });
+	it("does not turn small offsets or slow position sampling into repeated seeks", async () => {
+		const uncertain = client({ uncertaintyMs: 800 });
 		const slow = client({ readMs: 80 });
 		uncertain.controller.installSnapshot(snapshot(true));
 		slow.controller.installSnapshot(snapshot(true));
@@ -472,14 +467,14 @@ describe("two-client authoritative timing simulation", () => {
 	it("measures lifecycle drift against fresh server time without seeking healthy or uncertain peers", async () => {
 		const healthy = client();
 		const delayed = client();
-		const uncertain = client({ uncertaintyMs: 120 });
+		const uncertain = client({ uncertaintyMs: 800 });
 		const slow = client({ readMs: 80 });
 		for (const c of [healthy, delayed, uncertain, slow]) {
 			c.controller.installSnapshot(snapshot(true));
 		}
 		await advance(1_000);
-		delayed.jump(-0.08);
-		uncertain.jump(-0.08);
+		delayed.jump(-0.6);
+		uncertain.jump(-0.6);
 		for (const c of [healthy, delayed, uncertain, slow]) {
 			c.controller.resume();
 			c.controller.resume();

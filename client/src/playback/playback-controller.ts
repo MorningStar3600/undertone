@@ -159,9 +159,6 @@ interface Generation<Source> {
 	drifting: boolean;
 	driftDirection: number;
 	driftSinceMs: number | null;
-	fineDriftSinceMs: number | null;
-	fineDriftDirection: number;
-	fineSampleMs: number;
 	controlAligned: number;
 	playAbort: AbortController | null;
 }
@@ -192,8 +189,6 @@ export function createPlaybackController<Source>(
 	const driftThreshold = positive(options.driftThresholdSeconds ?? 0.3, "driftThresholdSeconds");
 	const driftRelease = positive(options.driftReleaseSeconds ?? 0.1, "driftReleaseSeconds");
 	const cooldownMs = positive(options.seekCooldownMs ?? 1_000, "seekCooldownMs");
-	const fineCooldownMs = 5_000;
-	const fineToleranceSeconds = 0.05;
 	const controlTolerance = positive(
 		options.controlToleranceSeconds ?? 0.1,
 		"controlToleranceSeconds",
@@ -319,9 +314,6 @@ export function createPlaybackController<Source>(
 				}
 			}
 			appliedSequence = next.appliedSequence;
-			if (active) {
-				active.fineDriftSinceMs = null;
-			}
 			revision += 1;
 			dirty = true;
 			urgent = true;
@@ -385,7 +377,6 @@ export function createPlaybackController<Source>(
 					} else if (event.type === "buffering") {
 						if (!g.buffering) {
 							g.buffering = true;
-							g.fineDriftSinceMs = null;
 							revision += 1;
 							// Continue a startup/control pass interrupted by a seek's buffering callback.
 							if (g.loaded && g.playing !== projection?.state?.isPlaying) {
@@ -438,9 +429,6 @@ export function createPlaybackController<Source>(
 			drifting: false,
 			driftDirection: 0,
 			driftSinceMs: null,
-			fineDriftSinceMs: null,
-			fineDriftDirection: 0,
-			fineSampleMs: Number.NEGATIVE_INFINITY,
 			controlAligned: -1,
 			playAbort: null,
 		};
@@ -563,33 +551,16 @@ export function createPlaybackController<Source>(
 				const drift = Math.abs(position - state.positionSeconds);
 				const direction = Math.sign(position - state.positionSeconds);
 				const localNow = options.now();
-				// A slower safety net catches small persistent residuals without seeking
-				// every tick. Clock uncertainty and asynchronous sampling are not drift.
+				// Seeking small residuals is audible and provider seeks need not land exactly.
+				// Lifecycle checks use the normal drift threshold, plus measurement uncertainty.
 				const uncertaintyMs = options.clock.getEstimate().uncertaintyMs;
-				const fineTolerance =
+				const resumeTolerance =
 					Math.max(
-						fineToleranceSeconds,
+						driftThreshold,
 						((uncertaintyMs ?? Number.POSITIVE_INFINITY) / 1_000) * state.rate,
 					) + (state.isPlaying ? ((localNow - sampledAtMs) / 1_000) * state.rate : 0);
-				if (drift > fineTolerance) {
-					if (
-						g.fineDriftSinceMs === null ||
-						g.fineDriftDirection !== direction ||
-						localNow - g.fineSampleMs > intervalMs * 2
-					) {
-						g.fineDriftSinceMs = localNow;
-					}
-					g.fineDriftDirection = direction;
-				} else {
-					g.fineDriftSinceMs = null;
-				}
-				g.fineSampleMs = localNow;
-				const fineDrift =
-					g.fineDriftSinceMs !== null &&
-					localNow - g.fineDriftSinceMs >= intervalMs &&
-					localNow - g.lastSeekMs >= Math.max(fineCooldownMs, cooldownMs);
 				// Lifecycle resume is evidence to sample now, not evidence that a seek is needed.
-				const resumeDrift = g.resumeCheck && drift > fineTolerance;
+				const resumeDrift = g.resumeCheck && drift > resumeTolerance;
 				g.resumeCheck = false;
 				if (drift <= driftRelease) {
 					g.drifting = false;
@@ -612,7 +583,6 @@ export function createPlaybackController<Source>(
 					g.aligned !== alignment ||
 					controlDrift ||
 					resumeDrift ||
-					fineDrift ||
 					(g.drifting &&
 						g.driftSinceMs !== null &&
 						localNow - g.driftSinceMs >= intervalMs &&
@@ -624,7 +594,6 @@ export function createPlaybackController<Source>(
 					g.lastSeekMs = localNow;
 					g.drifting = false;
 					g.driftSinceMs = null;
-					g.fineDriftSinceMs = null;
 					await adapter.seek(state.positionSeconds, signal);
 					if (!(await catchUp(localNow))) {
 						return;

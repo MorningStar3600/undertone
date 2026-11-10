@@ -599,10 +599,10 @@ describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
 		expect(replacement.api.getCurrentTime).toHaveBeenCalledTimes(calls);
 		visibility.mockRestore();
 	});
-	it("measures a small actual offset promptly on focus and coalesces lifecycle signals", async () => {
+	it("measures a substantial offset promptly on focus and coalesces lifecycle signals", async () => {
 		vi.spyOn(performance, "now").mockReturnValue(0);
 		const s = await mountRoom(true);
-		s.provider.api.getCurrentTime.mockReturnValue(11.92);
+		s.provider.api.getCurrentTime.mockReturnValue(11.4);
 		s.provider.api.seekTo.mockImplementation(position => {
 			s.provider.api.getCurrentTime.mockReturnValue(position);
 		});

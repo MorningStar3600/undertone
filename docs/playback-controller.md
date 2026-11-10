@@ -114,13 +114,13 @@ configurable interval 50 ms), 0.3 s drift detection, 0.1 s release band, 1 s rou
 0.1 s paused-anchor/slow-command tolerance. Drift must remain outside the release band for at least
 one sample interval after detection before correction, in the same direction; an isolated noisy sample
 or oscillating sample direction cannot trigger a routine seek.
-An additional fine correction catches residuals above 50 ms, no more often than every five seconds
-after the previous seek (or the configured routine cooldown, if longer). It requires two consecutive
-same-direction samples separated by at least one tick; authority changes, buffering, small/alternating
-samples, and long sampling gaps reset that confirmation. The threshold grows with server-clock
-uncertainty and position-read latency, so those measurement limits alone do not trigger a fine seek.
-Already aligned playback is not sought every five seconds. Background timer throttling can delay
-this check; the interval is a correction cooldown, not a browser execution guarantee.
+Small residuals do not trigger a five-second seek. Live user feedback showed audible interruptions
+without reliable convergence from the previous 50 ms fine-correction policy. SDK position is not an
+audible-output timestamp, and a seek is not an exact instantaneous correction. The
+[YouTube API](https://developers.google.com/youtube/iframe_api_reference#seekTo) also documents
+keyframe-based seeking when the target segment has not already been downloaded. The controller
+keeps the ordinary substantial-drift policy and command/startup compensation; it does not promise
+to eliminate small audible offsets between independent YouTube players.
 Newly effective authority, generation startup and activation bypass the periodic throttle. Duplicates,
 ordinary ticks and provider telemetry do not. New authority supersedes work after its current awaited
 operation settles; cooperative play cancellation avoids waiting for the YouTube 4 s autoplay timeout.
@@ -177,7 +177,8 @@ identity. Neither awards music playback credit. Volume/captions/quality remain o
 Room visibility restoration, pageshow and window focus request a prompt measured reconciliation plus
 a rate-limited clock probe. A session timer gap over five seconds does the same. Resume preserves a
 still-fresh common server estimate and healthy provider, refreshes authority across SDK boundaries,
-and corrects actual residuals above 50 ms with the same uncertainty/read-latency guard as fine drift.
+and corrects actual residuals above the ordinary drift threshold (300 ms by default), enlarged by
+clock uncertainty and asynchronous position-read latency.
 It does not force a seek when already aligned. Lifecycle signals within one controller interval are
 coalesced; a seek consumes the check before provider callbacks to avoid buffering feedback loops.
 Expired/discontinuous clock samples still hold rendering until fresh calibration. No visibility gate

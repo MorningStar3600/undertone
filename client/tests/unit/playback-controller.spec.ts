@@ -421,7 +421,7 @@ describe("playback controller async ownership and local outcomes", () => {
 		s.controller.installSnapshot(snapshot(load({ isPlaying: false })));
 		await s.idle();
 		const a = s.adapters[0];
-		a.setPosition(9.92);
+		a.setPosition(9.4);
 		a.seek.mockImplementation(position => {
 			a.setPosition(position);
 			s.contexts[0].report({ type: "buffering" });
