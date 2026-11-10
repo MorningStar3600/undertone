@@ -213,6 +213,7 @@ pub enum MusicCommand {
     RequestPreview {
         request_id: String,
         intent: Intent,
+        reference: Reference,
     },
     Confirm(ConfirmationOffer),
     Cancel {
@@ -633,15 +634,18 @@ impl RoomState {
             MusicCommand::Settings(settings) if can.settings => {
                 json!({"action":"settings","settings":settings})
             }
-            MusicCommand::RequestPreview { request_id, intent }
-                if valid_id(&request_id, 128)
-                    && (if intent == Intent::Next {
-                        can.add_next
-                    } else {
-                        can.add_mix
-                    }) =>
+            MusicCommand::RequestPreview {
+                request_id,
+                intent,
+                reference: selected,
+            } if valid_id(&request_id, 128)
+                && (if intent == Intent::Next {
+                    can.add_next
+                } else {
+                    can.add_mix
+                }) =>
             {
-                let Some(reference) = preview.filter(|r| r.valid()) else {
+                let Some(reference) = preview.filter(|r| r.valid() && **r == selected) else {
                     self.status = Some(MusicStatus::Unavailable);
                     return None;
                 };
@@ -1001,7 +1005,8 @@ mod tests {
             r.prepare(
                 MusicCommand::RequestPreview {
                     request_id: "next".into(),
-                    intent: Intent::Next
+                    intent: Intent::Next,
+                    reference: reference.clone(),
                 },
                 Some(&reference),
                 0,
@@ -1014,7 +1019,8 @@ mod tests {
             r.prepare(
                 MusicCommand::RequestPreview {
                     request_id: "mix".into(),
-                    intent: Intent::Mix
+                    intent: Intent::Mix,
+                    reference: reference.clone(),
                 },
                 None,
                 0,
@@ -1036,6 +1042,7 @@ mod tests {
                 MusicCommand::RequestPreview {
                     request_id: "stable-request".into(),
                     intent: Intent::Mix,
+                    reference: reference.clone(),
                 },
                 Some(&reference),
                 0,

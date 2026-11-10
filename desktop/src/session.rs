@@ -19,9 +19,11 @@ pub enum NativeCommand {
     RefreshAccount,
     RefreshRoom,
     Music(MusicCommand),
-    PreviewUrl {
-        url: String,
+    SearchMusic {
+        input: String,
     },
+    /// Input edits revoke displayed results and cancel an outstanding search.
+    InvalidatePreview,
     LoadMoods {
         offset: usize,
     },
@@ -87,6 +89,12 @@ pub struct Preview {
     pub title: Option<String>,
     pub reference: Reference,
 }
+pub const MAX_PREVIEW_RESULTS: usize = 10;
+#[derive(Clone, Debug)]
+pub struct PreviewResults {
+    pub items: Vec<Preview>,
+    pub truncated: bool,
+}
 #[derive(Clone, Debug, Default)]
 pub struct NativeState {
     pub generation: u64,
@@ -101,7 +109,8 @@ pub struct NativeState {
     pub tags: Page<Mood>,
     pub tags_track_id: Option<String>,
     pub track_generation: u64,
-    pub preview: Option<Preview>,
+    pub preview: Option<PreviewResults>,
+    pub preview_generation: u64,
     pub created_mood: Option<Mood>,
     pub http_busy: bool,
     pub error: Option<NativeError>,
@@ -114,6 +123,7 @@ pub struct CommandAuthority {
     account: u64,
     socket: u64,
     track: u64,
+    preview: u64,
 }
 impl CommandAuthority {
     pub fn matches_session(self, state: &NativeState) -> bool {
@@ -123,6 +133,10 @@ impl CommandAuthority {
     }
     pub(crate) fn matches_native(self, state: &NativeState, command: &NativeCommand) -> bool {
         self.matches_session(state)
+            && (!matches!(
+                command,
+                NativeCommand::Music(MusicCommand::RequestPreview { .. })
+            ) || self.preview == state.preview_generation)
             && (!matches!(
                 command,
                 NativeCommand::SetTag { .. } | NativeCommand::LoadTrackMoods { .. }
@@ -136,6 +150,7 @@ impl NativeState {
             account: self.account_generation,
             socket: self.socket_generation,
             track: self.track_generation,
+            preview: self.preview_generation,
         }
     }
     pub fn can(&self) -> Can {
@@ -160,7 +175,22 @@ impl NativeState {
         self.tags = Page::default();
         self.tags_track_id = None;
         self.created_mood = None;
+        self.invalidate_preview();
+    }
+    pub(crate) fn invalidate_preview(&mut self) {
+        self.preview_generation = self.preview_generation.wrapping_add(1);
         self.preview = None;
+    }
+    pub(crate) fn preview_reference(&self, command: &MusicCommand) -> Option<&Reference> {
+        let MusicCommand::RequestPreview { reference, .. } = command else {
+            return None;
+        };
+        self.preview
+            .as_ref()?
+            .items
+            .iter()
+            .find(|p| &p.reference == reference)
+            .map(|p| &p.reference)
     }
     pub(crate) fn track_changed(&mut self) {
         if self.tags_track_id.as_deref() != self.room.track_id() {
@@ -271,7 +301,7 @@ pub(crate) enum RestKind {
     Login,
     Logout,
     Account,
-    Preview,
+    Preview(u64),
     Moods(usize),
     Favorites(usize),
     Tags(String, usize),
@@ -316,16 +346,17 @@ pub(crate) fn prepare(
         }
         NativeCommand::Logout => Ok((RestKind::Logout, auth(Method::POST, "user/logout")?)),
         NativeCommand::RefreshAccount => Ok((RestKind::Account, auth(Method::GET, "user/")?)),
-        NativeCommand::PreviewUrl { url } => {
+        NativeCommand::SearchMusic { input } => {
             if !state.can().add_mix {
                 return Err(NativeError::new(ErrorCode::Unavailable));
             }
-            if !valid_url(&url) {
+            let input = input.trim();
+            if input.is_empty() || input.len() > 2048 || input.chars().any(char::is_control) {
                 return Err(invalid());
             }
             Ok((
-                RestKind::Preview,
-                auth(Method::GET, "data/previewAdd")?.query(&[("input", url)]),
+                RestKind::Preview(state.preview_generation),
+                auth(Method::GET, "data/previewAdd")?.query(&[("input", input)]),
             ))
         }
         command => {
@@ -390,16 +421,6 @@ pub(crate) fn prepare(
         }
     }
 }
-fn valid_url(input: &str) -> bool {
-    input.len() <= 2048
-        && Url::parse(input).is_ok_and(|u| {
-            matches!(u.scheme(), "https" | "http")
-                && u.username().is_empty()
-                && u.password().is_none()
-                && u.host().is_some()
-        })
-}
-
 pub(crate) fn apply(
     state: &mut NativeState,
     kind: &RestKind,
@@ -417,22 +438,29 @@ pub(crate) fn apply(
                 expired: false,
             };
         }
-        RestKind::Preview => {
+        RestKind::Preview(generation) => {
+            if *generation != state.preview_generation {
+                return Err(NativeError::new(ErrorCode::Stale));
+            }
             let items = value["result"].as_array().ok_or_else(invalid)?;
-            // Collection/search results need selection UI, deliberately outside this scoped flow.
-            if items.len() != 1 {
-                return Err(NativeError::new(ErrorCode::Rejected));
+            let mut results = Vec::new();
+            for item in items.iter().take(MAX_PREVIEW_RESULTS) {
+                let reference: Reference =
+                    serde_json::from_value(item.get("originalReference").unwrap_or(item).clone())
+                        .map_err(|_| invalid())?;
+                if !reference.valid() {
+                    return Err(invalid());
+                }
+                results.push(Preview {
+                    title: item["title"]
+                        .as_str()
+                        .map(|s| s.chars().take(512).collect()),
+                    reference,
+                });
             }
-            let item = &items[0];
-            let reference: Reference =
-                serde_json::from_value(item.get("originalReference").unwrap_or(item).clone())
-                    .map_err(|_| invalid())?;
-            if !reference.valid() {
-                return Err(invalid());
-            }
-            state.preview = Some(Preview {
-                title: item["title"].as_str().map(str::to_owned),
-                reference,
+            state.preview = Some(PreviewResults {
+                items: results,
+                truncated: items.len() > MAX_PREVIEW_RESULTS,
             });
         }
         RestKind::Moods(offset) => merge_page(&mut state.moods, value, *offset)?,
@@ -616,23 +644,51 @@ mod tests {
         );
     }
     #[test]
-    fn preview_uses_original_reference_and_rejects_collections() {
+    fn preview_uses_original_reference_and_bounds_explicit_choices() {
         let mut state = NativeState::default();
-        apply(&mut state,&RestKind::Preview,json!({"success":true,"result":[{"service":"direct","id":"https://temporary.test/stream","title":"Tune","originalReference":{"service":"odysee","id":"original-id"}}]})).unwrap();
+        apply(&mut state,&RestKind::Preview(0),json!({"success":true,"result":[{"service":"direct","id":"https://temporary.test/stream","title":"Tune","originalReference":{"service":"odysee","id":"original-id"}}]})).unwrap();
         assert_eq!(
-            state.preview.unwrap().reference,
+            state.preview.as_ref().unwrap().items[0].reference,
             Reference {
                 service: "odysee".into(),
                 id: "original-id".into()
             }
         );
+        let items: Vec<_> = (0..20)
+            .map(|i| json!({"service":"youtube","id":i.to_string()}))
+            .collect();
+        apply(
+            &mut state,
+            &RestKind::Preview(0),
+            json!({"result":items,"highlighted":{"service":"youtube","id":"not-selected"}}),
+        )
+        .unwrap();
+        let results = state.preview.as_ref().unwrap();
+        assert_eq!(results.items.len(), MAX_PREVIEW_RESULTS);
+        assert!(results.truncated);
         assert!(
-            apply(
-                &mut NativeState::default(),
-                &RestKind::Preview,
-                json!({"result":[{},{}],"highlighted":{"service":"youtube","id":"not-selected"}})
-            )
-            .is_err()
+            results
+                .items
+                .iter()
+                .all(|p| p.reference.id != "not-selected")
+        );
+        state.invalidate_preview();
+        assert_eq!(
+            apply(&mut state, &RestKind::Preview(0), json!({"result":items}))
+                .unwrap_err()
+                .code,
+            ErrorCode::Stale
+        );
+        assert!(state.preview.is_none());
+        apply(&mut state, &RestKind::Preview(1), json!({"result":[]})).unwrap();
+        assert!(state.preview.as_ref().unwrap().items.is_empty());
+        state.invalidate_preview();
+        assert_eq!(apply(&mut state, &RestKind::Preview(2), json!({"result":[{
+            "service":"youtube", "id":"playback-fallback", "originalReference":{"service":"unknown","id":"invalid"}
+        }]})).unwrap_err().code, ErrorCode::InvalidResponse);
+        assert!(
+            state.preview.is_none(),
+            "invalid original metadata must not fall back to playback identity"
         );
     }
     #[test]

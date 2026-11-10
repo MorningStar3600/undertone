@@ -204,11 +204,11 @@ fn marker(work: HttpWork, s: &NativeState) -> String {
             .as_ref()
             .map(|m| m.id.clone())
             .unwrap_or_default(),
-        HttpWork::Preview => s
-            .preview
-            .as_ref()
-            .map(|p| format!("{}:{}", p.reference.service, p.reference.id))
-            .unwrap_or_default(),
+        HttpWork::Preview => format!(
+            "{}:{:?}",
+            s.preview_generation,
+            s.preview.as_ref().map(|p| p.items.len())
+        ),
         HttpWork::Identity => format!("{:?}:{}", pair(s), s.account.known),
     };
     format!("{value}:{:?}", s.error)
@@ -259,6 +259,18 @@ impl MusicUi {
                 InputEvent::Changed => {
                     p.music_ui.preview_valid = false;
                     p.music_ui.url_version += 1;
+                    if p.native.preview.is_some()
+                        || p.music_ui
+                            .pending_http
+                            .as_ref()
+                            .is_some_and(|pending| matches!(pending.work, HttpWork::Preview))
+                    {
+                        p.native_submit(
+                            p.music_ui.rendered_authority,
+                            NativeCommand::InvalidatePreview,
+                            None,
+                        );
+                    }
                 }
                 InputEvent::Submit => {
                     p.music_action(Action::Preview, p.music_ui.rendered_authority, w, cx)
@@ -724,12 +736,12 @@ impl Player {
             }
             Action::ResetDraft => self.music_ui.draft.read(&self.native, true),
             Action::Preview if free && can.add_mix => {
-                let url = self.music_ui.url.read(cx).value().trim().to_owned();
+                let input = self.music_ui.url.read(cx).value().trim().to_owned();
                 self.music_ui.preview_valid = false;
                 self.music_ui.preview_version = self.music_ui.url_version;
                 self.native_submit(
                     authority,
-                    NativeCommand::PreviewUrl { url },
+                    NativeCommand::SearchMusic { input },
                     Some(HttpWork::Preview),
                 );
             }
@@ -742,7 +754,7 @@ impl Player {
                         .native
                         .preview
                         .as_ref()
-                        .is_some_and(|p| p.reference == reference)
+                        .is_some_and(|p| p.items.iter().any(|p| p.reference == reference))
                     && (if intent == Intent::Next {
                         can.add_next
                     } else {
@@ -759,7 +771,11 @@ impl Player {
                 );
                 self.native_submit(
                     authority,
-                    NativeCommand::Music(MusicCommand::RequestPreview { request_id, intent }),
+                    NativeCommand::Music(MusicCommand::RequestPreview {
+                        request_id,
+                        intent,
+                        reference,
+                    }),
                     None,
                 );
             }
@@ -1223,31 +1239,48 @@ impl Player {
                 cx,
             ));
         if preview && let Some(value) = &self.native.preview {
-            panel = panel
-                .child(value.title.clone().unwrap_or_else(|| text("untitledTrack")))
-                .child(
-                    row()
-                        .child(self.button(
-                            "addMix",
-                            Action::Request(
-                                Intent::Mix,
-                                value.reference.clone(),
-                                self.music_ui.preview_version,
-                            ),
-                            ready && can.add_mix,
-                            cx,
-                        ))
-                        .child(self.button(
-                            "addNext",
-                            Action::Request(
-                                Intent::Next,
-                                value.reference.clone(),
-                                self.music_ui.preview_version,
-                            ),
-                            ready && can.add_next,
-                            cx,
-                        )),
+            if value.items.is_empty() {
+                panel = panel.child(label("musicSearchEmpty"));
+            } else {
+                panel = panel.child(label("musicSearchChoose"));
+            }
+            if value.truncated {
+                panel = panel.child(label("musicSearchLimited"));
+            }
+            for (index, value) in value.items.iter().enumerate() {
+                panel = panel.child(
+                    column()
+                        .id(("music-result", index))
+                        .child(value.title.clone().unwrap_or_else(|| text("untitledTrack")))
+                        .child(
+                            row()
+                                .child(self.action_button(
+                                    ("music-mix", index),
+                                    text("addMix"),
+                                    Action::Request(
+                                        Intent::Mix,
+                                        value.reference.clone(),
+                                        self.music_ui.preview_version,
+                                    ),
+                                    ready && can.add_mix,
+                                    false,
+                                    cx,
+                                ))
+                                .child(self.action_button(
+                                    ("music-next", index),
+                                    text("addNext"),
+                                    Action::Request(
+                                        Intent::Next,
+                                        value.reference.clone(),
+                                        self.music_ui.preview_version,
+                                    ),
+                                    ready && can.add_next,
+                                    false,
+                                    cx,
+                                )),
+                        ),
                 );
+            }
         }
         if let Some(offer) = &self.native.room.confirmation {
             panel = panel

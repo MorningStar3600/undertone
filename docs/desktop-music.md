@@ -1,8 +1,9 @@
 # Native desktop session/music integration
 
 `desktop/src/session.rs` and `music.rs` are native Rust state and commands. They do
-not use the player WebView. `main.rs` is deliberately unchanged for the UI owner.
-There are no server/common/client changes or new dependencies.
+not use the player WebView. Music search and result actions are in `ui_music.rs`;
+`main.rs`, `ui.rs` and `ui_widget.rs` are unchanged by the search fix. There are no
+provider/server changes or new dependencies. English labels use desktop-en.json.
 
 ## Integration API
 
@@ -32,18 +33,22 @@ connection.send_native(authority, NativeCommand::Music(MusicCommand::Preferences
     exclude: selected_exclude_ids,
     content: Content::Keep,
 }));
-connection.send_native(authority, NativeCommand::PreviewUrl { url });
-// Only after successful preview and an explicit user action. Generate a fresh ID
-// per new intent; retain the ID if offering that same intent after a new Join.
-connection.send_native(authority, NativeCommand::Music(MusicCommand::RequestPreview {
+connection.send_native(authority, NativeCommand::SearchMusic { input }); // title/artist or URL
+// Capture result_authority from the snapshot that rendered the chosen result.
+// Never resolve the latest result or manufacture fresh authority on click.
+connection.send_native(result_authority, NativeCommand::Music(MusicCommand::RequestPreview {
     request_id: stable_request_id,
     intent: Intent::Next, // reserves upcoming; does not interrupt playback
+    reference: displayed_result.reference.clone(),
 }));
+// On input edits, revoke results even before another query is submitted.
+connection.send_native(authority, NativeCommand::InvalidatePreview);
 ```
 
 `CommandAuthority` is captured from the snapshot that created the host or rendered
 control. Pass it unchanged to both send methods. Enqueue and dequeue reject a
-different room/account/socket; tag actions also reject a different track generation,
+different room/account/socket; result admission also rejects a different query/result
+generation, and tag actions reject a different track generation,
 even A -> B -> A. Playback hosts may survive track changes, but never identity or
 socket changes. Do not manufacture fresh authority when an old callback fires.
 
@@ -52,7 +57,8 @@ eight commands; check false and keep input for explicit retry. State is a bounde
 coalesced watch snapshot, not an event history. Consume `NativeState.error`,
 `http_busy`, `room.busy`, `room.status`, and `room.retry_available`. Never infer
 success from a true send return. Disable HTTP controls while `http_busy`; concurrent
-operations return Busy. Login/logout can supersede account reads/tag work, but an
+operations return Busy. A new music query or input edit cancels only pending search
+work. Login/logout can supersede account reads/tag/search work, but an
 in-flight login/logout cannot be superseded by another identity operation.
 
 `NativeState.can()` returns preferences/add_mix/add_next/settings/confirm/account_write.
@@ -71,10 +77,11 @@ Native commands (all fixed routes, no raw JSON/URL API):
 | SetTag { track_id, mood_id, active }                | PUT/DELETE own tag; marks tags stale on success                                            |
 | SetFavorite { mood_id, active }                     | PUT/DELETE own shortcut; marks favorites stale                                             |
 | CreateMood { name, icon_key }                       | created_mood and stale vocabulary; no implicit tag/favorite                                |
-| PreviewUrl { url }                                  | One preview with title and stable reference; multiple results rejected                     |
+| SearchMusic { input }                               | preview.items: up to ten results with title and stable reference; preview.truncated marks the cap |
+| InvalidatePreview                                   | Revokes result authority and cancels pending search on input edits                         |
 | Music(Preferences { include, exclude, content })    | Own room preferences, up to 100 UUIDs each, disjoint                                       |
 | Music(Settings(Settings { ... }))                   | Only fair_share/auto_admit_on_join/remove_departed_entries options                         |
-| Music(RequestPreview { request_id, intent })        | Uses the stored preview; no implicit library addition                                      |
+| Music(RequestPreview { request_id, intent, reference }) | Requires the displayed result's authority and exact stored reference; no implicit library addition |
 | Music(Confirm(offer))                               | Exact displayed offer handle from room.confirmation_offer(); rejects replacement           |
 | Music(Cancel { request_id })                        | Cancel own pending/reserved request                                                        |
 | Music(Queue { offset }), Music(Requests { offset }) | Separate queue/pending-only pages, 25 entries                                              |
@@ -168,16 +175,47 @@ are never cleared or migrated automatically. Mode enablement, replan/remove-entr
 controls, arbitrary provider selection, OAuth, personal library management and
 automatic pagination are outside this scoped API.
 
+## Native music search
+
+The Add music panel accepts a title/artist query or URL through the existing
+`GET /api/data/previewAdd?input=...` API. The server chooses its configured search
+provider; native code never invokes a provider directly. Input is trimmed, bounded
+to 2048 bytes and rejects control characters. Existing response/time limits apply.
+The first ten results are retained, in server order. Each row has its own Mix and
+Next actions; no first result, highlighted result or entire collection is admitted
+implicitly. Empty results have an explicit localized message; failures retain only
+the existing sanitized error and Retry-After. Unsupported/disabled provider search
+is reported through that existing error path.
+
+`originalReference` takes precedence over playback service/id (including adapter
+aliases and expiring stream URLs). For compatible older responses without it,
+service/id remains the fallback. An invalid supplied original reference fails the
+response rather than silently choosing playback metadata. Selection binds the
+exact reference plus the query generation captured by `CommandAuthority`. A new
+query, input edit, room/grant loss, disconnect or account transition revokes older
+result authority. Queued old choices fail again at dequeue; delayed HTTP work is
+cancelled and generation checked before application. A rejected busy operation
+cannot leave an otherwise successful search marked failed.
+
+Music-only membership and live add/order grants remain required for both search
+and admission. A legacy room keeps the existing clear Music-room requirement;
+search never converts the room or changes its queue mode. Generate a fresh request
+ID for each explicit choice; the existing explicit retry retains that choice's
+request ID/reference and permission checks.
+
 ## Verification
 
-Only no-default-features library and isolated ephemeral loopback HTTP/WebSocket
-fixtures are used. Coverage includes token retention/login/logout/401/429,
+No-default-features library and isolated ephemeral loopback HTTP/WebSocket
+fixtures cover token retention/login/logout/401/429,
 redaction, partial sync/identity ordering, guest/account routes and grants,
 correlations/revisions/uncertainty, exact confirmation, stable original preview
-references, partial-page unknown tags and replacement-track completion fencing.
+references, title/artist queries, multiple per-result selections, query/edit/room/
+account fencing, empty/failure/busy recovery, bounded results, partial-page unknown
+tags and replacement-track completion fencing.
 Existing playback bridge/IPC/transport tests remain applicable. No native GUI,
 browser, audio, running development service, database, Redis or real credential
-has been touched. Parent review and native UI wiring/build remain required.
+has been touched. Native compilation is checked separately when generated player
+assets and the Windows toolchain are available; parent independent review remains required.
 
 ## Floating widget integration
 

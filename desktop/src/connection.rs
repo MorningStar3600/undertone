@@ -209,6 +209,7 @@ impl Network {
                 native_state.send_modify(|s| {
                     s.connected = false;
                     s.http_busy = false;
+                    s.invalidate_preview();
                     s.error = Some(NativeError::new(ErrorCode::Network));
                 });
                 let _ = events
@@ -284,6 +285,7 @@ async fn run(
         // Keeping the future in this actor ensures abort/drop cancels all HTTP work too.
         let mut rest: Option<RestFuture> = None;
         let mut identity_busy = false;
+        let mut search_busy = false;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             let snapshot_deadline = snapshot
@@ -301,16 +303,27 @@ async fn run(
                     if !envelope.authority.matches_native(&state, &envelope.command) {
                         state.error = Some(NativeError::new(ErrorCode::Stale));
                     } else {
+                        if matches!(envelope.command, NativeCommand::SearchMusic { .. } | NativeCommand::InvalidatePreview) {
+                            state.invalidate_preview();
+                            // A new query/edit supersedes only search work, never account work.
+                            if search_busy {
+                                rest = None;
+                                state.http_busy = false;
+                                search_busy = false;
+                            }
+                        }
                         match envelope.command {
+                            NativeCommand::InvalidatePreview => { state.error = None; }
                             NativeCommand::RefreshRoom => {
                                 if rest.is_some() { state.error=Some(NativeError::new(ErrorCode::Busy)); state_events.send_replace(state.clone()); continue; }
                                 state.http_busy = false; state.socket_generation += 1;
-                                state.connected = false; state.room = state.room.refreshed(); state.preview=None;
+                                state.connected = false; state.room = state.room.refreshed(); state.invalidate_preview();
                                 state_events.send_replace(state.clone());
                                 continue 'reconnect;
                             }
                             NativeCommand::Music(command) if !state.account.expired && state.connected => {
-                                if let Some(message) = state.room.prepare(command,state.preview.as_ref().map(|p|&p.reference),state.account_generation,generation,state.socket_generation) {
+                                let reference = state.preview_reference(&command).cloned();
+                                if let Some(message) = state.room.prepare(command,reference.as_ref(),state.account_generation,generation,state.socket_generation) {
                                     socket.send(Message::Text(message.to_string().into())).await.map_err(|_|"connectionFailed")?;
                                 }
                             }
@@ -324,10 +337,10 @@ async fn run(
                                                 state.account_generation += 1; state.clear_private(); state.account.expired=true; state.connected=false; state.room=Default::default();
                                                 cache.update(|cache|cache.account=Default::default());
                                             }
-                                            if matches!(kind,RestKind::Preview) {state.preview=None;}
                                             session::start(&mut state,&kind);
                                             state.error=None; state.http_busy=true;
                                             identity_busy=kind.identity();
+                                            search_busy=matches!(kind,RestKind::Preview(_));
                                             let client=client.clone(); let base=base.clone(); let token=token.clone();
                                             let account=state.account_generation; let track=state.track_generation;
                                             rest=Some(Box::pin(async move {
@@ -347,7 +360,7 @@ async fn run(
                     state_events.send_replace(state.clone());
                 }
                 done = async { rest.as_mut().unwrap().await }, if rest.is_some() => {
-                    rest=None; state.http_busy=false; identity_busy=false;
+                    rest=None; state.http_busy=false; identity_busy=false; search_busy=false;
                     let identity=done.kind.identity();
                     if done.account==state.account_generation && done.result.as_ref().is_err_and(|e|e.code==ErrorCode::Auth) {
                         state.account_generation += 1;
@@ -363,6 +376,7 @@ async fn run(
                         session::finish(&mut state,&done.kind,result.is_err());
                         match result {
                             Ok(()) => {
+                                state.error=None;
                             cache.update(|cache| { cache.account=state.account.clone(); if matches!(done.kind,RestKind::Account) {cache.token=Some(token.clone());} });
                                 if identity || matches!(done.kind,RestKind::Account) {
                                     state.socket_generation += 1; state.connected=false; state.room=Default::default();
@@ -402,6 +416,10 @@ async fn run(
                             let message: Value = serde_json::from_str(&text).map_err(|_| "invalidTimeline")?;
                             if matches!(message["action"].as_str(),Some("sync"|"user"|"you"|"music-result")) {
                             state.room.project(&message,state.account_generation);
+                            if !state.can().add_mix && (state.preview.is_some() || search_busy) {
+                                state.invalidate_preview();
+                                if search_busy { rest=None; state.http_busy=false; search_busy=false; }
+                            }
                             if state.connected && state.account.logged_in && state.room.own_logged_in==Some(false) {
                                 state.account_generation+=1; state.clear_private(); state.account.expired=true;
                                 cache.update(|cache|cache.account=state.account.clone());
@@ -509,6 +527,31 @@ mod playback_fence_tests {
         assert!(connection.send(tag_authority, subscribe.clone()));
         playback_rx.try_recv().unwrap();
         assert!(connection.send_native(state.authority(), tag()));
+        native_rx.try_recv().unwrap();
+
+        let result_authority = state.authority();
+        let choose = || {
+            NativeCommand::Music(crate::music::MusicCommand::RequestPreview {
+                request_id: "selected-result".into(),
+                intent: crate::music::Intent::Mix,
+                reference: crate::music::Reference {
+                    service: "youtube".into(),
+                    id: "same-reference".into(),
+                },
+            })
+        };
+        assert!(connection.send_native(result_authority, choose()));
+        let queued_result = native_rx.try_recv().unwrap();
+        state.invalidate_preview();
+        publish.send_replace(state.clone());
+        // Even the same reference in a later query cannot revive a queued old choice.
+        assert!(
+            !queued_result
+                .authority
+                .matches_native(&state, &queued_result.command)
+        );
+        assert!(!connection.send_native(result_authority, choose()));
+        assert!(connection.send_native(state.authority(), choose()));
         native_rx.try_recv().unwrap();
 
         let previous_room = state.authority();

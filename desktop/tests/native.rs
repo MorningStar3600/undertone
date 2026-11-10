@@ -10,7 +10,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 use undertone_desktop::{
     bridge::RoomAddress,
     connection::{EventKind, Network},
-    music::{Content, MusicCommand},
+    music::{Content, Intent, MusicCommand, MusicStatus, Reference},
     session::{ErrorCode, NativeCommand, NativeState},
 };
 
@@ -96,6 +96,233 @@ async fn until(
     })
     .await
     .unwrap()
+}
+
+async fn search_socket(listener: &TcpListener, input: &str) -> TcpStream {
+    let (mut tcp, _) = listener.accept().await.unwrap();
+    let mut bytes = Vec::new();
+    while !bytes.ends_with(b"\r\n\r\n") {
+        let mut buf = [0; 2048];
+        let n = tcp.read(&mut buf).await.unwrap();
+        assert!(n > 0 && bytes.len() + n <= 8192);
+        bytes.extend_from_slice(&buf[..n]);
+    }
+    let head = String::from_utf8(bytes).unwrap();
+    let path = head.split_whitespace().nth(1).unwrap();
+    let url = url::Url::parse(&format!("http://fixture{path}")).unwrap();
+    assert!(head.starts_with("GET "));
+    assert_eq!(url.path(), "/prefix/api/data/previewAdd");
+    assert_eq!(
+        url.query_pairs().collect::<Vec<_>>(),
+        vec![("input".into(), input.into())]
+    );
+    assert!(
+        head.to_lowercase()
+            .contains("authorization: bearer dummy-retained-token")
+    );
+    tcp
+}
+
+async fn search_reply(tcp: &mut TcpStream, result: Value) {
+    let body = json!({"success":true,"result":result}).to_string();
+    // Superseded HTTP requests are cancelled, so a closed peer is expected for delayed replies.
+    let _ = tcp.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_search_selects_exact_results_and_fences_queries_edits_and_teardown() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let network = Network::new().unwrap();
+        let (events, _playback) = async_channel::bounded(8);
+        let c = network.connect(71, RoomAddress::parse(&format!("http://127.0.0.1:{port}/prefix/room/test")).unwrap(), events);
+        let mut native = c.subscribe_native();
+        request(&listener, "GET", "/prefix/api/auth/grant", "200 OK", r#"{"token":"dummy-retained-token"}"#, "").await;
+        let mut ws = socket(&listener, false).await;
+        ws.send(Message::Text(json!({"action":"sync","grants":[[0,40]]}).to_string().into())).await.unwrap();
+        until(&mut native, |s| s.can().add_next).await;
+
+        let search = |input: &str| NativeCommand::SearchMusic { input: input.into() };
+        let reference = |id: &str| Reference { service: "youtube".into(), id: id.into() };
+        let choose = |id: &str, intent| NativeCommand::Music(MusicCommand::RequestPreview {
+            request_id: format!("pick-{id}-{intent:?}"), intent, reference: reference(id),
+        });
+        assert!(c.send_native(c.native_state().authority(), search("Artist & title")));
+        let mut http = search_socket(&listener, "Artist & title").await;
+        let busy = until(&mut native, |s| s.http_busy).await;
+        assert!(c.send_native(busy.authority(), NativeCommand::RefreshRoom));
+        until(&mut native, |s| s.error.as_ref().is_some_and(|e| e.code == ErrorCode::Busy)).await;
+        search_reply(&mut http, json!([
+            {"title":"First", "service":"direct", "id":"https://temporary/first", "originalReference":{"service":"youtube","id":"first"}},
+            {"title":"Second", "service":"hls", "id":"https://temporary/second", "originalReference":{"service":"youtube","id":"second"}}
+        ])).await;
+        let results = until(&mut native, |s| s.preview.is_some() && !s.http_busy).await;
+        assert!(results.error.is_none(), "a rejected concurrent operation must not poison a successful search");
+        assert_eq!(results.preview.as_ref().unwrap().items.len(), 2);
+        // An arbitrary reference must never borrow the authority of a displayed result.
+        assert!(c.send_native(results.authority(), choose("not-in-results", Intent::Mix)));
+        until(&mut native, |s| s.room.status == Some(MusicStatus::Unavailable)).await;
+        for (id, intent) in [("second", Intent::Mix), ("first", Intent::Next)] {
+            assert!(c.send_native(results.authority(), choose(id, intent)));
+            let message: Value = serde_json::from_str(ws.next().await.unwrap().unwrap().to_text().unwrap()).unwrap();
+            let command = &message["request"]["command"];
+            assert_eq!(command["action"], "request");
+            assert_eq!(command["reference"], json!(reference(id)));
+            assert_eq!(command["intent"], json!(intent));
+            ws.send(Message::Text(json!({"action":"music-result","result":{"correlationId":command["correlationId"],"revision":1,"status":"applied"}}).to_string().into())).await.unwrap();
+            until(&mut native, |s| !s.room.busy && s.room.status == Some(MusicStatus::Applied)).await;
+        }
+
+        // New searches revoke old admission immediately and supersede an outstanding query.
+        assert!(c.send_native(results.authority(), search("older query")));
+        let mut older = search_socket(&listener, "older query").await;
+        let loading = until(&mut native, |s| s.http_busy && s.preview.is_none()).await;
+        assert!(!c.send_native(results.authority(), choose("second", Intent::Mix)));
+        assert!(c.send_native(loading.authority(), search("newer query")));
+        let mut newer = search_socket(&listener, "newer query").await;
+        search_reply(&mut newer, json!([])).await;
+        let empty = until(&mut native, |s| s.preview.as_ref().is_some_and(|p| p.items.is_empty()) && !s.http_busy).await;
+        search_reply(&mut older, json!([{"service":"youtube","id":"obsolete"}])).await;
+        assert!(c.send_native(empty.authority(), choose("obsolete", Intent::Mix)));
+        until(&mut native, |s| s.room.status == Some(MusicStatus::Unavailable)).await;
+
+        // Editing without submitting also cancels a pending query and revokes its results.
+        assert!(c.send_native(c.native_state().authority(), search("https://youtu.be/abcdefghijk")));
+        let mut edited = search_socket(&listener, "https://youtu.be/abcdefghijk").await;
+        let loading = until(&mut native, |s| s.http_busy).await;
+        assert!(c.send_native(loading.authority(), NativeCommand::InvalidatePreview));
+        until(&mut native, |s| !s.http_busy && s.preview.is_none() && s.preview_generation > loading.preview_generation).await;
+        search_reply(&mut edited, json!([{"service":"youtube","id":"edited"}])).await;
+
+        // Live room/grant loss cancels search and leaves the legacy room intact.
+        assert!(c.send_native(c.native_state().authority(), search("room teardown")));
+        let mut removed = search_socket(&listener, "room teardown").await;
+        until(&mut native, |s| s.http_busy).await;
+        ws.send(Message::Text(json!({"action":"sync","queueMode":"manual","music":null}).to_string().into())).await.unwrap();
+        let legacy = until(&mut native, |s| s.room.queue_mode.as_deref() == Some("manual") && !s.http_busy).await;
+        assert!(legacy.preview.is_none());
+        search_reply(&mut removed, json!([{"service":"youtube","id":"removed"}])).await;
+        assert!(c.send_native(legacy.authority(), search("legacy room query")));
+        let unavailable = until(&mut native, |s| s.error.as_ref().is_some_and(|e| e.code == ErrorCode::Unavailable)).await;
+        assert_eq!(unavailable.room.queue_mode.as_deref(), Some("manual"));
+        assert!(unavailable.preview.is_none());
+        assert!(tokio::time::timeout(Duration::from_millis(100), ws.next()).await.is_err(), "no rejected/stale selection or room conversion may escape");
+    }).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_search_failure_and_logout_clear_previous_results() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let network = Network::new().unwrap();
+        let (events, _playback) = async_channel::bounded(8);
+        let c = network.connect(
+            72,
+            RoomAddress::parse(&format!("http://127.0.0.1:{port}/prefix/room/test")).unwrap(),
+            events,
+        );
+        let mut native = c.subscribe_native();
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/auth/grant",
+            "200 OK",
+            r#"{"token":"dummy-retained-token"}"#,
+            "",
+        )
+        .await;
+        let _ws = socket(&listener, false).await;
+        let original = until(&mut native, |s| s.can().add_mix).await;
+        assert!(c.send_native(
+            original.authority(),
+            NativeCommand::SearchMusic {
+                input: "song".into()
+            }
+        ));
+        let mut http = search_socket(&listener, "song").await;
+        search_reply(&mut http, json!([{"service":"youtube","id":"stable"}])).await;
+        let displayed = until(&mut native, |s| s.preview.is_some() && !s.http_busy).await;
+        assert!(c.send_native(
+            displayed.authority(),
+            NativeCommand::SearchMusic {
+                input: "failure".into()
+            }
+        ));
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/data/previewAdd?input=failure",
+            "429 Too Many Requests",
+            r#"{"error":"private-provider-url"}"#,
+            "Retry-After: 7\r\n",
+        )
+        .await;
+        let failed = until(&mut native, |s| {
+            s.error
+                .as_ref()
+                .is_some_and(|e| e.code == ErrorCode::RateLimit)
+        })
+        .await;
+        assert!(failed.preview.is_none());
+        assert!(!failed.http_busy);
+        assert_eq!(failed.error.unwrap().retry_after_seconds, Some(7));
+        assert!(!format!("{:?}", c.native_state()).contains("private-provider-url"));
+        assert!(c.send_native(
+            c.native_state().authority(),
+            NativeCommand::SearchMusic {
+                input: "pending".into()
+            }
+        ));
+        let mut pending = search_socket(&listener, "pending").await;
+        let loading = until(&mut native, |s| s.http_busy).await;
+        assert!(c.send_native(loading.authority(), NativeCommand::Logout));
+        let cleared = until(&mut native, |s| {
+            s.account_generation > loading.account_generation
+        })
+        .await;
+        assert!(cleared.preview.is_none());
+        search_reply(
+            &mut pending,
+            json!([{"service":"youtube","id":"old-account"}]),
+        )
+        .await;
+        request(
+            &listener,
+            "POST",
+            "/prefix/api/user/logout",
+            "200 OK",
+            r#"{"success":true}"#,
+            "",
+        )
+        .await;
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/user/",
+            "200 OK",
+            r#"{"loggedIn":false}"#,
+            "",
+        )
+        .await;
+        let _fresh = socket(&listener, false).await;
+        let refreshed = until(&mut native, |s| s.socket_generation == 1 && s.room.active()).await;
+        assert!(refreshed.preview.is_none());
+        assert!(!c.send_native(
+            displayed.authority(),
+            NativeCommand::Music(MusicCommand::RequestPreview {
+                request_id: "old-account".into(),
+                intent: Intent::Mix,
+                reference: Reference {
+                    service: "youtube".into(),
+                    id: "stable".into()
+                },
+            })
+        ));
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
