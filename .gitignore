@@ -5,6 +5,8 @@ node_modules
 /logs
 /ts-out
 /target
+/desktop/target/
+/desktop/generated/
 .eslintcache
 
 # Playwright test artifacts
