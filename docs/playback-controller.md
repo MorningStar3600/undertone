@@ -114,6 +114,13 @@ configurable interval 50 ms), 0.3 s drift detection, 0.1 s release band, 1 s rou
 0.1 s paused-anchor/slow-command tolerance. Drift must remain outside the release band for at least
 one sample interval after detection before correction, in the same direction; an isolated noisy sample
 or oscillating sample direction cannot trigger a routine seek.
+An additional fine correction catches residuals above 50 ms, no more often than every five seconds
+after the previous seek (or the configured routine cooldown, if longer). It requires two consecutive
+same-direction samples separated by at least one tick; authority changes, buffering, small/alternating
+samples, and long sampling gaps reset that confirmation. The threshold grows with server-clock
+uncertainty and position-read latency, so those measurement limits alone do not trigger a fine seek.
+Already aligned playback is not sought every five seconds. Background timer throttling can delay
+this check; the interval is a correction cooldown, not a browser execution guarantee.
 Newly effective authority, generation startup and activation bypass the periodic throttle. Duplicates,
 ordinary ticks and provider telemetry do not. New authority supersedes work after its current awaited
 operation settles; cooperative play cancellation avoids waiting for the YouTube 4 s autoplay timeout.
@@ -197,21 +204,21 @@ verified separately.
 different local monotonic origins, a shared simulated server time estimate, delayed event delivery,
 and delayed SDK readiness/position/seek/play operations. It performs no network or browser actions.
 
-- A play effective at server-relative ms 1 and delivered at ms 15 issues the receiver's play at receipt
-  with no added controller polling delay, seeking to anchor + 0.014 s at rate 1 (0.028 s at rate 2).
-- Pause delayed 140 ms stops on receipt and realigns both providers to the fixed pause anchor; two
-  seconds paused adds no media time. Resume delayed 150 ms again projects to the common server time.
-- A future pause effective at ms 123 is applied by both clients at ms 123, between periodic ticks,
-  with no early pause. In the real session, a future play at ms 123 also runs before its 250 ms tick.
-- Startup delayed 80 ms seeks to anchor + 0.080 s. An additional 400 ms seek delay and 150 ms play
-  delay are measured and compensated with two bounded catch-ups, bringing the simulated positions
-  together. A 40 ms position read and delayed explicit seek likewise use the projection at completion.
-- A 0.6 s sustained offset is corrected after two 250 ms samples, within 500 ms of the injected offset
-  in the fixture. Alternating 450 ms/20 ms or +450 ms/-450 ms sampling noise causes no extra seeks.
-  Continuous injected drift cannot cause routine correction seeks more often than once per second.
-- New pause received while play waits 4 s cancels play and issues pause at receipt in both clients;
-  pending replacement cancels the old generation before starting its successor. Neither late work nor
-  seek-induced buffering starts another audible instance or repeatedly sends play/rate commands.
+-   A play effective at server-relative ms 1 and delivered at ms 15 issues the receiver's play at receipt
+    with no added controller polling delay, seeking to anchor + 0.014 s at rate 1 (0.028 s at rate 2).
+-   Pause delayed 140 ms stops on receipt and realigns both providers to the fixed pause anchor; two
+    seconds paused adds no media time. Resume delayed 150 ms again projects to the common server time.
+-   A future pause effective at ms 123 is applied by both clients at ms 123, between periodic ticks,
+    with no early pause. In the real session, a future play at ms 123 also runs before its 250 ms tick.
+-   Startup delayed 80 ms seeks to anchor + 0.080 s. An additional 400 ms seek delay and 150 ms play
+    delay are measured and compensated with two bounded catch-ups, bringing the simulated positions
+    together. A 40 ms position read and delayed explicit seek likewise use the projection at completion.
+-   A 0.6 s sustained offset is corrected after two 250 ms samples, within 500 ms of the injected offset
+    in the fixture. Alternating 450 ms/20 ms or +450 ms/-450 ms sampling noise causes no extra seeks.
+    Continuous injected drift cannot cause routine correction seeks more often than once per second.
+-   New pause received while play waits 4 s cancels play and issues pause at receipt in both clients;
+    pending replacement cancels the old generation before starting its successor. Neither late work nor
+    seek-induced buffering starts another audible instance or repeatedly sends play/rate commands.
 
 These are simulation observations with an exact injected clock and cooperative provider, not live
 audible-output bounds. Production clock estimates have uncertainty, SDK position reads may be cached

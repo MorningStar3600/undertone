@@ -51,6 +51,7 @@ function client(
 		playMs?: number;
 		readMs?: number;
 		offsetMs?: number;
+		uncertaintyMs?: number;
 	} = {},
 ) {
 	const calls: { type: string; at: number; position?: number }[] = [];
@@ -98,7 +99,7 @@ function client(
 				generation: 1,
 				sampleCount: 1,
 				pendingProbeCount: 0,
-				uncertaintyMs: 0,
+				uncertaintyMs: options.uncertaintyMs ?? 0,
 				sampleAgeMs: 0,
 				roundTripMs: 0,
 			}),
@@ -382,6 +383,91 @@ describe("two-client authoritative timing simulation", () => {
 		expect(b.playing).toBe(false);
 		expect(a.maxLive).toBe(1);
 		expect(b.maxLive).toBe(1);
+	});
+
+	it.each([true, false])(
+		"settles rapid control bursts to the final playing=%s intent",
+		async finalPlaying => {
+			const a = client({ playMs: 180 });
+			const b = client({ playMs: 450, offsetMs: 90_000 });
+			a.controller.installSnapshot(snapshot(false));
+			b.controller.installSnapshot(snapshot(false));
+			await flush();
+			for (let i = 0; i < (finalPlaying ? 41 : 40); i++) {
+				await advance(30);
+				const control = event(i % 2 === 0 ? "play" : "pause", i + 2, 1_000 + Date.now());
+				a.controller.acceptEvent(control);
+				b.deliver(control, 14);
+			}
+			await advance(5_000);
+			expect(a.playing).toBe(finalPlaying);
+			expect(b.playing).toBe(finalPlaying);
+			// Paused anchors below the correction tolerance can differ by delivery latency.
+			expect(Math.abs(b.position() - a.position())).toBeLessThan(0.05);
+			expect(a.controller.getStatus().code).toBe(finalPlaying ? "playing" : "paused");
+			expect(b.controller.getStatus().code).toBe(finalPlaying ? "playing" : "paused");
+			expect(a.maxLive).toBe(1);
+			expect(b.maxLive).toBe(1);
+			const resume = event("play", finalPlaying ? 43 : 42, 1_000 + Date.now());
+			a.controller.acceptEvent(resume);
+			b.deliver(resume, 14);
+			await advance(1_000);
+			expect(b.position()).toBeCloseTo(a.position(), 9);
+		},
+	);
+
+	it.each([true, false])(
+		"corrects a persistent 80ms residual on the five-second check (playing=%s)",
+		async playing => {
+			const a = client();
+			const b = client();
+			a.controller.installSnapshot(snapshot(playing));
+			b.controller.installSnapshot(snapshot(playing));
+			await advance(1_000);
+			b.jump(-0.08);
+			await advance(3_999);
+			expect(a.position() - b.position()).toBeCloseTo(0.08, 9);
+			await advance(1);
+			expect(b.position()).toBeCloseTo(a.position(), 9);
+			expect(b.calls.filter(call => call.type === "seek")).toHaveLength(2);
+			await advance(10_000);
+			expect(b.calls.filter(call => call.type === "seek")).toHaveLength(2);
+		},
+	);
+
+	it("bounds repeated fine corrections and ignores alternating sampling noise", async () => {
+		const b = client();
+		b.controller.installSnapshot(snapshot(true));
+		await flush();
+		for (let i = 0; i < 48; i++) {
+			b.noise(i % 2 === 0 ? 0.08 : -0.08);
+			await advance(250);
+		}
+		expect(b.calls.filter(call => call.type === "seek")).toHaveLength(1);
+		b.noise(0);
+		for (let i = 0; i < 48; i++) {
+			b.jump(-0.06);
+			await advance(250);
+			// Keep a small residual instead of accumulating into the fast drift policy.
+			b.jump(10 + Date.now() / 1_000 - b.position());
+		}
+		const seeks = b.calls.filter(call => call.type === "seek").slice(1);
+		expect(seeks.length).toBeGreaterThanOrEqual(2);
+		for (let i = 1; i < seeks.length; i++) {
+			expect(seeks[i].at - seeks[i - 1].at).toBeGreaterThanOrEqual(5_000);
+		}
+	});
+
+	it("does not treat clock uncertainty or slow position sampling as fine drift", async () => {
+		const uncertain = client({ uncertaintyMs: 120 });
+		const slow = client({ readMs: 80 });
+		uncertain.controller.installSnapshot(snapshot(true));
+		slow.controller.installSnapshot(snapshot(true));
+		await advance(1_000);
+		uncertain.jump(-0.08);
+		await advance(15_000);
+		expect(uncertain.calls.filter(call => call.type === "seek")).toHaveLength(1);
+		expect(slow.calls.filter(call => call.type === "seek")).toHaveLength(1);
 	});
 
 	it("cancels pending play before a replacement surface becomes audible", async () => {
