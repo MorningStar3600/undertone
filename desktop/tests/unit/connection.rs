@@ -146,8 +146,14 @@ async fn temporary_guest_auth_and_playback_only_transport_with_local_fixture() {
     assert!(
         matches!(event.kind, EventKind::Message(ref value) if value["action"] == "playback-capabilities")
     );
-    assert!(!connection.send(json!({"action":"auth","token":"attempt"})));
-    assert!(connection.send(json!({"action":"playback-subscribe","version":1,"nonce":"fixture"})));
+    assert!(!connection.send(
+        connection.native_state().authority(),
+        json!({"action":"auth","token":"attempt"})
+    ));
+    assert!(connection.send(
+        connection.native_state().authority(),
+        json!({"action":"playback-subscribe","version":1,"nonce":"fixture"})
+    ));
     let event = receiver.recv().await.unwrap();
     assert!(
         matches!(event.kind, EventKind::Message(ref value) if value["action"] == "playback-snapshot")

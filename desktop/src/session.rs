@@ -106,7 +106,38 @@ pub struct NativeState {
     pub http_busy: bool,
     pub error: Option<NativeError>,
 }
+
+/// Capture from the state that produced a control or host, never at send time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommandAuthority {
+    generation: u64,
+    account: u64,
+    socket: u64,
+    track: u64,
+}
+impl CommandAuthority {
+    pub fn matches_session(self, state: &NativeState) -> bool {
+        self.generation == state.generation
+            && self.account == state.account_generation
+            && self.socket == state.socket_generation
+    }
+    pub(crate) fn matches_native(self, state: &NativeState, command: &NativeCommand) -> bool {
+        self.matches_session(state)
+            && (!matches!(
+                command,
+                NativeCommand::SetTag { .. } | NativeCommand::LoadTrackMoods { .. }
+            ) || self.track == state.track_generation)
+    }
+}
 impl NativeState {
+    pub fn authority(&self) -> CommandAuthority {
+        CommandAuthority {
+            generation: self.generation,
+            account: self.account_generation,
+            socket: self.socket_generation,
+            track: self.track_generation,
+        }
+    }
     pub fn can(&self) -> Can {
         let mut can = self.room.can();
         can.account_write =

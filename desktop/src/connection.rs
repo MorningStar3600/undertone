@@ -1,6 +1,7 @@
 use crate::bridge::{Ipc, MAX_MESSAGE, RoomAddress, allowed_outbound};
 use crate::session::{
-    self, ErrorCode, NativeCommand, NativeError, NativeState, RestKind, SessionCache,
+    self, CommandAuthority, ErrorCode, NativeCommand, NativeError, NativeState, RestKind,
+    SessionCache,
 };
 use async_channel::Sender;
 use futures_util::{SinkExt, StreamExt};
@@ -67,24 +68,18 @@ pub struct Connection {
 }
 
 struct PlaybackEnvelope {
-    account: u64,
-    socket: u64,
+    authority: CommandAuthority,
     message: Value,
 }
 
 impl PlaybackEnvelope {
     fn current(&self, state: &NativeState) -> bool {
-        state.connected
-            && !state.account.expired
-            && self.account == state.account_generation
-            && self.socket == state.socket_generation
+        state.connected && !state.account.expired && self.authority.matches_session(state)
     }
 }
 
 struct NativeEnvelope {
-    account: u64,
-    socket: u64,
-    track: u64,
+    authority: CommandAuthority,
     command: NativeCommand,
 }
 
@@ -102,27 +97,21 @@ impl CacheLease {
 }
 
 impl Connection {
-    pub fn send(&self, message: Value) -> bool {
+    pub fn send(&self, authority: CommandAuthority, message: Value) -> bool {
         let state = self.native.borrow();
-        let envelope = PlaybackEnvelope {
-            account: state.account_generation,
-            socket: state.socket_generation,
-            message,
-        };
+        let envelope = PlaybackEnvelope { authority, message };
         envelope.current(&state)
             && allowed_outbound(&envelope.message)
             && self.sender.try_send(envelope).is_ok()
     }
     /// A separate native queue; never callable by WebView IPC.
-    pub fn send_native(&self, command: NativeCommand) -> bool {
+    pub fn send_native(&self, authority: CommandAuthority, command: NativeCommand) -> bool {
         let state = self.native.borrow();
+        if !authority.matches_native(&state, &command) {
+            return false;
+        }
         self.native_sender
-            .try_send(NativeEnvelope {
-                account: state.account_generation,
-                socket: state.socket_generation,
-                track: state.track_generation,
-                command,
-            })
+            .try_send(NativeEnvelope { authority, command })
             .is_ok()
     }
     /// Coalesced snapshots are bounded and contain no bearer/password/raw REST payload.
@@ -304,8 +293,7 @@ async fn run(
                 }
                 command = native.recv() => {
                     let Some(envelope) = command else { return Ok(()); };
-                    if envelope.account != state.account_generation || envelope.socket != state.socket_generation
-                        || (matches!(envelope.command,NativeCommand::SetTag{..}|NativeCommand::LoadTrackMoods{..}) && envelope.track != state.track_generation) {
+                    if !envelope.authority.matches_native(&state, &envelope.command) {
                         state.error = Some(NativeError::new(ErrorCode::Stale));
                     } else {
                         match envelope.command {
@@ -449,18 +437,93 @@ type RestFuture = std::pin::Pin<Box<dyn std::future::Future<Output = RestComplet
 mod playback_fence_tests {
     use super::*;
 
+    #[tokio::test]
+    async fn caller_authority_is_preserved_at_enqueue_and_dequeue() {
+        let mut state = NativeState {
+            generation: 7,
+            connected: true,
+            ..NativeState::default()
+        };
+        let original = state.authority();
+        let (publish, native) = watch::channel(state.clone());
+        let (sender, mut playback_rx) = mpsc::channel(32);
+        let (native_sender, mut native_rx) = mpsc::channel(8);
+        let task = tokio::spawn(std::future::pending::<()>());
+        let connection = Connection {
+            sender,
+            abort: task.abort_handle(),
+            native_sender,
+            native,
+        };
+        let subscribe = json!({"action":"playback-subscribe","version":1,"nonce":"fixture"});
+        assert!(connection.send(original, subscribe.clone()));
+        assert!(connection.send_native(original, NativeCommand::RefreshAccount));
+        let queued_playback = playback_rx.try_recv().unwrap();
+        let queued_native = native_rx.try_recv().unwrap();
+        state.account_generation += 1;
+        state.socket_generation += 1;
+        publish.send_replace(state.clone());
+        assert!(!queued_playback.current(&state));
+        assert!(
+            !queued_native
+                .authority
+                .matches_native(&state, &queued_native.command)
+        );
+        assert!(!connection.send(original, subscribe.clone()));
+        assert!(!connection.send_native(original, NativeCommand::Logout));
+        assert!(playback_rx.try_recv().is_err());
+        assert!(native_rx.try_recv().is_err());
+        assert!(connection.send(state.authority(), subscribe.clone()));
+        playback_rx.try_recv().unwrap();
+
+        let tag_authority = state.authority();
+        let tag = || NativeCommand::SetTag {
+            track_id: "00000000-0000-4000-8000-000000000001".into(),
+            mood_id: "00000000-0000-4000-8000-000000000002".into(),
+            active: true,
+        };
+        assert!(connection.send_native(tag_authority, tag()));
+        let queued_tag = native_rx.try_recv().unwrap();
+        // A -> B -> A still invalidates the original track action.
+        state.track_generation += 2;
+        publish.send_replace(state.clone());
+        assert!(
+            !queued_tag
+                .authority
+                .matches_native(&state, &queued_tag.command)
+        );
+        assert!(!connection.send_native(tag_authority, tag()));
+        assert!(!connection.send_native(
+            tag_authority,
+            NativeCommand::LoadTrackMoods {
+                track_id: "00000000-0000-4000-8000-000000000001".into(),
+                offset: 0,
+            }
+        ));
+        // A healthy playback host intentionally survives track replacement.
+        assert!(connection.send(tag_authority, subscribe.clone()));
+        playback_rx.try_recv().unwrap();
+        assert!(connection.send_native(state.authority(), tag()));
+        native_rx.try_recv().unwrap();
+
+        let previous_room = state.authority();
+        state.generation += 1;
+        publish.send_replace(state.clone());
+        assert!(!connection.send(previous_room, subscribe));
+        assert!(!connection.send_native(previous_room, NativeCommand::RefreshAccount));
+    }
+
     #[test]
     fn queued_playback_is_rejected_after_account_or_socket_replacement() {
-        let envelope = PlaybackEnvelope {
-            account: 3,
-            socket: 5,
-            message: json!({}),
-        };
         let mut state = NativeState {
             account_generation: 3,
             socket_generation: 5,
             connected: true,
             ..NativeState::default()
+        };
+        let envelope = PlaybackEnvelope {
+            authority: state.authority(),
+            message: json!({}),
         };
         assert!(envelope.current(&state));
         state.account_generation += 1;

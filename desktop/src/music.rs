@@ -214,7 +214,7 @@ pub enum MusicCommand {
         request_id: String,
         intent: Intent,
     },
-    Confirm,
+    Confirm(ConfirmationOffer),
     Cancel {
         request_id: String,
     },
@@ -225,6 +225,17 @@ pub enum MusicCommand {
         offset: usize,
     },
     Retry,
+}
+
+/// Opaque consent captured from the displayed server offer. Constructed only by RoomState.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfirmationOffer {
+    revision: u64,
+    request_id: String,
+    entry_id: String,
+    track_id: String,
+    intent: Intent,
+    conflicts: Vec<Conflict>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -367,6 +378,17 @@ struct Pending {
 }
 
 impl RoomState {
+    pub fn confirmation_offer(&self) -> Option<ConfirmationOffer> {
+        let offer = self.confirmation.as_ref().filter(|r| r.can_confirm())?;
+        Some(ConfirmationOffer {
+            revision: self.revision,
+            request_id: offer.request_id.clone(),
+            entry_id: offer.entry_id.clone(),
+            track_id: offer.track_id.clone(),
+            intent: offer.intent,
+            conflicts: offer.conflicts.clone(),
+        })
+    }
     /// Explicit same-account refresh cancels outstanding correlations, preserving only retry intent.
     pub(crate) fn refreshed(&self) -> Self {
         let retry = self
@@ -625,11 +647,11 @@ impl RoomState {
                 };
                 json!({"action":"request","requestId":request_id,"reference":reference,"intent":intent})
             }
-            MusicCommand::Confirm => {
-                let Some(offer) = self.confirmation.as_ref().filter(|r| r.can_confirm()) else {
+            MusicCommand::Confirm(offer) => {
+                if self.confirmation_offer().as_ref() != Some(&offer) {
                     self.status = Some(MusicStatus::InvalidConfirmation);
                     return None;
-                };
+                }
                 if !(if offer.intent == Intent::Next {
                     can.add_next
                 } else {
@@ -1041,11 +1063,14 @@ mod tests {
         let offer = json!({"requestId":"mine","entryId":"entry","trackId":mood.id,"intent":"mix","status":"pending",
             "conflicts":[{"participantId":"other","moodId":mood.id}],"conflictMetadata":[]});
         r.confirmation = Some(serde_json::from_value(offer.clone()).unwrap());
-        assert!(r.prepare(MusicCommand::Confirm, None, 0, 1, 0).is_none());
+        assert!(r.confirmation_offer().is_none());
         let mut full = offer;
         full["conflictMetadata"] = json!([{"participantId":"other","moodId":mood.id,"participantName":"Actual person","mood":{"id":mood.id,"name":"like","normalizedName":"like","iconKey":"heart"}}]);
         r.confirmation = Some(serde_json::from_value(full).unwrap());
-        let wire = r.prepare(MusicCommand::Confirm, None, 0, 1, 0).unwrap();
+        let accepted = r.confirmation_offer().unwrap();
+        let wire = r
+            .prepare(MusicCommand::Confirm(accepted), None, 0, 1, 0)
+            .unwrap();
         assert_eq!(
             wire["request"]["command"]["conflicts"],
             json!([{"participantId":"other","moodId":mood.id}])
@@ -1057,6 +1082,62 @@ mod tests {
             "new"
         );
         assert!(!r.can().confirm);
+    }
+
+    #[test]
+    fn confirmation_rejects_replaced_offer_and_revision() {
+        let mut r = room();
+        let mood = default_moods()[0].clone();
+        let offer = |request: &str, person: &str| {
+            json!({
+                "requestId":request,"entryId":"entry","trackId":mood.id,
+                "intent":"mix","status":"pending",
+                "conflicts":[{"participantId":person,"moodId":mood.id}],
+                "conflictMetadata":[{"participantId":person,"moodId":mood.id,
+                    "participantName":person,"mood":{"id":mood.id,"name":mood.name,
+                        "normalizedName":mood.normalized_name,"iconKey":mood.icon_key}}]
+            })
+        };
+        r.confirmation = Some(serde_json::from_value(offer("request-a", "person-a")).unwrap());
+        let accepted = r.confirmation_offer().unwrap();
+        let read = r
+            .prepare(MusicCommand::Requests { offset: 0 }, None, 0, 1, 0)
+            .unwrap();
+        // A real correlated pending-page result replaces the displayed offer.
+        r.result(
+            &json!({"correlationId":read["request"]["command"]["correlationId"],
+            "revision":r.revision,"status":"applied","page":{
+                "items":[offer("request-b", "person-b")],"total":1,"offset":0,"limit":25
+            }}),
+            0,
+        );
+        assert_eq!(r.confirmation.as_ref().unwrap().request_id, "request-b");
+        assert!(
+            r.prepare(MusicCommand::Confirm(accepted), None, 0, 1, 0)
+                .is_none()
+        );
+        assert_eq!(r.status, Some(MusicStatus::InvalidConfirmation));
+        assert!(!r.busy);
+        let accepted = r.confirmation_offer().unwrap();
+        r.revision += 1;
+        assert!(
+            r.prepare(MusicCommand::Confirm(accepted), None, 0, 1, 0)
+                .is_none()
+        );
+        assert_eq!(r.status, Some(MusicStatus::InvalidConfirmation));
+        let fresh = r.confirmation_offer().unwrap();
+        let wire = r
+            .prepare(MusicCommand::Confirm(fresh), None, 0, 1, 0)
+            .unwrap();
+        assert_eq!(wire["request"]["command"]["requestId"], "request-b");
+        assert_eq!(
+            wire["request"]["command"]["conflicts"][0]["participantId"],
+            "person-b"
+        );
+        // Uncertain confirmation is never retried without explicit fresh consent.
+        r.expire(Instant::now() + Duration::from_secs(21));
+        assert!(!r.retry_available);
+        assert!(r.prepare(MusicCommand::Retry, None, 0, 1, 0).is_none());
     }
     #[test]
     fn late_pages_cannot_replace_newer_sync_and_modes_gate_writes() {

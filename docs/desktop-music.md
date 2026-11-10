@@ -7,7 +7,7 @@ There are no server/common/client changes or new dependencies.
 ## Integration API
 
 Keep the existing `Network::connect(generation, address, playback_events)` and
-`Connection::send(Value)` playback transport. `EventKind` is unchanged. New APIs:
+`Connection::send(CommandAuthority, Value)` playback transport. `EventKind` is unchanged. New APIs:
 
 ```rust,ignore
 use undertone_desktop::session::NativeCommand;
@@ -15,29 +15,37 @@ use undertone_desktop::music::{MusicCommand, Content, Intent};
 
 let mut native = connection.subscribe_native(); // tokio::sync::watch::Receiver<NativeState>
 let initial = native.borrow_and_update().clone();
+// Capture in the originating control/host, not from a newer state at send time.
+let authority = initial.authority();
 // On the UI executor, without holding the watch borrow across an await:
 while native.changed().await.is_ok() {
     let state = native.borrow_and_update().clone();
     // Update native GPUI state only; check state.generation against the mounted room.
 }
-connection.send_native(NativeCommand::RefreshAccount);
-connection.send_native(NativeCommand::Login {
+connection.send_native(authority, NativeCommand::RefreshAccount);
+connection.send_native(authority, NativeCommand::Login {
     user: username,
     password, // move out of the UI password input and clear its display immediately
 });
-connection.send_native(NativeCommand::Music(MusicCommand::Preferences {
+connection.send_native(authority, NativeCommand::Music(MusicCommand::Preferences {
     include: selected_include_ids,
     exclude: selected_exclude_ids,
     content: Content::Keep,
 }));
-connection.send_native(NativeCommand::PreviewUrl { url });
+connection.send_native(authority, NativeCommand::PreviewUrl { url });
 // Only after successful preview and an explicit user action. Generate a fresh ID
 // per new intent; retain the ID if offering that same intent after a new Join.
-connection.send_native(NativeCommand::Music(MusicCommand::RequestPreview {
+connection.send_native(authority, NativeCommand::Music(MusicCommand::RequestPreview {
     request_id: stable_request_id,
     intent: Intent::Next, // reserves upcoming; does not interrupt playback
 }));
 ```
+
+`CommandAuthority` is captured from the snapshot that created the host or rendered
+control. Pass it unchanged to both send methods. Enqueue and dequeue reject a
+different room/account/socket; tag actions also reject a different track generation,
+even A -> B -> A. Playback hosts may survive track changes, but never identity or
+socket changes. Do not manufacture fresh authority when an old callback fires.
 
 `send_native` returns queue admission, not server success. The native inbox holds
 eight commands; check false and keep input for explicit retry. State is a bounded,
@@ -54,23 +62,23 @@ No UI strings, icons, artwork or fabricated durations are supplied here.
 
 Native commands (all fixed routes, no raw JSON/URL API):
 
-| Command | Result/state |
-| --- | --- |
-| Login { user, password }, Logout, RefreshAccount | AccountState, account_generation; fresh same-token socket on success |
-| RefreshRoom | Explicit same-token reconnect for full sync; socket_generation increments |
-| LoadMoods { offset }, LoadFavorites { offset } | moods/favorites pages (100 per HTTP page) |
-| LoadTrackMoods { track_id, offset } | tags page, only for the current catalogue track UUID |
-| SetTag { track_id, mood_id, active } | PUT/DELETE own tag; marks tags stale on success |
-| SetFavorite { mood_id, active } | PUT/DELETE own shortcut; marks favorites stale |
-| CreateMood { name, icon_key } | created_mood and stale vocabulary; no implicit tag/favorite |
-| PreviewUrl { url } | One preview with title and stable reference; multiple results rejected |
-| Music(Preferences { include, exclude, content }) | Own room preferences, up to 100 UUIDs each, disjoint |
-| Music(Settings(Settings { ... })) | Only fair_share/auto_admit_on_join/remove_departed_entries options |
-| Music(RequestPreview { request_id, intent }) | Uses the stored preview; no implicit library addition |
-| Music(Confirm) | Exact latest server-offered pairs, track ID and request ID |
-| Music(Cancel { request_id }) | Cancel own pending/reserved request |
-| Music(Queue { offset }), Music(Requests { offset }) | Separate queue/pending-only pages, 25 entries |
-| Music(Retry) | Explicit replay of saved intent with fresh correlation/revision, same request ID/reference |
+| Command                                             | Result/state                                                                               |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Login { user, password }, Logout, RefreshAccount    | AccountState, account_generation; fresh same-token socket on success                       |
+| RefreshRoom                                         | Explicit same-token reconnect for full sync; socket_generation increments                  |
+| LoadMoods { offset }, LoadFavorites { offset }      | moods/favorites pages (100 per HTTP page)                                                  |
+| LoadTrackMoods { track_id, offset }                 | tags page, only for the current catalogue track UUID                                       |
+| SetTag { track_id, mood_id, active }                | PUT/DELETE own tag; marks tags stale on success                                            |
+| SetFavorite { mood_id, active }                     | PUT/DELETE own shortcut; marks favorites stale                                             |
+| CreateMood { name, icon_key }                       | created_mood and stale vocabulary; no implicit tag/favorite                                |
+| PreviewUrl { url }                                  | One preview with title and stable reference; multiple results rejected                     |
+| Music(Preferences { include, exclude, content })    | Own room preferences, up to 100 UUIDs each, disjoint                                       |
+| Music(Settings(Settings { ... }))                   | Only fair_share/auto_admit_on_join/remove_departed_entries options                         |
+| Music(RequestPreview { request_id, intent })        | Uses the stored preview; no implicit library addition                                      |
+| Music(Confirm(offer))                               | Exact displayed offer handle from room.confirmation_offer(); rejects replacement           |
+| Music(Cancel { request_id })                        | Cancel own pending/reserved request                                                        |
+| Music(Queue { offset }), Music(Requests { offset }) | Separate queue/pending-only pages, 25 entries                                              |
+| Music(Retry)                                        | Explicit replay of saved intent with fresh correlation/revision, same request ID/reference |
 
 After a successful tag/favorite mutation explicitly reload its page at offset zero.
 For HTTP Load more use `page.next_offset()` only when `page.has_more()`. HTTP pages
@@ -105,7 +113,7 @@ generation filtering and discarding playback events already queued before a
 refresh. Network playback events carry `Event.authority = Some((account_generation,
 socket_generation))`; reject mismatches against the current native state before
 processing them. Local captured-host IPC uses `None`. Outbound playback messages
-also capture both generations and are discarded at dequeue after replacement;
+retain their caller-captured authority and reject replacement at enqueue and dequeue;
 identity transitions disable playback transport until fresh socket authority.
 Dropping Connection aborts its socket and HTTP future. Network owns one
 active room; connecting another aborts the previous connection.
@@ -121,8 +129,12 @@ pending at once; after 20 seconds mutation outcome is Uncertain, with explicit
 retry. RevisionConflict, SlotConflict, RequestConflict, SourceUnavailable,
 InvalidConfirmation, Rejected and NotFound remain distinct; no automatic replay.
 
-`Confirm` has no caller-supplied pairs. Missing authoritative participant names or
-mood details disables it. New server conflicts replace the previous offer. After
+`Confirm(offer)` requires the opaque handle from `room.confirmation_offer()` captured
+when rendering the confirmation. Retain it in the callback; never resolve the latest
+offer on click or at dequeue. It binds revision, request, entry, track, intent and
+exact conflict pairs. A changed offer returns InvalidConfirmation and requires fresh
+consent. Missing authoritative participant names or mood details disables it.
+New server conflicts replace the previous offer. After
 a newer public revision, explicitly reload pending requests before confirming.
 If that page has several offers, this scoped API exposes its first pending
 conflicted request; other requests remain visible/cancellable by ID.

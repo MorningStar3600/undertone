@@ -127,8 +127,19 @@ async fn same_token_login_logout_refresh_401_and_playback_privacy() {
             json!({"user":"fixture","password":"dummy-password"})
         );
         request(&listener,"GET","/prefix/api/user/","200 OK",r#"{"loggedIn":true,"username":"Fixture","discordLinked":false,"token":"must-not-project"}"#,"").await;
-        let second = socket(&listener, true).await;
+        let mut second = socket(&listener, true).await;
         drop(first);
+        let received: Value = serde_json::from_str(
+            tokio::time::timeout(Duration::from_secs(3), second.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .to_text()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(received["nonce"], "fresh-account");
         request(
             &listener,
             "POST",
@@ -177,16 +188,28 @@ async fn same_token_login_logout_refresh_401_and_playback_privacy() {
         events.clone(),
     );
     let mut native = connection.subscribe_native();
-    until(&mut native, |s| s.room.active()).await;
-    assert!(connection.send_native(NativeCommand::Login {
-        user: "fixture".into(),
-        password: "dummy-password".into()
-    }));
+    let original = until(&mut native, |s| s.room.active()).await.authority();
+    assert!(connection.send_native(
+        original,
+        NativeCommand::Login {
+            user: "fixture".into(),
+            password: "dummy-password".into()
+        }
+    ));
     let logged = until(&mut native, |s| {
         s.account.logged_in && s.socket_generation == 1 && s.room.active()
     })
     .await;
     assert!(logged.can().account_write);
+    assert!(!connection.send(
+        original,
+        json!({"action":"playback-subscribe","version":1,"nonce":"old-host"})
+    ));
+    assert!(!connection.send_native(original, NativeCommand::Logout));
+    assert!(connection.send(
+        logged.authority(),
+        json!({"action":"playback-subscribe","version":1,"nonce":"fresh-account"})
+    ));
     let projected = format!("{logged:?}");
     for secret in [
         "dummy-retained-token",
@@ -196,7 +219,7 @@ async fn same_token_login_logout_refresh_401_and_playback_privacy() {
     ] {
         assert!(!projected.contains(secret));
     }
-    assert!(connection.send_native(NativeCommand::Logout));
+    assert!(connection.send_native(connection.native_state().authority(), NativeCommand::Logout));
     until(&mut native, |s| {
         s.account.known && !s.account.logged_in && s.socket_generation == 2 && s.room.active()
     })
@@ -209,7 +232,10 @@ async fn same_token_login_logout_refresh_401_and_playback_privacy() {
     );
     let mut native = connection.subscribe_native();
     until(&mut native, |s| s.room.active()).await;
-    assert!(connection.send_native(NativeCommand::RefreshAccount));
+    assert!(connection.send_native(
+        connection.native_state().authority(),
+        NativeCommand::RefreshAccount
+    ));
     let expired = until(&mut native, |s| {
         s.error.as_ref().is_some_and(|e| e.code == ErrorCode::Auth)
     })
@@ -217,13 +243,14 @@ async fn same_token_login_logout_refresh_401_and_playback_privacy() {
     assert!(expired.account.expired);
     assert!(!expired.can().account_write);
     assert!(!expired.can().preferences);
-    assert!(
-        connection.send_native(NativeCommand::Music(MusicCommand::Preferences {
+    assert!(connection.send_native(
+        connection.native_state().authority(),
+        NativeCommand::Music(MusicCommand::Preferences {
             include: vec![],
             exclude: vec![],
             content: Content::Keep
-        }))
-    );
+        })
+    ));
     tokio::time::timeout(Duration::from_secs(8), fixture)
         .await
         .unwrap()
@@ -272,10 +299,13 @@ async fn sanitized_rate_limit_keeps_retry_after_and_never_raw_body() {
     );
     let mut native = connection.subscribe_native();
     until(&mut native, |s| s.room.active()).await;
-    assert!(connection.send_native(NativeCommand::Login {
-        user: "fixture".into(),
-        password: "dummy-password".into()
-    }));
+    assert!(connection.send_native(
+        connection.native_state().authority(),
+        NativeCommand::Login {
+            user: "fixture".into(),
+            password: "dummy-password".into()
+        }
+    ));
     let state = until(&mut native, |s| {
         s.error
             .as_ref()
@@ -374,19 +404,25 @@ async fn replaced_tag_reply(status: &'static str, expected: ErrorCode) {
     );
     let mut native = c.subscribe_native();
     until(&mut native, |s| s.room.active()).await;
-    assert!(c.send_native(NativeCommand::Login {
-        user: "fixture".into(),
-        password: "dummy-password".into()
-    }));
+    assert!(c.send_native(
+        c.native_state().authority(),
+        NativeCommand::Login {
+            user: "fixture".into(),
+            password: "dummy-password".into()
+        }
+    ));
     until(&mut native, |s| {
         s.account.logged_in && s.room.track_id() == Some(A)
     })
     .await;
-    assert!(c.send_native(NativeCommand::SetTag {
-        track_id: A.into(),
-        mood_id: B.into(),
-        active: true
-    }));
+    assert!(c.send_native(
+        c.native_state().authority(),
+        NativeCommand::SetTag {
+            track_id: A.into(),
+            mood_id: B.into(),
+            active: true
+        }
+    ));
     until(&mut native, |s| s.room.track_id() == Some(B)).await;
     changed.send(()).unwrap();
     let state = until(&mut native, |s| {
