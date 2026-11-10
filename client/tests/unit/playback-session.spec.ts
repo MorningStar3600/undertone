@@ -481,7 +481,21 @@ describe("client playback subscription and captured provider integration", () =>
 		});
 		expect(s.session.controller.getStatus().code).toBe("recovering");
 	});
-	it("resets on visibility/suspend resume, ignores old probes and waits for a fresh clock", async () => {
+	it("keeps a healthy provider through clock refresh and a throttled timer gap", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		await flush();
+		const player = s.bind();
+		await flush();
+		const surface = s.surfaces.surface.value;
+		s.session.refreshClock();
+		await s.tick(6_000);
+		expect(player.dispose).not.toHaveBeenCalled();
+		expect(s.surfaces.surface.value).toBe(surface);
+		expect(s.session.controller.getStatus().code).toBe("paused");
+	});
+	it("resets on explicit provider refresh and waits for a fresh clock", async () => {
 		const s = setup(true);
 		s.calibrate();
 		s.snapshot();

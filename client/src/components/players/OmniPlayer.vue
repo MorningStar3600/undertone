@@ -460,9 +460,7 @@ function onBuffering() {
 // (e.g. the user picked a speed from the native bar's menu), snap it back.
 function onNativeRateChange(rate: number) {
 	if (props.surface) {
-		props.surface.report({ type: "buffering" });
-		props.surface.report({ type: "resumed" });
-		props.surface.report({ type: "playback-change", isPlaying: controls.playing.value });
+		props.surface.report({ type: "rate-change", rate });
 		return;
 	}
 	if (

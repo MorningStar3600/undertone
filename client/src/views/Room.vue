@@ -497,7 +497,11 @@ export default defineComponent({
 				connection.connect(roomId);
 			},
 		);
-		const resumePlayback = () => playback.resume();
+		const resumePlayback = () => {
+			if (document.visibilityState === "visible") {
+				playback.refreshClock();
+			}
+		};
 		onMounted(() => {
 			document.addEventListener("visibilitychange", resumePlayback);
 			window.addEventListener("pageshow", resumePlayback);

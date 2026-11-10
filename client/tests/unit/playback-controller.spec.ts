@@ -650,7 +650,7 @@ describe("playback controller async ownership and local outcomes", () => {
 		expect(s.recoveries).toEqual([]);
 	});
 
-	it("reapplies position/rate/play after buffer resume; stale notifications do nothing", async () => {
+	it("corrects actual drift after buffer resume; stale notifications do nothing", async () => {
 		const s = setup();
 		s.controller.installSnapshot(snapshot(load()));
 		await s.idle();
@@ -661,14 +661,42 @@ describe("playback controller async ownership and local outcomes", () => {
 		s.contexts[0].report({ type: "resumed" });
 		await s.advance();
 		expect(s.adapters[0].seek).toHaveBeenLastCalledWith(13.25, s.contexts[0].signal);
-		expect(s.adapters[0].play).toHaveBeenCalledTimes(2);
-		expect(s.adapters[0].setRate).toHaveBeenCalledTimes(2);
+		expect(s.adapters[0].play).toHaveBeenCalledOnce();
+		expect(s.adapters[0].setRate).toHaveBeenCalledOnce();
 		s.controller.acceptEvent(load({ sequence: 2, occurrenceId: 2, effectiveAtMs: 4_250 }));
 		await s.advance();
 		s.contexts[0].report({ type: "error", error: "stale failure" });
 		s.contexts[0].report({ type: "buffering" });
 		expect(s.controller.getStatus().code).toBe("playing");
 		expect(s.controller.getStatus().scope?.occurrenceId).toBe(2);
+	});
+
+	it("does not turn seek-induced buffering into an endless correction loop", async () => {
+		const s = setup({
+			createAdapter: context => {
+				const adapter = fakeAdapter();
+				s.adapters.push(adapter);
+				adapter.seek.mockImplementation(position => {
+					adapter.setPosition(position);
+					context.report({ type: "buffering" });
+					queueMicrotask(() => {
+						context.report({ type: "resumed" });
+						context.report({ type: "playback-change", isPlaying: true });
+					});
+				});
+				return adapter;
+			},
+		});
+		s.controller.installSnapshot(snapshot(load()));
+		await s.idle();
+		for (let step = 1; step <= 24; step++) {
+			s.adapters[0].setPosition(10 + step * 0.25);
+			await s.advance();
+		}
+		expect(s.adapters[0].seek).toHaveBeenCalledOnce();
+		expect(s.adapters[0].setRate).toHaveBeenCalledOnce();
+		expect(s.adapters[0].pause).not.toHaveBeenCalled();
+		expect(s.controller.getStatus().code).toBe("playing");
 	});
 
 	it("uses drift tolerance, hysteresis and cooldown instead of repeated seeks", async () => {
@@ -688,6 +716,34 @@ describe("playback controller async ownership and local outcomes", () => {
 		s.adapters[0].setPosition(9);
 		await s.advance(1_500);
 		expect(s.adapters[0].seek).toHaveBeenCalledTimes(3);
+	});
+	it("corrects native rate changes without manufacturing buffering or seeking", async () => {
+		const s = setup();
+		s.controller.installSnapshot(snapshot(load()));
+		await s.idle();
+		s.contexts[0].report({ type: "rate-change", rate: 2 });
+		await s.advance();
+		expect(s.adapters[0].setRate).toHaveBeenCalledTimes(2);
+		expect(s.adapters[0].setRate).toHaveBeenLastCalledWith(1, s.contexts[0].signal);
+		expect(s.adapters[0].seek).toHaveBeenCalledOnce();
+		expect(s.adapters[0].play).toHaveBeenCalledOnce();
+		s.contexts[0].report({ type: "rate-change", rate: 1 });
+		await s.advance();
+		expect(s.adapters[0].setRate).toHaveBeenCalledTimes(2);
+	});
+	it("applies a pause received while buffering once the provider resumes", async () => {
+		const s = setup();
+		s.controller.installSnapshot(snapshot(load()));
+		await s.idle();
+		s.contexts[0].report({ type: "buffering" });
+		s.controller.acceptEvent(control("pause"));
+		await s.advance();
+		expect(s.adapters[0].pause).not.toHaveBeenCalled();
+		s.contexts[0].report({ type: "resumed" });
+		s.contexts[0].report({ type: "playback-change", isPlaying: true });
+		await s.advance();
+		expect(s.adapters[0].pause).toHaveBeenCalledOnce();
+		expect(s.controller.getStatus().code).toBe("paused");
 	});
 
 	it("holds unsupported rates locally without faking progress with seeks", async () => {

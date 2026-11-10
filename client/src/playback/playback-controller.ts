@@ -24,6 +24,7 @@ export interface PlaybackScope {
 export type PlaybackAdapterEvent =
 	| { type: "buffering" | "resumed" }
 	| { type: "playback-change"; isPlaying: boolean }
+	| { type: "rate-change"; rate: number }
 	| { type: "error"; error: unknown };
 
 export interface PlaybackAdapterContext extends PlaybackScope {
@@ -345,17 +346,18 @@ export function createPlaybackController<Source>(
 					} else if (event.type === "resumed") {
 						if (g.buffering) {
 							g.buffering = false;
-							alignment += 1;
-							g.playing = null;
-							g.rate = null;
+							// A seek can itself cause buffering. Measure drift after recovery
+							// instead of forcing another seek and starting that cycle again.
 							revision += 1;
 						}
+					} else if (event.type === "rate-change") {
+						g.rate = event.rate;
 					} else if (
 						event.type === "playback-change" &&
 						g.loaded &&
 						g.playing !== event.isPlaying
 					) {
-						g.playing = null;
+						g.playing = event.isPlaying;
 					}
 					tick();
 				},
@@ -459,15 +461,15 @@ export function createPlaybackController<Source>(
 			}
 			const localNow = options.now();
 			if (g.aligned !== alignment || (g.drifting && localNow - g.lastSeekMs >= cooldownMs)) {
-				const aligned = alignment;
+				// Reserve the correction before the SDK can synchronously report buffering.
+				// A failed seek tears down this generation; explicit later seeks advance alignment.
+				g.aligned = alignment;
+				g.lastSeekMs = localNow;
+				g.drifting = false;
 				await adapter.seek(state.positionSeconds, signal);
 				if (!current(g, version)) {
 					return;
 				}
-				g.aligned = aligned;
-				g.lastSeekMs = localNow;
-				// A successful correction enters the hysteresis release band.
-				g.drifting = false;
 			}
 			state = projection.state!;
 			if (g.playing !== state.isPlaying) {

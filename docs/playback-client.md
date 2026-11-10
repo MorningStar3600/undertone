@@ -56,8 +56,10 @@ Clock probes contain only generation and nonce; the estimator retains local send
 with subscription and repeat every five seconds. The client sends at most 16 new-protocol envelopes
 per ten seconds, reserving margin below the server's 20-envelope limit. A saturated/failed send never
 queues probe timestamps or commands. A 250 ms session tick observes stale estimates, controller
-reconciliation and position projection. Visibility/pageshow, a local scheduling gap above five
-seconds, auth and connection changes invalidate calibration. Rendering never falls back to wall time.
+reconciliation and position projection. Returning to a visible page or a scheduling gap above five
+seconds requests a rate-limited clock refresh without discarding a fresh estimate or the playing provider.
+Hiding the page does not reset playback. The clock estimator still rejects expired samples and clock
+discontinuities; auth and connection changes invalidate calibration. Rendering never falls back to wall time.
 
 `useRoomApi` routes play/pause/seek/rate/next through the selected session, covering bottom controls,
 keyboard and Media Session. Each intention receives a unique request ID and the effective state’s
@@ -117,6 +119,12 @@ node .yarn/releases/yarn-4.1.0.cjs workspace ott-client exec tsc --noEmit
 Build with `configFile:false`, `envFile:false`, `envDir:false`, `root:"client"` and the explicit plugins,
 aliases and static commit define from that test configuration; do not import the default Vite config.
 Scoped Biome, ESLint and Prettier checks apply.
+
+A bounded live YouTube check on 2026-11-10 reproduced seek/rate/play commands roughly every 275 ms:
+seek-triggered buffering was forcing another seek. After the recovery correction, the same browser
+advanced six seconds during a six-second observation with no new seek/play/pause/rate commands.
+Visibility preservation and delayed timer handling have regression coverage with simulated events;
+this check does not establish long-running playback under real background-tab throttling.
 
 These tests do not establish real browser autoplay permissions, streaming/iframe buffering behavior,
 provider network playback, Vimeo/PeerTube SDK behavior against live services, or Connected Music.

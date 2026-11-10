@@ -10,31 +10,31 @@ YouTube playback remains on its existing path and needs no new login.
 
 `createPlaybackController<Source>(options)` accepts:
 
-- `clock`: the existing server clock's `getEstimate()` interface.
-- `now()`: local monotonic milliseconds for scheduling/cooldowns only.
-- `resolveSource(publicMedia, context)`: sync or async resolution of separately authorized source
-  metadata. `Source` is adapter-owned and never becomes a timeline payload. For ordinary YouTube an
-  adapter can resolve the public ID directly. No source resolver URL or network envelope is assumed.
-- `createAdapter(context)`: synchronous creation of a silent, isolated provider instance. Context
-  includes public media, epoch, occurrence, local generation, an AbortSignal, and a captured `report`.
-- `onRecovery(recovery)`, optional `onStatus(status)`: synchronous, nonthrowing host callbacks. Status
-  codes are machine-facing; the integrating UI supplies localized messages. Reports contain public
-  scope, plus local errors that callers must sanitize before logging or forwarding.
-- Optional injected `scheduler` with asynchronous `setTimeout` and `clearTimeout`. Without it, the
-  caller owns periodic `tick()` calls. No global clock, DOM, network, or timers are accessed.
+-   `clock`: the existing server clock's `getEstimate()` interface.
+-   `now()`: local monotonic milliseconds for scheduling/cooldowns only.
+-   `resolveSource(publicMedia, context)`: sync or async resolution of separately authorized source
+    metadata. `Source` is adapter-owned and never becomes a timeline payload. For ordinary YouTube an
+    adapter can resolve the public ID directly. No source resolver URL or network envelope is assumed.
+-   `createAdapter(context)`: synchronous creation of a silent, isolated provider instance. Context
+    includes public media, epoch, occurrence, local generation, an AbortSignal, and a captured `report`.
+-   `onRecovery(recovery)`, optional `onStatus(status)`: synchronous, nonthrowing host callbacks. Status
+    codes are machine-facing; the integrating UI supplies localized messages. Reports contain public
+    scope, plus local errors that callers must sanitize before logging or forwarding.
+-   Optional injected `scheduler` with asynchronous `setTimeout` and `clearTimeout`. Without it, the
+    caller owns periodic `tick()` calls. No global clock, DOM, network, or timers are accessed.
 
 Methods:
 
-| Method | Responsibility |
-| --- | --- |
-| `installSnapshot(unknown): boolean` | Validate a trusted complete common timeline and start rendering when the clock is ready. |
-| `acceptEvent(unknown)` | Validate/accept through the common core; return `accepted`, `duplicate`, `stale`, or `rejected`. |
-| `tick()` | Observe clock changes, effective transitions and local drift; call after clock reply/reset and on the regular scheduling cadence. |
-| `userActivated()` | Retry a locally blocked play using the latest authoritative state. Call directly in the browser gesture handler. |
-| `retry()` | Explicitly recreate a failed adapter/resolver generation. No automatic failure retry occurs. |
-| `getStatus()` | Read local rendering status and scoped identity. |
-| `whenIdle()` | Observe the currently running worker; does not advance timers or await scheduled events. |
-| `dispose()` | Terminal, idempotent cancellation and teardown, including all owned timers. |
+| Method                              | Responsibility                                                                                                                    |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `installSnapshot(unknown): boolean` | Validate a trusted complete common timeline and start rendering when the clock is ready.                                          |
+| `acceptEvent(unknown)`              | Validate/accept through the common core; return `accepted`, `duplicate`, `stale`, or `rejected`.                                  |
+| `tick()`                            | Observe clock changes, effective transitions and local drift; call after clock reply/reset and on the regular scheduling cadence. |
+| `userActivated()`                   | Retry a locally blocked play using the latest authoritative state. Call directly in the browser gesture handler.                  |
+| `retry()`                           | Explicitly recreate a failed adapter/resolver generation. No automatic failure retry occurs.                                      |
+| `getStatus()`                       | Read local rendering status and scoped identity.                                                                                  |
+| `whenIdle()`                        | Observe the currently running worker; does not advance timers or await scheduled events.                                          |
+| `dispose()`                         | Terminal, idempotent cancellation and teardown, including all owned timers.                                                       |
 
 The transport must validate room identity, connection/request/snapshot identity, and explicit authority
 to switch epochs **before** calling `installSnapshot`. The controller rejects same-epoch receipt-cursor,
@@ -112,7 +112,7 @@ Tick/event storms only mark pending work; they do not run parallel reconciliatio
 pass starts per interval. Explicit tick owners must continue ticking when work is deferred by the
 interval. Provider callbacks must represent actual state changes, not continuously emitted telemetry.
 
-Initial alignment, authoritative seek, buffer recovery and activation retries force alignment. Routine
+Initial alignment, authoritative seek and activation retries force alignment. Routine
 position drift uses the detection/release bands and cooldown; it does not seek on every position read.
 Rate support is explicit: an unsupported desired rate pauses/holds locally and reports
 `unsupported-rate`. No play, rate setter, or correction seeks emulate that rate. A later supported rate
@@ -122,8 +122,11 @@ requested supported rate; the controller does not pretend a no-op setter works.
 `NotAllowedError` from play reports `autoplay-blocked` and suppresses automatic play/seek retries until
 activation (or authoritative paused state/new generation). Other current-generation failures report
 `error` with the occurrence scope and stop the adapter; only explicit `retry` or replacement recreates
-it. Buffering suppresses commands until `report({type: "resumed"})`, then position, rate and play/pause
-are reapplied. Use captured reports for `buffering`, `resumed`, `playback-change`, and `error`; route a
+it. Buffering suppresses commands until `report({type: "resumed"})`, then measured drift and the latest
+authoritative intent determine which corrections are needed. Recovery alone never forces another seek:
+seeks can themselves trigger buffering. Playback/rate observations retain actual provider state to avoid
+repeating successful commands. Use captured reports for `buffering`, `resumed`, `playback-change`,
+`rate-change`, and `error`; route a
 provider ready-after-buffer/remount notification appropriately. A physical remount needs a new adapter,
 through explicit snapshot/retry integration, rather than silently changing a captured instance.
 

@@ -611,8 +611,10 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 	}
 	const interval = setInterval(() => {
 		const time = now();
-		if (time - lastTick > 5_000 || time < lastTick) {
+		if (time < lastTick) {
 			resume();
+		} else if (time - lastTick > 5_000) {
+			refreshClock();
 		}
 		lastTick = time;
 		controller.tick();
@@ -627,6 +629,15 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 			}
 		}
 	}, 250);
+	function refreshClock() {
+		if (disposed) {
+			return;
+		}
+		// Visibility and timer throttling do not invalidate a still-fresh estimate.
+		// The estimator itself rejects expired samples and discontinuous clock readings.
+		controller.tick();
+		probe();
+	}
 	function resume() {
 		if (disposed) {
 			return;
@@ -647,6 +658,7 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 			return controller;
 		},
 		resume,
+		refreshClock,
 		command(intention: PlaybackIntention) {
 			if (mode === "legacy" && !disposed) {
 				return false;

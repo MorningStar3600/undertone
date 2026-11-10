@@ -457,6 +457,24 @@ describe("Room timeline with real OmniPlayer and mock YouTube SDK", () => {
 		s.unmount();
 		expect([...s.handlers.values()].every(handler => handler === null)).toBe(true);
 	});
+	it("preserves the provider when hiding, showing or restoring the page", async () => {
+		const s = await mountRoom(true);
+		const visibility = vi.spyOn(document, "visibilityState", "get");
+		try {
+			visibility.mockReturnValue("hidden");
+			document.dispatchEvent(new Event("visibilitychange"));
+			await flushPromises();
+			expect(s.provider.api.destroy).not.toHaveBeenCalled();
+			visibility.mockReturnValue("visible");
+			document.dispatchEvent(new Event("visibilitychange"));
+			window.dispatchEvent(new Event("pageshow"));
+			await flushPromises();
+			expect(s.provider.api.destroy).not.toHaveBeenCalled();
+			expect(providers).toHaveLength(1);
+		} finally {
+			visibility.mockRestore();
+		}
+	});
 	it("reconciles buffering and native-control remount without provider feedback room commands", async () => {
 		const s = await mountRoom();
 		s.connection.mockReset();
