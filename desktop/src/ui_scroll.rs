@@ -10,7 +10,7 @@ use std::{
 pub struct PanelScroll {
     pub handle: ScrollHandle,
     pub rendering: Cell<bool>,
-    controls: RefCell<HashMap<ElementId, (FocusHandle, bool)>>,
+    controls: RefCell<HashMap<(bool, ElementId), (FocusHandle, bool)>>,
     focused: RefCell<Option<FocusHandle>>,
     reveal: Rc<Cell<bool>>,
 }
@@ -30,7 +30,8 @@ impl PanelScroll {
     pub fn focus(&self, id: ElementId, cx: &App) -> FocusHandle {
         let mut controls = self.controls.borrow_mut();
         let (focus, seen) = controls
-            .entry(id)
+            // Summary recovery and panel recovery are distinct rendered instances.
+            .entry((self.rendering.get(), id))
             .or_insert_with(|| (cx.focus_handle().tab_stop(true), true));
         *seen = true;
         focus.clone()
