@@ -24,7 +24,7 @@ import {
 } from "./playback-controller";
 
 export type PlaybackIntention =
-	| { command: "play" | "pause" | "next" }
+	| { command: "play" | "pause" | "next" | "previous" }
 	| { command: "seek"; positionSeconds: number }
 	| { command: "rate"; rate: number };
 
@@ -140,6 +140,7 @@ const resultSchema = z
 				"stale-epoch",
 				"stale-occurrence",
 				"unauthorized",
+				"unavailable",
 				"failed",
 			])
 			.optional(),
@@ -355,9 +356,8 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 	function prunePending(state: PlaybackState | null) {
 		for (const [id, intention] of pending) {
 			if (
-				!state ||
 				intention.epoch !== timeline?.epoch ||
-				intention.occurrenceId !== state.occurrenceId
+				intention.occurrenceId !== (state?.occurrenceId ?? 0)
 			) {
 				pending.delete(id);
 			}
@@ -675,10 +675,11 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 			) {
 				return true;
 			}
-			const state = expectedPlaybackAt(
+			const projection = expectedPlaybackAt(
 				timeline,
 				Math.max(timeline.baseline.serverTimeMs, Math.floor(estimate.serverNowMs)),
-			).state;
+			);
+			const state = projection.state;
 			// A scheduled occurrence can become effective between projection ticks.
 			prunePending(state);
 			const grant =
@@ -686,19 +687,23 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 					? "playback.seek"
 					: intention.command === "rate"
 						? "playback.speed"
-						: intention.command === "next"
+						: intention.command === "next" || intention.command === "previous"
 							? "playback.skip"
 							: "playback.play-pause";
-			if (!state || !options.allowed(grant) || pending.size >= 64) {
+			if (
+				(!state && intention.command !== "previous") ||
+				!options.allowed(grant) ||
+				pending.size >= 64
+			) {
 				return true;
 			}
 			if (
-				intention.command === "next" &&
+				(intention.command === "next" || intention.command === "previous") &&
 				[...pending.values()].some(
 					value =>
-						value.command === "next" &&
+						(value.command === "next" || value.command === "previous") &&
 						value.epoch === timeline?.epoch &&
-						value.occurrenceId === state.occurrenceId,
+						value.occurrenceId === (state?.occurrenceId ?? 0),
 				)
 			) {
 				return true;
@@ -707,12 +712,15 @@ export function createPlaybackSession(options: PlaybackSessionOptions) {
 				...intention,
 				requestId: `${sessionId}-g${generation}-c${++serial}`,
 				epoch: timeline.epoch,
-				occurrenceId: state.occurrenceId,
+				occurrenceId: state?.occurrenceId ?? 0,
+				...(intention.command === "previous"
+					? { sequence: projection.appliedSequence }
+					: {}),
 			});
 			if (command.success) {
 				pending.set(command.data.requestId, {
 					epoch: timeline.epoch,
-					occurrenceId: state.occurrenceId,
+					occurrenceId: state?.occurrenceId ?? 0,
 					at: now(),
 					command: intention.command,
 				});

@@ -1,5 +1,21 @@
 <template>
 	<div class="flex items-center">
+		<Tooltip>
+			<TooltipTrigger as-child>
+				<Button
+					variant="ghost"
+					size="icon"
+					class="media-control"
+					:disabled="!canPrevious"
+					:aria-label="$t('room.previous-track')"
+					data-cy="playback-previous"
+					@click="previous()"
+				>
+					<Icon :icon="mdiSkipPrevious" data-icon="inline-start" />
+				</Button>
+			</TooltipTrigger>
+			<TooltipContent side="bottom">{{ $t("room.previous-track") }}</TooltipContent>
+		</Tooltip>
 		<Tooltip v-if="!compact">
 			<TooltipTrigger as-child>
 				<Button
@@ -80,7 +96,14 @@
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { mdiChevronLeft, mdiPlay, mdiPause, mdiChevronRight, mdiSkipForward } from "@mdi/js";
+import {
+	mdiChevronLeft,
+	mdiPlay,
+	mdiPause,
+	mdiChevronRight,
+	mdiSkipForward,
+	mdiSkipPrevious,
+} from "@mdi/js";
 import _ from "lodash";
 import { computed, onMounted, onUnmounted, watch } from "vue";
 import { useStore } from "@/store";
@@ -98,7 +121,7 @@ const props = withDefaults(
 	},
 );
 
-const emit = defineEmits(["seek", "play", "pause", "skip"]);
+const emit = defineEmits(["seek", "play", "pause", "skip", "previous"]);
 
 const store = useStore();
 const roomapi = useRoomApi(useConnection());
@@ -107,6 +130,13 @@ const canPlay = computed(
 	() => !!store.state.room.currentSource?.id && granted("playback.play-pause"),
 );
 const canSkip = computed(() => !!store.state.room.currentSource?.id && granted("playback.skip"));
+const canPrevious = computed(
+	() =>
+		store.state.room.playbackEstablished &&
+		store.state.room.previousAvailable &&
+		!store.state.room.enableVoteSkip &&
+		granted("playback.skip"),
+);
 const canSeek = computed(
 	() => !!store.state.room.currentSource?.length && granted("playback.seek"),
 );
@@ -140,6 +170,7 @@ onMounted(() => {
 				skip();
 			}
 		});
+		setMediaAction("previoustrack", () => previous());
 		setMediaAction("seekto", details => {
 			if (canSeek.value && Number.isFinite(details.seekTime)) {
 				roomapi.seek(
@@ -177,6 +208,7 @@ onUnmounted(() => {
 			"play",
 			"pause",
 			"nexttrack",
+			"previoustrack",
 			"seekto",
 			"seekbackward",
 			"seekforward",
@@ -218,6 +250,14 @@ function skip() {
 	}
 	roomapi.skip();
 	emit("skip");
+}
+
+function previous() {
+	if (!canPrevious.value) {
+		return;
+	}
+	roomapi.previous();
+	emit("previous");
 }
 </script>
 

@@ -27,6 +27,7 @@ import {
 import {
 	createMusicScheduler,
 	restoreMusicScheduler,
+	musicNavigation,
 	transitionMusicScheduler,
 	type MusicSchedulerCommand,
 	type MusicSchedulerTransition,
@@ -38,6 +39,10 @@ import {
 } from "./room-music-storage.js";
 import type { DurableMusicRoom } from "../models/music-room.js";
 import { isLocalSource } from "./local-media.js";
+import {
+	getUnacceptedManualConflicts,
+	isAutomaticMusicCandidate,
+} from "ott-common/music/room-mood-policy.js";
 
 export const musicIdentity = (user: { user_id?: number; token: string }): string =>
 	user.user_id
@@ -122,17 +127,21 @@ export class RoomMusic {
 	get state(): MusicSchedulerState | undefined {
 		return this.value ? structuredClone(this.value.state) : undefined;
 	}
+	get previousAvailable(): boolean {
+		return !!this.value && musicNavigation(this.value.state).past.length > 0;
+	}
 	get publicState(): MusicRoomPublic | null {
 		if (!this.value) {
 			return null;
 		}
 		this.rememberNames();
 		const s = this.value.state;
+		const queue = [...musicNavigation(s).future.map(item => item.entry), ...s.queue];
 		return {
 			revision: s.revision,
 			planRevision: s.planRevision,
-			queue: s.queue.slice(0, 10).map(entryDto),
-			queueTotal: s.queue.length,
+			queue: queue.slice(0, 10).map(entryDto),
+			queueTotal: queue.length,
 			current: s.current
 				? {
 						...entryDto(s.current.entry),
@@ -241,6 +250,7 @@ export class RoomMusic {
 					...people,
 					...(state?.current ? [state.current.entry.contributorId] : []),
 					...(state?.queue.map(entry => entry.contributorId) ?? []),
+					...(state?.navigation?.future.map(item => item.entry.contributorId) ?? []),
 					...(state?.requests
 						.filter(
 							request =>
@@ -258,6 +268,7 @@ export class RoomMusic {
 			...new Set([
 				...(state?.current ? [state.current.entry.trackId] : []),
 				...(state?.queue.map(entry => entry.trackId) ?? []),
+				...(state?.navigation?.future.map(item => item.entry.trackId) ?? []),
 				...(state?.requests
 					.filter(
 						request => request.status === "pending" || request.status === "admitted",
@@ -463,6 +474,10 @@ export class RoomMusic {
 				status,
 			});
 			if (action.action === "queue" || action.action === "requests") {
+				const queue = [
+					...musicNavigation(initial).future.map(item => item.entry),
+					...initial.queue,
+				];
 				const own =
 					action.action === "requests"
 						? initial.requests.filter(r => r.candidate.contributorId === identity)
@@ -472,9 +487,7 @@ export class RoomMusic {
 					action.action === "requests" && action.filter === "pending" ? pending : own;
 				const items =
 					action.action === "queue"
-						? initial.queue
-								.slice(action.offset, action.offset + action.limit)
-								.map(entryDto)
+						? queue.slice(action.offset, action.offset + action.limit).map(entryDto)
 						: this.requestDtos(
 								selected.slice(action.offset, action.offset + action.limit),
 							);
@@ -483,7 +496,7 @@ export class RoomMusic {
 					...(action.action === "requests" ? { pendingCount: pending.length } : {}),
 					page: {
 						items,
-						total: action.action === "queue" ? initial.queue.length : selected.length,
+						total: action.action === "queue" ? queue.length : selected.length,
 						offset: action.offset,
 						limit: action.limit,
 					},
@@ -615,6 +628,15 @@ export class RoomMusic {
 					command = { type: "cancel", requestId: action.requestId, now };
 					break;
 				case "remove":
+					if (
+						state.navigation?.future.some(item => item.entry.entryId === action.entryId)
+					) {
+						state.navigation.future = state.navigation.future.filter(
+							item => item.entry.entryId !== action.entryId,
+						);
+						await this.commit(state, undefined, context, authorize);
+						return result("applied");
+					}
 					command = { type: "remove", entryId: action.entryId, now };
 					break;
 			}
@@ -840,6 +862,152 @@ export class RoomMusic {
 			}
 		});
 	}
+	async previous(authorize: Authorize) {
+		await this.advanceLock.protect(async () => {
+			this.isAdvancing = true;
+			try {
+				await this.refresh();
+				await this.navigateLocked("previous", "interrupted", authorize);
+			} finally {
+				this.isAdvancing = false;
+			}
+		});
+	}
+
+	/** Resolve trusted catalogue IDs again, then atomically move the navigation cursor.
+	 * Reuse the original playbackId/started flag; transport still mints a fresh load.
+	 * Neither old history rows nor contribution scores are reset on replay. */
+	private async navigateLocked(
+		direction: "previous" | "next",
+		reason: "finished" | "skipped" | "interrupted",
+		authorize?: Authorize,
+	): Promise<boolean> {
+		for (let attempt = 0; attempt < 5; attempt++) {
+			const before = this.state!;
+			const navigation = musicNavigation(before);
+			const target = direction === "previous" ? navigation.past.at(-1) : navigation.future[0];
+			if (!target) {
+				return false;
+			}
+			const resolved = await this.resolveEntry(target.entry);
+			const applied = await this.lock.protect(async () => {
+				if (this.value!.state.revision !== before.revision) {
+					return false;
+				}
+				const annotationAccounts = [
+					...new Set(
+						[
+							...before.participants.map(person => person.participantId),
+							target.entry.contributorId,
+						]
+							.map(accountId)
+							.filter((id): id is number => id !== undefined),
+					),
+				];
+				const snapshot = await this.catalogue.roomSnapshot(
+					[],
+					[target.entry.trackId],
+					annotationAccounts,
+				);
+				const source = snapshot.sources.find(
+					item => item.id === resolved.candidate.sourceId,
+				);
+				const candidate = {
+					...resolved.candidate,
+					tagsByUser: {} as Record<string, string[]>,
+				};
+				for (const tag of snapshot.tags.filter(
+					tag => tag.trackId === target.entry.trackId,
+				)) {
+					const key = `account:${tag.userId}`;
+					candidate.tagsByUser[key] ??= [];
+					candidate.tagsByUser[key].push(tag.moodId);
+				}
+				const request = before.requests.find(
+					request => request.requestId === target.entry.requestId,
+				);
+				if (
+					!source ||
+					source.availability === "unavailable" ||
+					!(await this.catalogue.localSourceAllowed(
+						source,
+						target.entry.contributorId,
+					)) ||
+					(before.settings.removeDepartedEntries &&
+						!before.participants.some(
+							person => person.participantId === target.entry.contributorId,
+						)) ||
+					(target.entry.origin === "automatic"
+						? !isAutomaticMusicCandidate(candidate, before.participants)
+						: getUnacceptedManualConflicts(
+								candidate,
+								before.participants,
+								request?.acceptedConflicts ?? [],
+							).length > 0)
+				) {
+					throw new MusicRoomException("Historical music source is no longer eligible");
+				}
+				const timeline = (now: number): DurableMusicRoom => {
+					let state = this.value!.state;
+					const current = state.current;
+					if (current) {
+						state = reduce(state, {
+							type: "ended",
+							playbackId: current.playbackId,
+							reason,
+							now,
+						}).state;
+					}
+					const nav = musicNavigation(this.value!.state);
+					if (direction === "previous") {
+						nav.past.pop();
+						if (current) {
+							nav.future = [structuredClone(current), ...nav.future].slice(0, 100);
+						}
+					} else {
+						nav.future.shift();
+						if (current?.started) {
+							nav.past = [...nav.past.slice(-99), structuredClone(current)];
+						}
+					}
+					state = {
+						...state,
+						navigation: nav,
+						current: { ...target, entry: { ...target.entry, ...candidate } },
+						revision: state.revision + 1,
+						updatedAt: now,
+					};
+					if (!target.started && this.value!.playback.isPlaying) {
+						state = reduce(state, {
+							type: "started",
+							playbackId: target.playbackId,
+							now,
+						}).state;
+						state = reduce(state, { type: "replan", now }).state;
+					}
+					return {
+						state,
+						playback: {
+							...this.value!.playback,
+							currentSource: resolved.video,
+							playbackPosition: resolved.video.startAt ?? 0,
+							playbackSpeed: 1,
+							playbackStart: this.value!.playback.isPlaying
+								? new Date(now).toISOString()
+								: null,
+						},
+					};
+				};
+				const draft = timeline(Date.now());
+				await this.commit(draft.state, draft.playback, undefined, authorize, timeline);
+				return true;
+			});
+			if (applied) {
+				return true;
+			}
+		}
+		throw new MusicRoomException("Music queue changed during history resolution; retry");
+	}
 	private async advanceLocked(
 		reason: "finished" | "skipped",
 		authorize?: Authorize,
@@ -847,6 +1015,9 @@ export class RoomMusic {
 		onCleared?: () => void,
 	) {
 		await this.refresh();
+		if (await this.navigateLocked("next", reason, authorize)) {
+			return;
+		}
 		await this.lock.protect(async () => {
 			const current = this.value!.state.current;
 			if (authorize && current?.playbackId !== playbackId) {
@@ -862,8 +1033,12 @@ export class RoomMusic {
 					reason,
 					now,
 				}).state;
+				const navigation = musicNavigation(this.value!.state);
+				if (current.started) {
+					navigation.past = [...navigation.past.slice(-99), structuredClone(current)];
+				}
 				return {
-					state: { ...ended, current: undefined },
+					state: { ...ended, current: undefined, navigation },
 					playback: {
 						...this.value!.playback,
 						currentSource: null,

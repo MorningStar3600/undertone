@@ -185,6 +185,9 @@ export class RoomUser {
  * This rule does not necessarily apply to inherited fields.
  */
 export interface RoomState extends RoomOptions, RoomStateComputed {
+	/** Server-only bounded legacy navigation stack, persisted with the room. */
+	previousTracks: QueueItem[];
+	previousAvailable: boolean;
 	music: MusicRoomPublic | null;
 	musicState?: MusicSchedulerState;
 	currentSource: QueueItem | null;
@@ -211,7 +214,7 @@ export interface RoomStateComputed {
 // Only these should be sent to clients, all others should be considered unsafe
 export type RoomStateSyncable = Omit<
 	RoomState,
-	"owner" | "votes" | "userRoles" | "users" | "musicState"
+	"owner" | "votes" | "userRoles" | "users" | "musicState" | "previousTracks"
 >;
 
 // Only these should be stored in redis
@@ -221,6 +224,7 @@ export type RoomStateStorable = Omit<
 > & { _playbackStart: Dayjs | null };
 
 const syncableProps: (keyof RoomStateSyncable)[] = [
+	"previousAvailable",
 	"music",
 	"name",
 	"title",
@@ -245,6 +249,7 @@ const syncableProps: (keyof RoomStateSyncable)[] = [
 ];
 
 const storableProps: (keyof RoomStateStorable)[] = [
+	"previousTracks",
 	"musicState",
 	"name",
 	"title",
@@ -283,6 +288,8 @@ export type RoomStatePersistable = Omit<
 	| "hasOwner"
 	| "voteCounts"
 	| "votesToSkip"
+	| "previousTracks"
+	| "previousAvailable"
 >;
 
 export class Room implements RoomState {
@@ -316,6 +323,7 @@ export class Room implements RoomState {
 		});
 	}
 	private recordPlayback(options: { load?: boolean; seek?: boolean } = {}) {
+		this.markDirty("previousAvailable");
 		this.journal.commit(
 			{
 				currentSource: this.currentSource,
@@ -382,13 +390,26 @@ export class Room implements RoomState {
 							this.queueMode === QueueMode.Music &&
 							this.journal.occurrenceId === null &&
 							this.journal.sequence === clearedSequence;
-						if (command.occurrenceId !== this.journal.occurrenceId && !ownClear) {
+						const occurrence =
+							command.command === "previous"
+								? (this.journal.occurrenceId ?? 0)
+								: this.journal.occurrenceId;
+						if (command.occurrenceId !== occurrence && !ownClear) {
+							throw new OttException("stale-occurrence");
+						}
+						if (
+							command.command === "previous" &&
+							command.sequence !== this.journal.sequence
+						) {
 							throw new OttException("stale-occurrence");
 						}
 						this.grants.check(
 							this.getRoleFromSession(session),
 							this.playbackPermission(command),
 						);
+						if (command.command === "previous" && this.enableVoteSkip) {
+							throw new OttException("unauthorized");
+						}
 					},
 					{ assertCurrent: authorization.assertCurrent },
 				);
@@ -428,6 +449,12 @@ export class Room implements RoomState {
 							break;
 						case "next":
 							await this.skip({ type: RoomRequestType.SkipRequest }, context);
+							break;
+						case "previous":
+							if (!this.previousAvailable) {
+								return result("unavailable");
+							}
+							await this.previous(context);
 							break;
 					}
 					return result();
@@ -485,7 +512,7 @@ export class Room implements RoomState {
 		);
 	}
 	private playbackPermission(command: PlaybackCommand) {
-		return command.command === "next"
+		return command.command === "next" || command.command === "previous"
 			? "playback.skip"
 			: command.command === "seek"
 				? "playback.seek"
@@ -523,7 +550,12 @@ export class Room implements RoomState {
 					this.restoredMusicState = undefined;
 					this.markDirty("music");
 					const p = value.playback;
-					const msg: ServerMessageSync = { action: "sync", music: this.music, queue: [] };
+					const msg: ServerMessageSync = {
+						action: "sync",
+						music: this.music,
+						queue: [],
+						previousAvailable: this.previousAvailable,
+					};
 					if (!_.isEqual(this.currentSource, p.currentSource)) {
 						this.currentSource = p.currentSource;
 						this.videoSegments = [];
@@ -755,6 +787,15 @@ export class Room implements RoomState {
 	_enableVoteSkip: boolean = false;
 
 	_currentSource: QueueItem | null = null;
+	previousTracks: QueueItem[] = [];
+	get previousAvailable(): boolean {
+		return (
+			!this.enableVoteSkip &&
+			(this.queueMode === QueueMode.Music
+				? (this._music?.previousAvailable ?? false)
+				: this.previousTracks.length > 0)
+		);
+	}
 	queue: VideoQueue;
 	_prevQueue: QueueItem[] | null = null;
 	_isPlaying = false;
@@ -797,6 +838,7 @@ export class Room implements RoomState {
 				Pick<
 					RoomState,
 					| "musicState"
+					| "previousTracks"
 					| "currentSource"
 					| "playbackPosition"
 					| "playbackSpeed"
@@ -831,6 +873,7 @@ export class Room implements RoomState {
 				"isTemporary",
 				"owner",
 				"currentSource",
+				"previousTracks",
 				"queue",
 				"playbackPosition",
 				"isPlaying",
@@ -947,6 +990,7 @@ export class Room implements RoomState {
 	}
 
 	public set queueMode(value: QueueMode) {
+		this.markDirty("previousAvailable");
 		this._queueMode = value;
 		this.markDirty("queueMode");
 	}
@@ -1031,6 +1075,7 @@ export class Room implements RoomState {
 	}
 
 	public set enableVoteSkip(value: boolean) {
+		this.markDirty("previousAvailable");
 		this._enableVoteSkip = value;
 		this.markDirty("enableVoteSkip");
 	}
@@ -1084,6 +1129,7 @@ export class Room implements RoomState {
 		}
 
 		if (this.currentSource !== null) {
+			this.rememberPrevious(this.currentSource);
 			counterSecondsWatched
 				.labels({ service: this.currentSource.service })
 				.inc(this.calcDurationFromPlaybackStart());
@@ -1135,6 +1181,58 @@ export class Room implements RoomState {
 
 		this.recordPlayback({ load: this.currentSource !== null });
 		this.log.debug(`Dirty props: ${Array.from(this._dirty)}`);
+	}
+
+	private rememberPrevious(item: QueueItem) {
+		this.previousTracks = [...this.previousTracks.slice(-99), structuredClone(item)];
+		this.markDirty("previousAvailable");
+	}
+
+	/** Only the guarded, idempotent authoritative command can select server history. */
+	private async previous(context: RoomRequestContext): Promise<void> {
+		const guard = this.commandGuards.get(context)!;
+		if (this.queueMode === QueueMode.Music) {
+			await this.musicEngine.previous(
+				this.musicPlaybackAuthorization(context, "playback.skip"),
+			);
+			this.votesToSkip.clear();
+			this.musicSkipVotes.clear();
+			this.markDirty("votesToSkip");
+			return;
+		}
+		await guard();
+		const target = this.previousTracks.at(-1);
+		if (!target) {
+			return;
+		}
+		const now = Date.now();
+		const install = this.journal.stage(
+			{
+				currentSource: target,
+				positionSeconds: target.startAt ?? 0,
+				isPlaying: this.isPlaying,
+				rate: 1,
+			},
+			{ load: true },
+			now,
+		);
+		guard.assertCurrent?.();
+		// DJ's Next repeats the current track, so there is no return-to-queue promise.
+		if (this.currentSource && this.queueMode !== QueueMode.Dj) {
+			this.queue.items.unshift(structuredClone(this.currentSource));
+			this.queue.markDirty();
+		}
+		this.previousTracks.pop();
+		this.currentSource = structuredClone(target);
+		this.playbackPosition = target.startAt ?? 0;
+		this.playbackSpeed = 1;
+		this._playbackStart = this.isPlaying ? dayjs(now) : null;
+		this.videoSegments = [];
+		this.wantSponsorBlock = true;
+		this.votesToSkip.clear();
+		this.markDirty("votesToSkip");
+		this.markDirty("previousAvailable");
+		install();
 	}
 
 	/**
@@ -2730,6 +2828,7 @@ export class Room implements RoomState {
 			this.queue.items.splice(this.queue.findIndex(request.video), 1);
 		}
 		if (this.currentSource) {
+			this.rememberPrevious(this.currentSource);
 			this.queue.items.unshift({ ...this.currentSource, startAt: this.realPlaybackPosition });
 		}
 		this.queue.markDirty();

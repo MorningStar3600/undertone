@@ -7,6 +7,8 @@ import { Grants, parseIntoGrantMask } from "ott-common/permissions";
 import VideoControls from "@/components/controls/VideoControls.vue";
 import VideoProgressSlider from "@/components/controls/VideoProgressSlider.vue";
 import TrackMoods from "@/components/music/TrackMoods.vue";
+import * as playbackSession from "@/playback/playback-session";
+import BasicControls from "@/components/controls/BasicControls.vue";
 import { mountComponent } from "./component-test-utils";
 
 const source = {
@@ -273,7 +275,28 @@ describe("Persistent player controls", () => {
 			configurable: true,
 			value: mediaSession,
 		});
-		const { store, connection, unmount } = await controls();
+		const { wrapper, store, connection, unmount } = await controls();
+		const previousCommand = vi.fn(() => true);
+		vi.spyOn(playbackSession, "getPlaybackSession").mockReturnValue({
+			command: previousCommand,
+		} as unknown as NonNullable<ReturnType<typeof playbackSession.getPlaybackSession>>);
+		expect(wrapper.getComponent(BasicControls).props("compact")).toBe(true);
+		expect(wrapper.get('[data-cy="playback-previous"]').attributes("disabled")).toBeDefined();
+		store.commit("room/SYNC", { playbackEstablished: true });
+		await store.dispatch("room/sync", { action: "sync", previousAvailable: true });
+		await nextTick();
+		expect(wrapper.get('[data-cy="playback-previous"]').attributes("aria-label")).toBe(
+			"Previous track",
+		);
+		await wrapper.get('[data-cy="playback-previous"]').trigger("click");
+		handlers.get("previoustrack")?.({ action: "previoustrack" });
+		expect(previousCommand).toHaveBeenNthCalledWith(1, { command: "previous" });
+		expect(previousCommand).toHaveBeenCalledTimes(2);
+		store.commit("room/SYNC", { enableVoteSkip: true });
+		handlers.get("previoustrack")?.({ action: "previoustrack" });
+		expect(previousCommand).toHaveBeenCalledTimes(2);
+		store.commit("room/SYNC", { enableVoteSkip: false });
+		vi.mocked(playbackSession.getPlaybackSession).mockRestore();
 		handlers.get("pause")?.({ action: "pause" });
 		expect(connection.sent).toEqual([]);
 		handlers.get("play")?.({ action: "play" });
@@ -286,6 +309,7 @@ describe("Persistent player controls", () => {
 		expect(connection.sent).toHaveLength(3);
 		store.state.room.grants.setRoleGrants(Role.UnregisteredUser, 0);
 		handlers.get("nexttrack")?.({ action: "nexttrack" });
+		handlers.get("previoustrack")?.({ action: "previoustrack" });
 		handlers.get("seekto")?.({ action: "seekto", seekTime: 60 });
 		expect(connection.sent).toHaveLength(3);
 		await nextTick();

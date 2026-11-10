@@ -18,6 +18,15 @@ export const PlaybackCommandSchema = z.discriminatedUnion("command", [
 	z.object({ ...commandBase, command: z.literal("play") }).strict(),
 	z.object({ ...commandBase, command: z.literal("pause") }).strict(),
 	z.object({ ...commandBase, command: z.literal("next") }).strict(),
+	// Zero identifies an empty authoritative timeline; only Previous can leave it.
+	z
+		.object({
+			...commandBase,
+			command: z.literal("previous"),
+			occurrenceId: counter,
+			sequence: counter,
+		})
+		.strict(),
 	z
 		.object({
 			...commandBase,
@@ -64,6 +73,7 @@ export interface PlaybackCommandResult {
 		| "stale-epoch"
 		| "stale-occurrence"
 		| "unauthorized"
+		| "unavailable"
 		| "failed";
 }
 export type PlaybackClientMessage =

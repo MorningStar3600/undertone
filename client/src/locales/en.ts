@@ -505,6 +505,7 @@ export default {
 		skip: "Skip 10s",
 		"play-pause": "Play/Pause",
 		"next-video": "Next video",
+		"previous-track": "Previous track",
 		"next-video-vote": "Vote to skip video",
 		"toggle-fullscreen": "Toggle fullscreen",
 		pip: "Picture in Picture",

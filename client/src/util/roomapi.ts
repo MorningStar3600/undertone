@@ -61,6 +61,12 @@ class RoomApi {
 		});
 	}
 
+	/** Navigate trusted server history through the authoritative playback transport. */
+	previous() {
+		// Previous has no legacy undo/seek fallback: its history is owned by the server.
+		getPlaybackSession(this.connection)?.command({ command: "previous" });
+	}
+
 	/** Send a message to skip the current video. */
 	skip() {
 		if (getPlaybackSession(this.connection)?.command({ command: "next" })) {

@@ -18,6 +18,7 @@ export interface RoomState {
 	visibility: Visibility;
 	queueMode: QueueMode;
 	currentSource: QueueItem | null;
+	previousAvailable: boolean;
 	queue: QueueItem[];
 	isPlaying: boolean;
 	playbackPosition: number;
@@ -49,6 +50,7 @@ export const roomModule: Module<RoomState, FullOTTStoreState> = {
 		visibility: Visibility.Unlisted,
 		queueMode: QueueMode.Manual,
 		currentSource: {} as QueueItem,
+		previousAvailable: false,
 		queue: [],
 		isPlaying: false,
 		playbackPosition: 0,
@@ -84,6 +86,9 @@ export const roomModule: Module<RoomState, FullOTTStoreState> = {
 			}
 			if ("music" in message) {
 				stateupdate.music = message.music;
+			}
+			if ("previousAvailable" in message) {
+				stateupdate.previousAvailable = message.previousAvailable;
 			}
 			if ("name" in message) {
 				stateupdate.name = message.name;

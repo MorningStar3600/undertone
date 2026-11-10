@@ -113,6 +113,8 @@ export interface MusicSchedulerState {
 	candidates: MusicCandidate[];
 	queue: MusicQueueEntry[];
 	current?: { entry: MusicQueueEntry; playbackId: string; started: boolean };
+	/** Navigation reuses accounted occurrences; never creates contribution debits. */
+	navigation?: { past: MusicOccurrence[]; future: MusicOccurrence[] };
 	/** Includes failed/unstarted loads, without inventing real playback events. */
 	loadedPlaybackIds: string[];
 	requests: ManualMusicRequest[];
@@ -121,6 +123,8 @@ export interface MusicSchedulerState {
 	rngState: number;
 	history: MusicPlaybackHistory;
 }
+
+export type MusicOccurrence = NonNullable<MusicSchedulerState["current"]>;
 
 export type MusicRandom = () => number;
 

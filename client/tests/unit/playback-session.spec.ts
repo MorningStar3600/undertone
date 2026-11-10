@@ -795,6 +795,52 @@ describe("generation-scoped capability negotiation", () => {
 });
 
 describe("pending-only next intentions", () => {
+	it("routes Previous through the authoritative cursor, dedupes pending navigation and never falls back to undo", async () => {
+		const s = setup(true);
+		s.calibrate();
+		s.snapshot();
+		s.connection.mockReset();
+		s.api.previous();
+		const first = lastCommand(s);
+		expect(first).toMatchObject({ command: "previous", epoch: "epoch", occurrenceId: 1 });
+		s.api.previous();
+		s.api.skip();
+		expect(s.connection.sent).toHaveLength(1);
+		s.connection.mockReceive({
+			action: "playback-result",
+			result: {
+				requestId: first.requestId,
+				epoch: "epoch",
+				sequence: 1,
+				status: "rejected",
+				code: "unavailable",
+			},
+		});
+		s.api.previous();
+		expect(lastCommand(s).requestId).not.toBe(first.requestId);
+		s.allowed.mockReturnValue(false);
+		s.connection.mockReset();
+		s.api.previous();
+		expect(s.connection.sent).toEqual([]);
+		const legacy = setup(false);
+		await legacy.tick(1_000);
+		legacy.connection.mockReset();
+		legacy.api.previous();
+		expect(legacy.connection.sent).toEqual([]);
+	});
+	it("sends one guarded Previous from an exhausted timeline without seeking a provider", async () => {
+		const s = setup(true);
+		s.calibrate();
+		const empty = timeline(2);
+		empty.baseline.state = null;
+		s.snapshot(empty, null);
+		s.connection.mockReset();
+		s.api.previous();
+		s.api.previous();
+		expect(lastCommand(s)).toMatchObject({ command: "previous", occurrenceId: 0 });
+		expect(s.connection.sent).toHaveLength(1);
+		expect(s.surfaces.surface.value).toBeNull();
+	});
 	it("never lets a prior occurrence's result release a new pending next", async () => {
 		const s = setup(true);
 		s.calibrate();

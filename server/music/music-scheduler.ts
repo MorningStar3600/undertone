@@ -15,6 +15,7 @@ import type {
 	MusicRandom,
 	MusicSchedulerSettings,
 	MusicSchedulerState,
+	MusicOccurrence,
 	RoomMoodPreference,
 } from "ott-common/music/types.js";
 import {
@@ -771,6 +772,16 @@ const stateSchema = z.object({
 	queue: z.array(entrySchema),
 	loadedPlaybackIds: z.array(id),
 	current: z.object({ entry: entrySchema, playbackId: id, started: z.boolean() }).optional(),
+	navigation: z
+		.object({
+			past: z
+				.array(z.object({ entry: entrySchema, playbackId: id, started: z.boolean() }))
+				.max(100),
+			future: z
+				.array(z.object({ entry: entrySchema, playbackId: id, started: z.boolean() }))
+				.max(100),
+		})
+		.optional(),
 	requests: z.array(
 		z.object({
 			requestId: id,
@@ -839,6 +850,9 @@ export const restoreMusicScheduler = (serialized: unknown): MusicSchedulerState 
 		...state.queue,
 		...(state.current ? [state.current.entry] : []),
 		...state.history.events.map(event => event.entry),
+		...(state.navigation
+			? [...state.navigation.past, ...state.navigation.future].map(item => item.entry)
+			: []),
 	].filter(entry => entry.origin === "automatic");
 	const autoPrefix = `${state.sessionId}:auto:`;
 	const requestMatches = (entry: MusicQueueEntry): boolean => {
@@ -855,6 +869,30 @@ export const restoreMusicScheduler = (serialized: unknown): MusicSchedulerState 
 		);
 	};
 	if (
+		(state.navigation &&
+			(!unique(
+				[
+					...state.navigation.past,
+					...state.navigation.future,
+					...(current ? [current] : []),
+				].map(item => item.playbackId),
+			) ||
+				state.navigation.past.some(item => !item.started) ||
+				[...state.navigation.past, ...state.navigation.future].some(
+					item =>
+						!state.loadedPlaybackIds.includes(item.playbackId) ||
+						!requestMatches(item.entry) ||
+						state.queue.some(entry => entry.entryId === item.entry.entryId) ||
+						(item.started
+							? !state.history.events.some(
+									event =>
+										event.playbackId === item.playbackId &&
+										sameOccurrence(event.entry, item.entry),
+								)
+							: state.history.events.some(
+									event => event.playbackId === item.playbackId,
+								)),
+				))) ||
 		state.history.roomId !== state.roomId ||
 		state.history.sessionId !== state.sessionId ||
 		state.planRevision > state.revision ||
@@ -926,6 +964,28 @@ export const restoreMusicScheduler = (serialized: unknown): MusicSchedulerState 
 
 export const serializeMusicScheduler = (state: MusicSchedulerState): MusicSchedulerState =>
 	restoreMusicScheduler(state);
+
+/** Upgrade older persisted rooms from their existing start history, without clearing it. */
+export const musicNavigation = (
+	state: MusicSchedulerState,
+): { past: MusicOccurrence[]; future: MusicOccurrence[] } =>
+	structuredClone(
+		state.navigation ?? {
+			past: state.history.events
+				.filter(
+					event =>
+						event.playbackId !== state.current?.playbackId &&
+						event.endReason !== "error",
+				)
+				.slice(-100)
+				.map(event => ({
+					entry: event.entry,
+					playbackId: event.playbackId,
+					started: true,
+				})),
+			future: [],
+		},
+	);
 
 // Re-export useful history queries for adapters needing one scheduling import.
 export { contributionScore, trackRecencyDistance };

@@ -51,6 +51,7 @@ export interface ServerMessageSync extends ServerMessageBase {
 	isPlaying?: boolean;
 	playbackPosition?: number;
 	currentSource?: QueueItem | null;
+	previousAvailable?: boolean;
 	queue?: QueueItem[];
 	prevQueue?: QueueItem[] | null;
 	grants?: [Role, number][];
