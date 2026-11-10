@@ -182,6 +182,8 @@ import {
 	watchEffect,
 } from "vue";
 import { useStore } from "@/store";
+import { useI18n } from "vue-i18n";
+import { ToastStyle } from "@/models/toast";
 import { directPlaybackUrl } from "@/util/local-media";
 import { isInTimeRanges, secondsToTimestamp } from "@/util/timestamp";
 import {
@@ -220,6 +222,7 @@ const DirectPlayer = defineAsyncComponent(() => import("./DirectPlayer.vue"));
 const PeertubePlayer = defineAsyncComponent(() => import("./PeertubePlayer.vue"));
 
 const store = useStore();
+const { t } = useI18n();
 const directUrl = computed(() =>
 	directPlaybackUrl(
 		props.source,
@@ -490,6 +493,19 @@ const showPlaybackError = computed(() => {
 function onError(errorType?: MediaPlayerError) {
 	if (disposed) {
 		return;
+	}
+	if (
+		errorType &&
+		errorType.type !== "unknown" &&
+		(currentPlaybackError.value?.type !== errorType.type || !showPlaybackError.value)
+	) {
+		// Audio display hides this player's overlay, so also explain provider restrictions
+		// outside the media surface. Repeated SDK callbacks must not flood notifications.
+		store.commit("toast/ADD_TOAST", {
+			content: t(`player.playback-error-message.${errorType.type}`),
+			style: ToastStyle.Error,
+			duration: 8000,
+		});
 	}
 	props.surface?.report({ type: "error", error: new Error("Provider playback failed") });
 	currentPlaybackError.value = errorType ?? { type: "unknown" };

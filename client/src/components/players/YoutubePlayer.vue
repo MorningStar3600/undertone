@@ -13,6 +13,7 @@ import toast from "@/util/toast";
 import { ToastStyle } from "@/models/toast";
 import type { CaptionTrack } from "@/models/media-tracks";
 import { useCaptions } from "../composables";
+import type { MediaPlayerError } from "../composables/media-player";
 
 const YOUTUBE_IFRAME_API_URL = "https://www.youtube.com/iframe_api";
 
@@ -39,7 +40,7 @@ interface YoutubeSdk {
 				onApiChange: () => void;
 				onReady: () => void;
 				onStateChange: (event: YoutubeStateChangeEvent) => void;
-				onError: () => void;
+				onError: (event: { data: number }) => void;
 				onPlaybackRateChange: () => void;
 				onAutoplayBlocked: () => void;
 			};
@@ -113,7 +114,7 @@ const emit = defineEmits<{
 	"paused": [];
 	"buffering": [];
 	"ready": [];
-	"error": [];
+	"error": [error: MediaPlayerError];
 	"buffer-progress": [progress: number];
 	/** The user changed volume using YouTube's native control bar (nativeControls mode only). */
 	"user-volume-change": [volume: number];
@@ -470,8 +471,29 @@ function onStateChange(event: YoutubeStateChangeEvent): void {
 	emit("buffer-progress", player.value.getVideoLoadedFraction());
 }
 
-function onError(): void {
-	emit("error");
+function onError(event: { data: number }): void {
+	if (disposed) {
+		return;
+	}
+	// Keep provider details out of the UI; OmniPlayer localizes these categories.
+	let type: MediaPlayerError["type"] = "unknown";
+	switch (event.data) {
+		case 100:
+			type = "youtube-unavailable";
+			break;
+		case 101:
+		case 150:
+			type = "youtube-embed-disabled";
+			break;
+		case 153:
+			type = "youtube-embed-identity";
+			break;
+		default:
+			break;
+	}
+	// A provider failure must not later become an autoplay-blocked timeout.
+	settlePlay(new Error("YouTube playback failed"));
+	emit("error", { type });
 }
 
 /**

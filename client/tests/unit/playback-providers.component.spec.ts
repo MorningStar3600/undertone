@@ -127,22 +127,35 @@ describe("captured provider surfaces", () => {
 		sibling.remove();
 		expect(vimeo.destroy).toHaveBeenCalledOnce();
 	});
-	it("loads direct media silently in timeline mode and retains explicit play", async () => {
+	it.each([
+		["video/mp4", "https://example.test/video.mp4"],
+		["audio/mpeg", "https://example.test/song.mp3"],
+	])("loads %s silently in timeline mode and retains playback controls", async (mime, url) => {
 		const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
 		vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
 		vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => undefined);
 		const { wrapper, unmount } = mountComponent(DirectPlayer, {
 			props: {
 				service: "direct",
-				videoUrl: "https://example.test/video.mp4",
-				videoMime: "video/mp4",
+				videoUrl: url,
+				videoMime: mime,
 				silent: true,
 			},
 		});
 		await flushPromises();
+		const media = wrapper.get("video");
+		expect(media.element.src).toBe(url);
+		expect(wrapper.emitted("apiready")).toHaveLength(1);
+		await media.trigger("canplay");
+		expect(wrapper.emitted("ready")).toHaveLength(1);
 		expect(play).not.toHaveBeenCalled();
-		await (wrapper.vm.$.exposed as unknown as { play(): Promise<void> }).play();
+		const player = wrapper.vm.$.exposed as unknown as MediaPlayerWithPlaybackRate;
+		await player.play();
 		expect(play).toHaveBeenCalledOnce();
+		player.setPosition(25);
+		expect(player.getPosition()).toBe(25);
+		player.pause();
+		expect(HTMLMediaElement.prototype.pause).toHaveBeenCalledOnce();
 		unmount();
 	});
 });

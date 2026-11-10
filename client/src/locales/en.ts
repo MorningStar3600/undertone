@@ -811,9 +811,18 @@ export default {
 		},
 		"playback-error-title": {
 			unknown: "Playback Error",
+			"youtube-unavailable": "Track Unavailable",
+			"youtube-embed-disabled": "Playback Unavailable Here",
+			"youtube-embed-identity": "YouTube Player Error",
 		},
 		"playback-error-message": {
 			unknown: "Failed to load video.",
+			"youtube-unavailable":
+				"YouTube could not find this track. It may have been removed or made private.",
+			"youtube-embed-disabled":
+				"The owner does not allow this track to play in embedded players. You can try opening the original link on YouTube or YouTube Music.",
+			"youtube-embed-identity":
+				"YouTube could not verify this embedded player. Try reloading the page. If this continues, contact the site administrator.",
 		},
 	},
 };

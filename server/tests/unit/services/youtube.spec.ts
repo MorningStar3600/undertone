@@ -19,6 +19,8 @@ const validVideoLinks = [
 	["R5i-cktCTb4", "https://youtube.com/shorts/R5i-cktCTb4?feature=share"],
 	["DMfu0KiqWnk", "https://studio.youtube.com/video/DMfu0KiqWnk/edit"],
 	["l3XUssSglXk", "https://www.youtube.com/live/l3XUssSglXk"],
+	["5MO2drnQIFM", "https://music.youtube.com/watch?v=5MO2drnQIFM"],
+	["5MO2drnQIFM", "https://music.youtube.com/watch?v=5MO2drnQIFM&si=shared-link"],
 ];
 
 const invalidLinks = [
@@ -239,9 +241,24 @@ describe("Youtube", () => {
 			apiGet.mockClear();
 		});
 
+		it("resolves the supplied Music link as the same YouTube track without a replacement", async () => {
+			const track = { service: "youtube" as const, id: "5MO2drnQIFM" };
+			const fetchVideo = vi.spyOn(adapter, "fetchVideoInfo").mockResolvedValueOnce(track);
+			try {
+				expect(
+					await adapter.resolveURL("https://music.youtube.com/watch?v=5MO2drnQIFM"),
+				).toEqual({ videos: [track] });
+				expect(fetchVideo).toHaveBeenCalledTimes(1);
+				expect(fetchVideo).toHaveBeenCalledWith("5MO2drnQIFM", undefined);
+			} finally {
+				fetchVideo.mockRestore();
+			}
+		});
+
 		it.each(
 			[
 				"https://youtube.com/watch?v=%s",
+				"https://music.youtube.com/watch?v=%s",
 				"https://youtu.be/%s",
 				"https://youtube.com/shorts/%s",
 			].map(x => x.replace("%s", "BTZ5KVRUy1Q")),

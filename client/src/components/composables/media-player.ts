@@ -206,6 +206,6 @@ export function usePlaybackRate() {
 }
 
 export interface MediaPlayerError {
-	type: "unknown";
+	type: "unknown" | "youtube-unavailable" | "youtube-embed-disabled" | "youtube-embed-identity";
 	message?: string;
 }

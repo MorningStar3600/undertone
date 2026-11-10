@@ -20,6 +20,10 @@ class FfprobeFixtures extends FfprobeStrategy {
 				],
 			},
 			"/foo.mp4": this.getFixture("ffprobe-output-has-title.json"),
+			"/song.mp3": {
+				streams: [{ codec_type: "audio", duration: "123.4" }],
+				format: { format_name: "mp3", tags: { title: "Audio without a video track" } },
+			},
 		}[url.pathname];
 	}
 
@@ -134,6 +138,18 @@ describe("Direct", () => {
 				id: url,
 				title: "Foo: The Movie",
 				length: 69420,
+			});
+		});
+
+		it("resolves an audio-only MP3 with its duration and audio MIME type", async () => {
+			const url = "https://example.com/song.mp3";
+			expect(adapter.canHandleURL(url)).toBe(true);
+			expect(await adapter.fetchVideoInfo(url)).toMatchObject({
+				service: "direct",
+				id: url,
+				mime: "audio/mpeg",
+				title: "Audio without a video track",
+				length: 124,
 			});
 		});
 	});
