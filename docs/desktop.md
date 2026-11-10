@@ -105,7 +105,9 @@ socket messages; WebSocket frames/messages are capped at 256 KiB, IPC at 16 KiB,
 and sends at 32 per ten seconds. The shared session's bounded caches remain in
 use. Before host readiness, messages are not replay-buffered: the host requests
 fresh authority. The host publishes native progress only when its displayed
-second or state changes. The shared session/controller timers exist only while
+second or state changes. IPC queue overflow terminates that host's connection with
+a visible bridge error instead of silently losing a state, command, or readiness
+message. Rejoin to recover. The shared session/controller timers exist only while
 the YouTube host exists. GPU rendering alone is not a RAM guarantee; no memory or
 idle CPU guarantee is implied.
 
@@ -128,7 +130,10 @@ controls for empty or unsupported sources. Sources can still change from another
 client, and the native observer will create/dispose the YouTube host accordingly.
 YouTube embedding, region/age restrictions, provider availability, autoplay, and
 WebView2 availability can prevent playback; errors are visible. This preview does
-not claim live YouTube or deployed-room validation from mocked tests.
+not claim live YouTube or deployed-room validation from mocked tests. If autoplay
+is denied, an Enable playback button appears inside the browser surface. Its click
+activates the local provider synchronously without sending a room command; the
+native Play/Pause button continues to control the room's authoritative state.
 
 ## Checks
 

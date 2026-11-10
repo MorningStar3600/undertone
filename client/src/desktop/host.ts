@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createPlaybackSession, type PlaybackSession } from "../playback/playback-session";
 import { createDesktopConnection } from "./bridge";
 import { createYoutubeAdapter } from "./youtube-adapter";
+import strings from "../locales/desktop-en.json";
 
 declare global {
 	interface Window {
@@ -32,7 +33,23 @@ let volume = 0;
 let adapter: ReturnType<typeof createYoutubeAdapter> | undefined;
 let lastState = "";
 let available = false;
+let playing = false;
+let blocked = false;
 const root = document.getElementById("player")!;
+const activation = document.createElement("button");
+activation.id = "activate-playback";
+activation.textContent = strings.enablePlayback;
+activation.hidden = true;
+root.after(activation);
+function updateActivation() {
+	activation.hidden = !blocked || !playing || !available;
+}
+activation.addEventListener("click", () => {
+	if (blocked && playing && available && session?.established) {
+		// This is a local browser gesture, not a room play/pause command.
+		session.controller.userActivated();
+	}
+});
 const host = {
 	start() {
 		if (session) {
@@ -48,6 +65,8 @@ const host = {
 			},
 			onState(state, item) {
 				available = !!state && !!item && !!session?.established;
+				playing = state?.isPlaying ?? false;
+				updateActivation();
 				const message = JSON.stringify({
 					kind: "state",
 					position: Math.max(0, Math.floor(state?.positionSeconds ?? 0)),
@@ -61,11 +80,13 @@ const host = {
 				}
 			},
 			onStatus({ code }) {
+				blocked = code === "autoplay-blocked";
 				if (
 					["waiting-snapshot", "waiting-clock", "recovering", "disposed"].includes(code)
 				) {
 					available = false;
 				}
+				updateActivation();
 				post({ kind: "status", code });
 			},
 		});
@@ -98,6 +119,7 @@ const host = {
 		proxy.dispose();
 		adapter = undefined;
 		available = false;
+		activation.remove();
 		root.replaceChildren();
 	},
 };

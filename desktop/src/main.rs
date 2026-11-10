@@ -6,10 +6,14 @@ use gpui::{
     WindowOptions, div, prelude::*, px, rgb, size,
 };
 use serde_json::{Value, json};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 use undertone_desktop::{
     bridge::{self, HOST_URL, Ipc, Observation, Observer, RoomAddress},
-    connection::{Connection, Event, EventKind, Network},
+    connection::{Connection, Event, EventKind, Network, enqueue_ipc},
     text,
 };
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtWindows};
@@ -37,6 +41,7 @@ struct Player {
     observer: Observer,
     webview: Option<WebView>,
     host_ready: bool,
+    ipc_overflow: Arc<AtomicBool>,
     status: String,
     title: String,
     notice: String,
@@ -79,6 +84,7 @@ impl Player {
             observer: Observer::default(),
             webview: None,
             host_ready: false,
+            ipc_overflow: Arc::new(AtomicBool::new(false)),
             status: text("idle"),
             title: String::new(),
             notice: String::new(),
@@ -111,6 +117,7 @@ impl Player {
         }
         self.host_generation += 1;
         self.host_ready = false;
+        self.ipc_overflow = Arc::new(AtomicBool::new(false));
         self.available = false;
         self.position = 0.;
         self.duration = 0.;
@@ -152,6 +159,8 @@ impl Player {
         let host = self.host_generation;
         let generation = self.generation;
         let events = self.events.clone();
+        self.ipc_overflow = Arc::new(AtomicBool::new(false));
+        let overflow = self.ipc_overflow.clone();
         let view = WebViewBuilder::new()
             .with_incognito(true)
             .with_devtools(false)
@@ -190,11 +199,7 @@ impl Player {
             .with_download_started_handler(|_, _| false)
             .with_ipc_handler(move |request| {
                 if let Some(data) = bridge::parse_ipc(&request.uri().to_string(), request.body()) {
-                    // Nonblocking WebView callback; bounded queue. Snapshot recovery is in the session.
-                    let _ = events.try_send(Event {
-                        generation,
-                        kind: EventKind::Ipc { host, data },
-                    });
+                    enqueue_ipc(&events, generation, host, data, &overflow);
                 }
             })
             .with_url(HOST_URL)
@@ -223,6 +228,12 @@ impl Player {
     }
 
     fn event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        // A full channel already has a wakeup pending. Check before consuming any authority.
+        if self.ipc_overflow.swap(false, Ordering::AcqRel) {
+            self.fail("bridgeFailed");
+            cx.notify();
+            return;
+        }
         if event.generation != self.generation {
             return;
         }

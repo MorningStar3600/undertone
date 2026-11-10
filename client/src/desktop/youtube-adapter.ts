@@ -271,6 +271,12 @@ export function createYoutubeAdapter(
 			check(signal);
 			api!.setPlaybackRate(rate);
 		},
+		activate() {
+			check(context.signal);
+			// Called synchronously by a click inside the host document, before any await.
+			requestedPlaying = true;
+			api?.playVideo();
+		},
 		play(signal) {
 			check(signal);
 			pendingPlay?.(cancelled());

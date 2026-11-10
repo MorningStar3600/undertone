@@ -2,6 +2,7 @@ use crate::bridge::{Ipc, MAX_MESSAGE, RoomAddress, allowed_outbound};
 use async_channel::Sender;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::{
     runtime::{Builder, Handle},
@@ -24,6 +25,23 @@ pub enum EventKind {
 pub struct Event {
     pub generation: u64,
     pub kind: EventKind,
+}
+
+/// Never block the WebView callback or silently lose playback authority.
+/// A full inbox sets the captured host's terminal flag; no queued event is evicted.
+pub fn enqueue_ipc(
+    events: &Sender<Event>,
+    generation: u64,
+    host: u64,
+    data: Ipc,
+    overflow: &AtomicBool,
+) {
+    if let Err(async_channel::TrySendError::Full(_)) = events.try_send(Event {
+        generation,
+        kind: EventKind::Ipc { host, data },
+    }) {
+        overflow.store(true, Ordering::Release);
+    }
 }
 
 /// One current-thread Tokio runtime, one OS thread, zero networking until Join.

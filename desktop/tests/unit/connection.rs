@@ -1,5 +1,6 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -7,9 +8,77 @@ use tokio::{
 };
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use undertone_desktop::{
-    bridge::RoomAddress,
-    connection::{EventKind, Network},
+    bridge::{Ipc, RoomAddress},
+    connection::{EventKind, Network, enqueue_ipc},
 };
+
+#[test]
+fn ipc_saturation_is_bounded_and_reports_failure_instead_of_losing_paused_authority() {
+    let (sender, receiver) = async_channel::bounded(2);
+    let overflow = AtomicBool::new(false);
+    enqueue_ipc(&sender, 3, 8, Ipc::Ready, &overflow);
+    enqueue_ipc(&sender, 3, 8, Ipc::Ready, &overflow);
+    enqueue_ipc(
+        &sender,
+        3,
+        8,
+        Ipc::State {
+            position: 0.,
+            duration: 120.,
+            playing: false,
+            available: true,
+        },
+        &overflow,
+    );
+    assert_eq!(receiver.len(), 2);
+    assert!(overflow.load(Ordering::Acquire));
+    // No unrelated/new-generation event was evicted to make space for a failure.
+    for _ in 0..2 {
+        assert!(matches!(
+            receiver.try_recv().unwrap().kind,
+            EventKind::Ipc {
+                host: 8,
+                data: Ipc::Ready
+            }
+        ));
+    }
+    assert!(receiver.is_empty());
+}
+
+#[test]
+fn ipc_delivery_and_closed_receiver_do_not_block() {
+    let (sender, receiver) = async_channel::bounded(1);
+    let overflow = AtomicBool::new(false);
+    enqueue_ipc(&sender, 1, 2, Ipc::Ready, &overflow);
+    assert!(matches!(
+        receiver.try_recv().unwrap().kind,
+        EventKind::Ipc {
+            host: 2,
+            data: Ipc::Ready
+        }
+    ));
+    drop(receiver);
+    enqueue_ipc(&sender, 1, 2, Ipc::Ready, &overflow);
+    assert!(!overflow.load(Ordering::Acquire));
+}
+
+#[test]
+fn stale_host_overflow_does_not_poison_its_replacement() {
+    let (sender, receiver) = async_channel::bounded(1);
+    let old_host = AtomicBool::new(false);
+    let new_host = AtomicBool::new(false);
+    enqueue_ipc(&sender, 1, 3, Ipc::Ready, &new_host);
+    enqueue_ipc(&sender, 1, 2, Ipc::Ready, &old_host);
+    assert!(old_host.load(Ordering::Acquire));
+    assert!(!new_host.load(Ordering::Acquire));
+    assert!(matches!(
+        receiver.try_recv().unwrap().kind,
+        EventKind::Ipc {
+            host: 3,
+            data: Ipc::Ready
+        }
+    ));
+}
 
 async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
     let mut request = Vec::new();
