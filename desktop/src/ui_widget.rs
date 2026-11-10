@@ -945,7 +945,25 @@ fn footer_status(error: &str, notice: &str, status: &str, live: bool) -> String 
         error.to_owned()
     } else if status == text("autoplay-blocked") {
         text("widgetEnablePlayback")
-    } else if !status.is_empty() && status != text("playing") && status != text("paused") {
+    } else if [
+        "waiting-snapshot",
+        "waiting-clock",
+        "recovering",
+        "loading",
+        "buffering",
+        "unsupported-rate",
+        "error",
+        "connectionFailed",
+        "protocolRequired",
+        "invalidTimeline",
+        "unsupportedTimeline",
+        "unsupportedSource",
+        "browserFailed",
+        "bridgeFailed",
+    ]
+    .iter()
+    .any(|key| status == text(key))
+    {
         status.to_owned()
     } else if !notice.is_empty() {
         notice.to_owned()
@@ -984,6 +1002,29 @@ mod tests {
             footer_status("Window error", "", &text("autoplay-blocked"), true),
             "Window error"
         );
+    }
+
+    #[test]
+    fn neutral_status_does_not_hide_actionable_notices() {
+        for key in [
+            "idle",
+            "connecting",
+            "connected",
+            "empty",
+            "disposed",
+            "playing",
+            "paused",
+        ] {
+            for notice in ["invalidRoom", "widgetRestoreFailed"] {
+                for live in [false, true] {
+                    assert_eq!(
+                        footer_status("", &text(notice), &text(key), live),
+                        text(notice)
+                    );
+                }
+            }
+        }
+        assert_eq!(footer_status("", "", &text("idle"), false), text("idle"));
     }
 
     #[test]
