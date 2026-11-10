@@ -5,10 +5,11 @@ use super::{
     ui_music::{Action, Panel},
 };
 use gpui::{
-    App, AppContext, Bounds, Context, Div, Entity, FocusHandle, IntoElement, Render, Stateful,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
-    WindowOptions, div, prelude::*, px, relative, rgb, size,
+    App, AppContext, Bounds, Context, Div, Entity, FocusHandle, IntoElement, Pixels, Render,
+    Stateful, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowControlArea, WindowHandle,
+    WindowOptions, canvas, div, prelude::*, px, relative, rgb, size,
 };
+use std::{cell::Cell, rc::Rc};
 use undertone_desktop::{artwork::YoutubeId, music::ActiveTag, session::CommandAuthority, text};
 
 pub const WIDGET_SIZE: (f32, f32) = (410., 661.);
@@ -433,6 +434,8 @@ impl Render for Widget {
             );
         let duration = player.duration;
         let seeking = ui::safe_seek(player.position, duration, live).is_some();
+        let seek_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let measured_seek = seek_bounds.clone();
         let timeline = slot(218., 36.)
             .flex()
             .flex_col()
@@ -440,6 +443,15 @@ impl Render for Widget {
             .child(
                 div()
                     .id("widget-seek")
+                    .relative()
+                    .child(
+                        canvas(
+                            move |bounds, _, _| measured_seek.set(Some(bounds)),
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
                     .w_full()
                     .h(px(14.))
                     .flex()
@@ -471,8 +483,11 @@ impl Render for Widget {
                             ),
                     )
                     .on_click(cx.listener(move |widget, event: &gpui::ClickEvent, _, cx| {
-                        if seeking && let Some(point) = event.mouse_position() {
-                            let fraction = ((f32::from(point.x) - 20.) / 370.).clamp(0., 1.);
+                        if seeking
+                            && let Some(point) = event.mouse_position()
+                            && let Some(bounds) = seek_bounds.get()
+                            && let Some(fraction) = slider_fraction(point.x, bounds)
+                        {
                             widget.route(
                                 Route::Playback(Control::Seek(f64::from(fraction) * duration)),
                                 authority,
@@ -514,6 +529,8 @@ impl Render for Widget {
             );
         let volume = player.volume;
         let audible = if player.muted { 0 } else { volume };
+        let volume_bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let measured_volume = volume_bounds.clone();
         let transport = slot(258., 44.)
             .flex()
             .items_center()
@@ -530,6 +547,15 @@ impl Render for Widget {
                     .child(
                         div()
                             .id("widget-volume")
+                            .relative()
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| measured_volume.set(Some(bounds)),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .size_full(),
+                            )
                             .w(px(60.))
                             .h(px(28.))
                             .flex()
@@ -564,12 +590,11 @@ impl Render for Widget {
                             )
                             .on_click(cx.listener(
                                 move |widget, event: &gpui::ClickEvent, _, cx| {
-                                    if let Some(point) = event.mouse_position() {
-                                        let volume = (((f32::from(point.x) - 55.) / 60.)
-                                            .clamp(0., 1.)
-                                            * 100.)
-                                            .round()
-                                            as u8;
+                                    if let Some(point) = event.mouse_position()
+                                        && let Some(bounds) = volume_bounds.get()
+                                        && let Some(fraction) = slider_fraction(point.x, bounds)
+                                    {
+                                        let volume = (fraction * 100.).round() as u8;
                                         widget.route(
                                             Route::Playback(Control::Volume(volume)),
                                             authority,
@@ -771,15 +796,7 @@ impl Render for Widget {
         if player.up_next.is_empty() {
             queue = queue.child(quiet(text("queueEmpty"), 11.));
         }
-        let footer_text = if !self.error.is_empty() {
-            self.error.clone()
-        } else if !player.notice.is_empty() {
-            player.notice.clone()
-        } else if live {
-            text("widgetPlaybackHint")
-        } else {
-            player.status.clone()
-        };
+        let footer_text = footer_status(&self.error, &player.notice, &player.status, live);
         let footer_tip = footer_text.clone();
         div()
             .size_full()
@@ -916,6 +933,28 @@ fn mood_icon(key: &str) -> &'static str {
         _ => "brand",
     }
 }
+
+fn slider_fraction(x: Pixels, bounds: Bounds<Pixels>) -> Option<f32> {
+    let width = f32::from(bounds.size.width);
+    let offset = f32::from(x - bounds.origin.x);
+    (width.is_finite() && width > 0. && offset.is_finite()).then(|| (offset / width).clamp(0., 1.))
+}
+
+fn footer_status(error: &str, notice: &str, status: &str, live: bool) -> String {
+    if !error.is_empty() {
+        error.to_owned()
+    } else if status == text("autoplay-blocked") {
+        text("widgetEnablePlayback")
+    } else if !status.is_empty() && status != text("playing") && status != text("paused") {
+        status.to_owned()
+    } else if !notice.is_empty() {
+        notice.to_owned()
+    } else if live {
+        text("widgetPlaybackHint")
+    } else {
+        status.to_owned()
+    }
+}
 fn can_show_personal(state: &undertone_desktop::session::NativeState, active: ActiveTag) -> bool {
     state.account.logged_in && !state.account.expired && active == ActiveTag::Active
 }
@@ -923,6 +962,39 @@ fn can_show_personal(state: &undertone_desktop::session::NativeState, active: Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn available_provider_still_exposes_recovery_before_success_notices() {
+        assert_eq!(
+            footer_status("", "Command applied", &text("autoplay-blocked"), true),
+            text("widgetEnablePlayback")
+        );
+        for key in ["buffering", "recovering", "loading", "error"] {
+            assert_eq!(
+                footer_status("", "Command applied", &text(key), true),
+                text(key)
+            );
+        }
+        for key in ["playing", "paused"] {
+            assert_eq!(
+                footer_status("", "", &text(key), true),
+                text("widgetPlaybackHint")
+            );
+        }
+        assert_eq!(
+            footer_status("Window error", "", &text("autoplay-blocked"), true),
+            "Window error"
+        );
+    }
+
+    #[test]
+    fn sliders_use_rendered_endpoints_after_border_and_flex_shrink() {
+        let bounds = Bounds::new(gpui::point(px(56.), px(0.)), size(px(59.), px(28.)));
+        for (x, expected) in [(55., 0.), (56., 0.), (85.5, 0.5), (115., 1.), (116., 1.)] {
+            assert_eq!(slider_fraction(px(x), bounds), Some(expected));
+        }
+        let empty = Bounds::new(bounds.origin, size(px(0.), px(28.)));
+        assert_eq!(slider_fraction(px(56.), empty), None);
+    }
     #[test]
     fn closing_main_preserves_playback_owner_only_while_widget_exists() {
         assert!(keep_owner_on_close(true));

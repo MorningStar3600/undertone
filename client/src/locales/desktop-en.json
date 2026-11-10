@@ -187,5 +187,6 @@
 	"widgetMoodsHint": "Open track moods to load or manage your tags.",
 	"widgetSuggestions": "Contributor moods:",
 	"widgetAddedBy": "Added by",
-	"widgetPlaybackHint": "Personal volume · Synchronized playback"
+	"widgetPlaybackHint": "Personal volume · Synchronized playback",
+	"widgetEnablePlayback": "Open player → Enable playback to turn on sound"
 }
