@@ -1,5 +1,5 @@
 import { musicTransaction } from "./room-music-db.js";
-import type { Sequelize } from "sequelize";
+import type { Sequelize, Transaction } from "sequelize";
 import * as db from "../models/index.js";
 import { musicRoomModels, type DurableMusicRoom } from "../models/music-room.js";
 import { restoreMusicScheduler, serializeMusicScheduler } from "./music-scheduler.js";
@@ -18,6 +18,8 @@ export interface MusicRoomStore {
 export interface MusicRoomCommitHooks {
 	/** Runs on every transaction attempt, after acquisition and again after staged SQL writes. */
 	authorize?: () => void | Promise<void>;
+	/** Recheck catalogue eligibility in this transaction on every attempt, after staged I/O. */
+	validate?: (transaction: Transaction) => Promise<void>;
 	/** Synchronous, retryable timeline derivation after SQL waits and authorization. No I/O. */
 	finalize?: () => DurableMusicRoom;
 }
@@ -130,6 +132,12 @@ export class SqlMusicRoomStore implements MusicRoomStore {
 				// Everything above remains reversible. This is the authorization/intent
 				// linearization point; reject here to roll back snapshot, events and scores.
 				await hooks?.authorize?.();
+				if (hooks?.validate) {
+					await hooks.validate(transaction);
+					// Eligibility reads can yield too. Retain the final live grant/session
+					// check immediately before the synchronous lifetime/eligibility fences.
+					await hooks.authorize?.();
+				}
 				if (hooks?.finalize) {
 					const final = hooks.finalize();
 					// Finalization may retime a reducer result, never remove/rekey rows

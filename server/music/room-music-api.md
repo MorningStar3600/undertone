@@ -374,3 +374,12 @@ independent timeline delays, late source exhaustion, guest identity and stale vo
 The PostgreSQL CAS-wait check is an adapter simulation, not a live PostgreSQL test.
 Constructor, public DTO, request-page and projection wiring are separate integration
 work and are unchanged by this persistence callback contract.
+
+Navigation commits additionally supply `MusicRoomCommitHooks.validate(transaction)`. The store
+awaits it after staged SQL and asynchronous authorization on every transaction
+attempt, before synchronous finalization. It checks the target's catalogue fingerprints/account
+versions using the room writer transaction, and rechecks local source authorization asynchronously.
+The store reauthorizes after validation too, retaining live grants/session checks across those reads.
+Membership and relevant catalogue invalidations are then checked synchronously by finalization.
+A failed check rolls back the staged snapshot/history/scores, and navigation retries with fresh
+eligibility. This hook does not run provider resolution or open a nested music transaction.

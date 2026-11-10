@@ -175,6 +175,11 @@ const defaultResolver: CatalogueResolver = {
 
 type Listener = (change: CatalogueChange) => void | Promise<void>;
 const listeners = new Set<Listener>();
+const eligibilityWatches = new Set<{
+	users: Set<number>;
+	tracks: Set<string>;
+	current: boolean;
+}>();
 /** Fires only after committed, actual library/annotation changes; favorites never invalidate rooms. */
 export function subscribeCatalogueChanges(listener: Listener): () => void {
 	listeners.add(listener);
@@ -183,6 +188,12 @@ export function subscribeCatalogueChanges(listener: Listener): () => void {
 	};
 }
 async function notify(change: CatalogueChange): Promise<void> {
+	// Fence in-flight eligibility reads before any asynchronous listener can yield.
+	for (const watch of eligibilityWatches) {
+		if (watch.users.has(change.userId) || watch.tracks.has(change.trackId)) {
+			watch.current = false;
+		}
+	}
 	for (const listener of listeners) {
 		try {
 			await listener(change);
@@ -247,6 +258,17 @@ export class MusicCatalogue {
 		private readonly models: () => MusicModels = () => db,
 		private readonly resolver: CatalogueResolver = defaultResolver,
 	) {}
+	/** Short-lived navigation fence; release it on success, refusal, and retries. */
+	watchEligibility(userIds: number[], trackIds: string[]) {
+		const watch = { users: new Set(userIds), tracks: new Set(trackIds), current: true };
+		eligibilityWatches.add(watch);
+		return {
+			isCurrent: () => watch.current,
+			release: () => {
+				eligibilityWatches.delete(watch);
+			},
+		};
+	}
 	/** Narrow local-media seam; provider sources retain their historical policy. */
 	async localSourceAllowed(source: TrackSource, contributorId: string): Promise<boolean> {
 		return localMediaLibrary.sourceAllowed(source, contributorId);
@@ -291,62 +313,62 @@ export class MusicCatalogue {
 		userIds: number[],
 		occurrenceTrackIds: string[] = [],
 		annotationUserIds = userIds,
+		transaction?: Transaction,
 	) {
 		const models = this.models();
-		return musicTransaction(
-			this.connection(),
-			async transaction => {
-				const links = await models.UserLibraryTrack.findAll({
-					where: { userId: { [Op.in]: userIds } },
+		const read = async (transaction: Transaction) => {
+			const links = await models.UserLibraryTrack.findAll({
+				where: { userId: { [Op.in]: userIds } },
+				transaction,
+			});
+			const ids = [
+				...new Set([...links.map(row => row.get().trackId), ...occurrenceTrackIds]),
+			];
+			const tracks: Track[] = [],
+				sources: TrackSource[] = [],
+				tags: { userId: number; trackId: string; moodId: string }[] = [];
+			// Bounded bind batches work in both SQLite and PostgreSQL, even for large libraries.
+			for (let offset = 0; offset < ids.length; offset += 400) {
+				const trackId = { [Op.in]: ids.slice(offset, offset + 400) };
+				tracks.push(
+					...(await models.Track.findAll({ where: { id: trackId }, transaction })).map(
+						row => trackDto(row.get({ plain: true })),
+					),
+				);
+				sources.push(
+					...(await models.TrackSource.findAll({ where: { trackId }, transaction })).map(
+						row => row.get({ plain: true }),
+					),
+				);
+				tags.push(
+					...(
+						await models.UserTrackMood.findAll({
+							where: { trackId, userId: { [Op.in]: annotationUserIds } },
+							transaction,
+						})
+					).map(row => row.get({ plain: true })),
+				);
+			}
+			const versions = await this.roomVersions(annotationUserIds, transaction);
+			const moods = (
+				await models.Mood.findAll({
+					where: { id: { [Op.in]: [...new Set(tags.map(tag => tag.moodId))] } },
 					transaction,
-				});
-				const ids = [
-					...new Set([...links.map(row => row.get().trackId), ...occurrenceTrackIds]),
-				];
-				const tracks: Track[] = [],
-					sources: TrackSource[] = [],
-					tags: { userId: number; trackId: string; moodId: string }[] = [];
-				// Bounded bind batches work in both SQLite and PostgreSQL, even for large libraries.
-				for (let offset = 0; offset < ids.length; offset += 400) {
-					const trackId = { [Op.in]: ids.slice(offset, offset + 400) };
-					tracks.push(
-						...(
-							await models.Track.findAll({ where: { id: trackId }, transaction })
-						).map(row => trackDto(row.get({ plain: true }))),
-					);
-					sources.push(
-						...(
-							await models.TrackSource.findAll({ where: { trackId }, transaction })
-						).map(row => row.get({ plain: true })),
-					);
-					tags.push(
-						...(
-							await models.UserTrackMood.findAll({
-								where: { trackId, userId: { [Op.in]: annotationUserIds } },
-								transaction,
-							})
-						).map(row => row.get({ plain: true })),
-					);
-				}
-				const versions = await this.roomVersions(annotationUserIds, transaction);
-				const moods = (
-					await models.Mood.findAll({
-						where: { id: { [Op.in]: [...new Set(tags.map(tag => tag.moodId))] } },
-						transaction,
-					})
-				).map(row => moodDto(row.get({ plain: true })));
-				return {
-					links: links.map(row => row.get({ plain: true })),
-					tracks,
-					sources,
-					tags,
-					moods,
-					versions,
-					trackVersions: trackVersions(ids, tracks, sources),
-				};
-			},
-			true,
-		);
+				})
+			).map(row => moodDto(row.get({ plain: true })));
+			return {
+				links: links.map(row => row.get({ plain: true })),
+				tracks,
+				sources,
+				tags,
+				moods,
+				versions,
+				trackVersions: trackVersions(ids, tracks, sources),
+			};
+		};
+		// Commit eligibility reads must share the room writer transaction. Opening a
+		// nested musicTransaction here would deadlock the per-connection SQLite queue.
+		return transaction ? read(transaction) : musicTransaction(this.connection(), read, true);
 	}
 	async roomVersions(userIds: number[], transaction?: Transaction): Promise<string> {
 		const rows = await musicRoomModels(this.connection()).Version.findAll({
