@@ -28,6 +28,8 @@ pub enum EventKind {
 #[derive(Debug)]
 pub struct Event {
     pub generation: u64,
+    /// Account/socket generation for network playback; local captured-host IPC has none.
+    pub authority: Option<(u64, u64)>,
     pub kind: EventKind,
 }
 
@@ -42,6 +44,7 @@ pub fn enqueue_ipc(
 ) {
     if let Err(async_channel::TrySendError::Full(_)) = events.try_send(Event {
         generation,
+        authority: None,
         kind: EventKind::Ipc { host, data },
     }) {
         overflow.store(true, Ordering::Release);
@@ -57,10 +60,25 @@ pub struct Network {
 }
 
 pub struct Connection {
-    sender: mpsc::Sender<Value>,
+    sender: mpsc::Sender<PlaybackEnvelope>,
     abort: AbortHandle,
     native_sender: mpsc::Sender<NativeEnvelope>,
     native: watch::Receiver<NativeState>,
+}
+
+struct PlaybackEnvelope {
+    account: u64,
+    socket: u64,
+    message: Value,
+}
+
+impl PlaybackEnvelope {
+    fn current(&self, state: &NativeState) -> bool {
+        state.connected
+            && !state.account.expired
+            && self.account == state.account_generation
+            && self.socket == state.socket_generation
+    }
 }
 
 struct NativeEnvelope {
@@ -85,7 +103,15 @@ impl CacheLease {
 
 impl Connection {
     pub fn send(&self, message: Value) -> bool {
-        allowed_outbound(&message) && self.sender.try_send(message).is_ok()
+        let state = self.native.borrow();
+        let envelope = PlaybackEnvelope {
+            account: state.account_generation,
+            socket: state.socket_generation,
+            message,
+        };
+        envelope.current(&state)
+            && allowed_outbound(&envelope.message)
+            && self.sender.try_send(envelope).is_ok()
     }
     /// A separate native queue; never callable by WebView IPC.
     pub fn send_native(&self, command: NativeCommand) -> bool {
@@ -194,6 +220,7 @@ impl Network {
                 let _ = events
                     .send(Event {
                         generation,
+                        authority: None,
                         kind: EventKind::Failed(code),
                     })
                     .await;
@@ -212,7 +239,7 @@ impl Network {
 async fn run(
     generation: u64,
     address: RoomAddress,
-    mut outgoing: mpsc::Receiver<Value>,
+    mut outgoing: mpsc::Receiver<PlaybackEnvelope>,
     mut native: mpsc::Receiver<NativeEnvelope>,
     state_events: &watch::Sender<NativeState>,
     cache: CacheLease,
@@ -360,7 +387,9 @@ async fn run(
                 _ = &mut capability_deadline, if !capability => return Err("protocolRequired"),
                 _ = tokio::time::sleep_until(snapshot_deadline), if snapshot.is_some() => return Err("invalidTimeline"),
                 message = outgoing.recv() => {
-                    let Some(message) = message else { return Ok(()); };
+                    let Some(envelope) = message else { return Ok(()); };
+                    if !envelope.current(&state) { continue; }
+                    let message = envelope.message;
                     let now = Instant::now();
                     sends.retain(|at| now.duration_since(*at) < Duration::from_secs(10));
                     if !allowed_outbound(&message) || sends.len() >= 32 { return Err("bridgeFailed"); }
@@ -392,8 +421,9 @@ async fn run(
                                 snapshot = None;
                             }
                             // Drop everything else, including user/chat/legacy/auth payloads.
-                            if matches!(message["action"].as_str(), Some("playback-capabilities" | "playback-snapshot" | "playback-event" | "playback-result" | "clock-reply")) {
-                                events.send(Event { generation, kind: EventKind::Message(message) }).await.map_err(|_| "bridgeFailed")?;
+                            if matches!(message["action"].as_str(), Some("playback-capabilities" | "playback-snapshot" | "playback-event" | "playback-result" | "clock-reply"))
+                                && state.connected && !state.account.expired {
+                                    events.send(Event { generation, authority: Some((state.account_generation,state.socket_generation)), kind: EventKind::Message(message) }).await.map_err(|_| "bridgeFailed")?;
                             }
                         }
                         Some(Ok(Message::Ping(bytes))) => socket.send(Message::Pong(bytes)).await.map_err(|_| "connectionFailed")?,
@@ -414,3 +444,35 @@ struct RestCompletion {
     result: Result<Value, NativeError>,
 }
 type RestFuture = std::pin::Pin<Box<dyn std::future::Future<Output = RestCompletion> + Send>>;
+
+#[cfg(test)]
+mod playback_fence_tests {
+    use super::*;
+
+    #[test]
+    fn queued_playback_is_rejected_after_account_or_socket_replacement() {
+        let envelope = PlaybackEnvelope {
+            account: 3,
+            socket: 5,
+            message: json!({}),
+        };
+        let mut state = NativeState {
+            account_generation: 3,
+            socket_generation: 5,
+            connected: true,
+            ..NativeState::default()
+        };
+        assert!(envelope.current(&state));
+        state.account_generation += 1;
+        assert!(!envelope.current(&state));
+        state.account_generation = 3;
+        state.socket_generation += 1;
+        assert!(!envelope.current(&state));
+        state.socket_generation = 5;
+        state.connected = false;
+        assert!(!envelope.current(&state));
+        state.connected = true;
+        state.account.expired = true;
+        assert!(!envelope.current(&state));
+    }
+}

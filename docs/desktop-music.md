@@ -102,7 +102,12 @@ changes. Fresh capabilities arrive through the unchanged playback EventKind path
 subscribe with a fresh nonce/snapshot before accepting fresh playback authority.
 Native refresh does not synthesize a player snapshot, host or browser. The UI owns
 generation filtering and discarding playback events already queued before a
-refresh. Dropping Connection aborts its socket and HTTP future. Network owns one
+refresh. Network playback events carry `Event.authority = Some((account_generation,
+socket_generation))`; reject mismatches against the current native state before
+processing them. Local captured-host IPC uses `None`. Outbound playback messages
+also capture both generations and are discarded at dequeue after replacement;
+identity transitions disable playback transport until fresh socket authority.
+Dropping Connection aborts its socket and HTTP future. Network owns one
 active room; connecting another aborts the previous connection.
 
 `RefreshRoom` is refused while HTTP is busy. It drops old correlations and keeps
