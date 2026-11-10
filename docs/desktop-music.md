@@ -124,7 +124,9 @@ refresh fences private caches and old commands immediately when processed. HTTP
 work and queued commands capture account generation; tag work additionally captures
 track generation/UUID, so replacement and A→B→A cannot restore an old completion.
 Music correlations include outer, socket and account generations. Pages older
-than the highest sync/result revision are rejected. Only one music command is
+than the highest sync/result revision are rejected. Any sync or result that advances
+the revision invalidates older pages and confirmation offers before installing its
+own response data; a later equal-revision sync cannot refresh old consent. Only one music command is
 pending at once; after 20 seconds mutation outcome is Uncertain, with explicit
 retry. RevisionConflict, SlotConflict, RequestConflict, SourceUnavailable,
 InvalidConfirmation, Rejected and NotFound remain distinct; no automatic replay.

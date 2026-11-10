@@ -739,6 +739,12 @@ impl RoomState {
         let p = self.pending.take().unwrap();
         self.busy = false;
         let stale = revision < self.revision;
+        if revision > self.revision {
+            // A result can precede the matching sync. Only data supplied by this
+            // response may become current at its revision, never an older offer.
+            self.invalidate_pages();
+            self.confirmation = None;
+        }
         self.revision = self.revision.max(revision);
         let status = MusicStatus::parse(result["status"].as_str().unwrap_or("rejected"));
         if is_read(&p.command) {
@@ -1138,6 +1144,68 @@ mod tests {
         r.expire(Instant::now() + Duration::from_secs(21));
         assert!(!r.retry_available);
         assert!(r.prepare(MusicCommand::Retry, None, 0, 1, 0).is_none());
+    }
+
+    #[test]
+    fn newer_result_invalidates_old_offers_before_installing_its_own_page() {
+        let mood = default_moods()[0].clone();
+        let offer = json!({"requestId":"mine","entryId":"entry","trackId":mood.id,
+            "intent":"mix","status":"pending",
+            "conflicts":[{"participantId":"other","moodId":mood.id}],
+            "conflictMetadata":[{"participantId":"other","moodId":mood.id,
+                "participantName":"Other","mood":{"id":mood.id,"name":"like",
+                    "normalizedName":"like","iconKey":"heart"}}]});
+        for status in ["applied", "rejected"] {
+            let mut r = room();
+            let read = r
+                .prepare(MusicCommand::Requests { offset: 0 }, None, 0, 1, 0)
+                .unwrap();
+            r.result(
+                &json!({"correlationId":read["request"]["command"]["correlationId"],
+                "revision":3,"status":"applied","page":{
+                    "items":[offer],"total":1,"offset":0,"limit":25}}),
+                0,
+            );
+            let accepted = r.confirmation_offer().unwrap();
+            let read = r
+                .prepare(MusicCommand::Queue { offset: 0 }, None, 0, 1, 0)
+                .unwrap();
+            r.result(
+                &json!({"correlationId":read["request"]["command"]["correlationId"],
+                "revision":4,"status":status,"page":{
+                    "items":[],"total":0,"offset":0,"limit":25}}),
+                0,
+            );
+            assert!(r.requests_page.stale);
+            assert!(r.confirmation_offer().is_none());
+            assert_eq!(r.queue_page.stale, status != "applied");
+            let music = json!({"revision":4,"planRevision":4,"queue":[],"queueTotal":0,
+                "current":null,"settings":{},"participants":[{"participantId":"me",
+                    "clientIds":["client"],"includeMoodIds":[],"excludeMoodIds":[]}]});
+            r.project(&json!({"action":"sync","music":music}), 0);
+            assert!(r.confirmation_offer().is_none());
+            assert!(
+                r.prepare(MusicCommand::Confirm(accepted), None, 0, 1, 0)
+                    .is_none()
+            );
+            // A later requests result supplies genuinely fresh metadata itself.
+            let read = r
+                .prepare(MusicCommand::Requests { offset: 0 }, None, 0, 1, 0)
+                .unwrap();
+            r.result(
+                &json!({"correlationId":read["request"]["command"]["correlationId"],
+                "revision":5,"status":"applied","page":{
+                    "items":[offer],"total":1,"offset":0,"limit":25}}),
+                0,
+            );
+            assert!(!r.requests_page.stale);
+            assert!(r.queue_page.stale);
+            let fresh = r.confirmation_offer().unwrap();
+            assert!(
+                r.prepare(MusicCommand::Confirm(fresh), None, 0, 1, 0)
+                    .is_some()
+            );
+        }
     }
     #[test]
     fn late_pages_cannot_replace_newer_sync_and_modes_gate_writes() {
