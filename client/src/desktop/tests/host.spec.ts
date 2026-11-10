@@ -127,21 +127,22 @@ it("hides activation on room pause and rejects a stale click after disposal", as
 	f.host.receive({
 		action: "playback-event",
 		event: {
-			version: 1,
 			epoch: "fixture",
 			sequence: 2,
 			occurrenceId: 1,
 			type: "pause",
 			effectiveAtMs: 1500,
-			positionSeconds: 0.5,
 		},
 	});
 	await vi.advanceTimersByTimeAsync(300);
 	expect(f.button.hidden).toBe(true);
+	expect(f.sent.filter(x => x.kind === "status").at(-1)?.code).toBe("paused");
+	expect(f.api.destroy).not.toHaveBeenCalled();
 	const attempts = vi.mocked(f.api.playVideo).mock.calls.length;
 	f.button.click();
 	expect(f.api.playVideo).toHaveBeenCalledTimes(attempts);
 	f.host.dispose();
+	expect(f.api.destroy).toHaveBeenCalledTimes(1);
 	f.button.click();
 	expect(f.api.playVideo).toHaveBeenCalledTimes(attempts);
 	expect(document.getElementById("activate-playback")).toBeNull();
