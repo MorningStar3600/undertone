@@ -3,7 +3,7 @@
 This is a runnable native GPUI player for **timeline protocol v1 and YouTube only**.
 It does not boot the Vue app or support legacy playback. Native account, moods,
 favorites, room preferences, URL admission and queue panels reuse the existing
-server APIs. The full player and compact desktop widget share one playback host.
+server APIs. The full player and separate floating desktop widget share one playback host.
 See [native UI](desktop-ui.md) and [account/music contracts](desktop-music.md).
 The standalone `desktop/Cargo.toml` workspace and lockfile do not change the root
 balancer workspace or its dependency features. Published upstream GPUI is pinned
@@ -54,6 +54,22 @@ playback, desktop host, or desktop string source. Generated files and Cargo buil
 outputs are ignored. No installer, signing, update service, or OS media integration
 is included.
 
+## Windows and artwork
+
+**Widget** toggles one separate 410 x 661 native window, pinned above ordinary
+applications by default. Its pin toggles Windows topmost status without activating
+the window. The compact reference layout shows real current-track YouTube artwork,
+mood chips and an actual upcoming preview; unsupported or missing artwork has an
+embedded fallback. Add, Queue, Settings and mood management restore the existing
+main panels. The main player also has a native artwork slot beside its provider.
+
+Closing the widget leaves playback alone. Closing the main player while the widget
+exists minimizes the main player to its taskbar button. Restore player and Quit
+Undertone are available in the widget; without a widget, main close exits normally.
+Neither minimize nor widget/pin changes recreate the single host or connection.
+The widget has no browser. This is a floating native window, not the Windows 11
+Widgets feed. See [native UI](desktop-ui.md) for bounds, authority and thumbnail limits.
+
 ## Ownership and lifecycle
 
 Rust owns one room WebSocket and obtains a guest credential from `GET
@@ -85,8 +101,8 @@ controller interface. Readiness and pending play waits are bounded and cancelled
 on disposal/abort. Late callbacks cannot operate on a replacement instance or
 undo a newer pause. Provider playback/rate changes report back to the controller.
 Each new controller generation owns a new iframe; consecutive YouTube tracks
-reuse the WebView environment. A non-YouTube source, clear, disconnect, window
-close, or connection failure drops the WebView/controller. A later YouTube source
+reuse the WebView environment. A non-YouTube source, clear, disconnect, final player
+close/quit, or connection failure drops the WebView/controller. A later YouTube source
 creates it again. The profile is InPrivate; no browser environment is prewarmed.
 
 Only playback snapshot/event/result and clock reply messages cross into the host.
@@ -154,7 +170,7 @@ cargo build --manifest-path desktop/Cargo.toml --locked
 .\desktop\target\debug\undertone-desktop.exe --smoke-test
 ```
 
-The smoke test opens its own native window muted, asserts zero room connections
+The optional smoke test (not run during terminal-only implementation) opens its own native window muted, asserts zero room connections
 and zero WebViews, and exits after two seconds. It ignores connection CLI options.
 Rust transport tests use a loopback HTTP/WebSocket fixture with a dummy guest
 credential; they never contact existing rooms, databases, or Redis. YouTube

@@ -10,7 +10,7 @@ resolver = "2"
 
 [features]
 default = ["native"]
-native = ["dep:gpui", "dep:wry"]
+native = ["dep:gpui", "dep:wry", "dep:raw-window-handle", "dep:windows"]
 
 [dependencies]
 anyhow = "=1.0.100"
@@ -24,6 +24,11 @@ tokio = { version = "=1.48.0", features = ["rt", "net", "time", "sync", "macros"
 tokio-tungstenite = { version = "=0.28.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"], optional = true }
 wry = { version = "=0.57.2", default-features = false, features = ["os-webview"], optional = true }
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
+raw-window-handle = { version = "=0.6.2", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.61.3", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"], optional = true }
 
 [[bin]]
 name = "undertone-desktop"

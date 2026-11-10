@@ -2,26 +2,71 @@
 
 The native GPUI UI uses warm dark `#100f0e`, card `#1b1917`, amber `#ffbe3d`
 controls, Segoe UI, and blue `#8bc0ff` only for confirmed personal Active tags
-(and native input selection). No external artwork, fonts, UI framework or new
-runtime dependency is introduced. This is a Windows desktop window and widget.
+(and native input selection). English UI strings live in desktop-en.json.
 
-## Layout and provider ownership
+## Separate windows and provider ownership
 
-Full player is 880 x 680 logical pixels. The widget is 440 x 680 with a provider,
-or 440 x 480 without one. Opening a widget detail panel widens the same window to
-840 x 680; closing it restores the compact width. Full-player panels occupy the
-bounded space below playback. Widget panels occupy a scrolling side column.
-Panel navigation, playback and the visible provider remain separate native slots.
-All detail contents use native vertical scrolling; forms do not grow window height.
+The full player stays 880 x 680 logical pixels. **Widget** toggles one separate
+410 x 661 native GPUI top-level window. Its 20 px rounded card follows the supplied
+widget reference: 52 px draggable header, 20 px content padding, 94 px current
+artwork, title/artist, progress, local volume, compact transport, mood chips,
+two upcoming rows, Add track and a quiet footer. There is no video block in the
+widget. Missing artists, contributor names, durations and images are never invented.
+Current contributor names are shown only when authoritative participant metadata
+is available. Queue DTOs supply no provider video ID/art URL or duration, so queue
+rows use the embedded Undertone artwork and omit duration. Open room, Add track,
+See queue, Settings and the mood picker restore the existing main window/panels.
+Quick tags remain in the widget and capture account/session/track authority; only
+confirmed own Active tags appear blue. Unknown tags stay disabled.
 
-Full provider bounds are `(width - 336, 88, 320, 224)`. Widget provider bounds
-are `(12, 278, 416, 224)`, unchanged when its side panel opens. These child-HWND
-slots never scroll beneath native content. Switching presentation and opening
-panels only move the existing controller with `set_bounds`; they do not allocate
-another browser, reload its document, reconnect the room or duplicate sound.
-The lazy allocation site still requires a validated YouTube attachment. The
-provider activation control stays visible and usable. No native overlay tries
-to paint over WebView2.
+The pin defaults on. Pinned GPUI 0.2.2's Windows implementation does not implement
+Floating as topmost: its normal creation path only sets WS_EX_APPWINDOW. The small
+native_window.rs wrapper instead borrows this window's raw-window-handle on the
+UI thread and calls SetWindowPos(HWND_TOPMOST/HWND_NOTOPMOST) with SWP_NOACTIVATE,
+SWP_NOMOVE, SWP_NOSIZE and SWP_NOOWNERZORDER. It never retains an HWND or changes
+another process's windows. Failure is localized in the widget footer. Pin and
+ordinary state/art/progress updates never activate a window. The custom header's
+GPUI WindowControlArea::Drag maps to native Windows HTCAPTION for moving it.
+This is a floating desktop window, not the Windows 11 Widgets feed. Other topmost
+windows, exclusive fullscreen and the secure desktop are subject to Windows rules.
+
+Closing the widget leaves the player and playback alone. Closing the main window
+while a widget exists minimizes the main window, preserving its owner and provider;
+its taskbar button remains available. Restore player and Quit Undertone are explicit
+widget actions. With no widget, closing the main window exits as before. Minimizing
+either window never disposes playback. No hidden owner or tray-only orphan is created.
+
+Player owns the only Network/Connection, observer and lazy WebView2, in the main
+window. Widget holds a weak Player entity and a typed main WindowHandle, observes
+notifications, and defers captured commands back to that owner. It never renders
+Player in a second window, clones forms/focus handles or allocates a browser.
+Opening is deferred outside Player's mutable entity lease because GPUI draws a
+new window synchronously; a pending-open guard prevents duplicate windows.
+The main provider stays at (width - 336, 88, 320, 224), separate from the native
+artwork slot and panels. Widget lifecycle and pin changes neither reconnect the
+room nor recreate/reparent the iframe or duplicate sound. YouTube's activation
+button remains accessible in the main player, with its status hint in the widget.
+
+## Current-track artwork
+
+Only the exact YouTube ID from a validated atomic protocol attachment can construct
+https://i.ytimg.com/vi/ID/hqdefault.jpg. Arbitrary artwork URLs, credentials, paths
+and browser input are not accepted. A separate credential-free reqwest client uses
+the existing Tokio runtime, HTTPS only, no proxies/redirects, a 3 s connect timeout
+and 5 s total request timeout. Bodies are capped at 512 KiB even with chunked HTTP.
+Decoding accepts JPEG/PNG still images only, at most 1024 x 1024 with an 8 MiB
+best-effort decoder allocation budget, then bounds the displayed image to 480 x 480.
+The four-entry in-memory cache includes misses. There is no disk cache, remote
+GPUI img URL, new HTTP client inside GPUI, animation, SVG decode or browser fetch.
+One decoded GPUI RenderImage is shared by the main and widget artwork slots.
+Absent, loading, rejected and unavailable artwork use the embedded Undertone glyph.
+A replacement request aborts HTTP. Monotonic atomic playback-source selection fences
+track completions, including A -> B -> A; fresh native account/socket/room authority
+is checked again on delivery. Clear, disconnect, authority fencing and atomic
+playback-source replacement clear displayed art. Catalogue sync ordering does not
+replace playback-source authority or invalidate a newer matching source thumbnail.
+Only cached dependencies were promoted to direct dependencies (image,
+raw-window-handle and windows); the lockfile adds no package versions.
 
 ## Working native flows
 
@@ -41,7 +86,7 @@ to paint over WebView2.
     Guest, account, pending and expired states are distinct. Only password account
     login is offered. Errors localize HTTPS requirements, 401, 429 and numeric
     Retry-After. Check account and Refresh room are explicit recovery operations.
--   Track moods is available from both modes. It displays contributor priority
+-   Track moods is available from the player and widget. It displays contributor priority
     moods and the complement of loaded own tags/favorite shortcuts. Only confirmed
     own Active tags use blue. Unknown tags cannot be toggled until an explicit
     refresh or Load more establishes their state. Tags require the current stable
@@ -72,16 +117,14 @@ to paint over WebView2.
     pending count, explicit pending-page refresh and page navigation support recovery.
     Missing conflict metadata disables confirmation. Other requests remain cancellable.
 -   Upcoming uses actual public queue entries and optional supplied artists. The
-    expanded Queue panel navigates real native pages. Show/Hide upcoming works in
-    both modes and only affects this window. Local Settings stays separate from
-    room preferences. No fabricated duration, artwork or inactive management control
-    is shown. Legacy/non-Music rooms retain playback and explain collective-control
+    expanded Queue panel navigates real native pages. Show/Hide upcoming affects the main player summary. The widget retains its two-row peek. Local Settings stays separate from
+    room preferences. Unavailable metadata is omitted; embedded artwork is used when needed. Legacy/non-Music rooms retain playback and explain collective-control
     restrictions; no room mode or content is changed automatically.
 
 ## Native session and authority wiring
 
 `main.rs` owns the one Network/Connection, observer and lazy host. `ui.rs` owns
-presentation and bounded geometry. `ui_music.rs` owns forms, localized status,
+main presentation and bounded geometry. ui_widget.rs owns the independent widget and routed controls. artwork.rs owns bounded public thumbnails. `ui_music.rs` owns forms, localized status,
 small projection/action helpers, page admission and preference drafts.
 `ui_input.rs` remains the parent's independently reviewed native input.
 
@@ -119,15 +162,15 @@ It neither marks success nor replays anything; native busy state still gates act
 Failed identity requests may leave playback fenced until explicit Check account or
 Refresh room recovery establishes a fresh socket.
 
-Always-on-top and opacity hacks are omitted; pinned GPUI has no public Windows
-topmost setter. Native input memory is not a cryptographic zeroization facility.
+The widget pin uses the narrowly scoped native Windows wrapper described above.
+Opacity customization is omitted. Native input memory is not a cryptographic zeroization facility.
 Masked-field paste behavior stays with the parent's input implementation.
 
 ## Verification
 
 Terminal-only validation builds the embedded host first with
 `node scripts/build-desktop-player.mjs`, then uses Cargo `--locked --jobs 2` and
-the existing shared target cache. Pure UI tests cover bounded provider/panel
+the existing shared target cache. Pure UI tests cover bounded main-provider
 geometry, seeking/progress, input boundaries, partial-page Unknown states, failed
 page recovery without pagination draining, preserving unknown draft IDs, stale
 account/socket playback and capability-before-watch ordering. Existing native
@@ -139,6 +182,6 @@ server, database or Redis is used. The root executable is not replaced. Compilat
 and pure/fixture tests do not establish visual polish, interactive IME behavior,
 provider activation or live YouTube playback; those require a separately authorized
 manual check. The host bundle, format check, strict all-target Clippy and native build passed.
-The complete Rust suite passed 44 tests; the final focused native binary suite
-passed 15 tests after adding the participant-sync regression (45 tests across
-these suites). No Cargo dependency or lockfile change was needed.
+Check results for this change are recorded in the implementation handoff. No GUI
+was launched: actual z-order, screenshot fidelity, minimize/restore behavior and
+continued live playback while minimized require a separate interactive check.

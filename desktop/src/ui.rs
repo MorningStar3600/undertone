@@ -20,13 +20,7 @@ pub(super) const AMBER_TEXT: u32 = 0x271b07;
 pub(super) const PERSONAL: u32 = 0x8bc0ff;
 pub(super) const PERSONAL_SURFACE: u32 = 0x20354c;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Mode {
-    #[default]
-    Full,
-    Compact,
-}
-
+pub const PLAYER_SIZE: (f32, f32) = (880., 680.);
 #[derive(Debug)]
 pub struct ProviderRect {
     pub x: f32,
@@ -34,49 +28,12 @@ pub struct ProviderRect {
     pub width: f32,
     pub height: f32,
 }
-
-impl Mode {
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::Full => Self::Compact,
-            Self::Compact => Self::Full,
-        }
-    }
-
-    pub fn window_size(self, provider: bool) -> (f32, f32) {
-        self.layout_size(provider, false)
-    }
-    pub fn layout_size(self, provider: bool, detail: bool) -> (f32, f32) {
-        match self {
-            Self::Full => (880., 680.),
-            Self::Compact => (
-                if detail { 840. } else { 440. },
-                if provider || detail { 680. } else { 480. },
-            ),
-        }
-    }
-
-    pub fn padding(self) -> f32 {
-        if self == Self::Compact { 12. } else { 16. }
-    }
-
-    /// Keep a visible provider surface in both modes, above YouTube's 200×200 minimum.
-    /// Coordinates match the fixed native slots below; mode changes only move this surface.
-    pub fn provider_rect(self, width: f32) -> ProviderRect {
-        match self {
-            Self::Full => ProviderRect {
-                x: width - 336.,
-                y: 88.,
-                width: 320.,
-                height: 224.,
-            },
-            Self::Compact => ProviderRect {
-                x: 12.,
-                y: 278.,
-                width: 416.,
-                height: 224.,
-            },
-        }
+pub fn provider_rect(width: f32) -> ProviderRect {
+    ProviderRect {
+        x: width - 336.,
+        y: 88.,
+        width: 320.,
+        height: 224.,
     }
 }
 
@@ -107,7 +64,7 @@ pub fn safe_seek(position: f64, duration: f64, available: bool) -> Option<f64> {
         .then(|| position.clamp(0., duration.min(1e9)))
 }
 
-fn time(seconds: f64) -> String {
+pub(super) fn time(seconds: f64) -> String {
     let seconds = if seconds.is_finite() {
         seconds.max(0.) as u64
     } else {
@@ -140,6 +97,16 @@ impl AssetSource for Assets {
                 "<path d='M10 8L14 4Q17 1 21 5Q24 8 21 11L17 15M14 16L10 20Q7 23 3 19Q0 16 3 13L7 9M8 16L16 8'/>"
             }
             "disconnect" => "<path d='M9 5H4V19H9M12 12H22M18 8L22 12L18 16'/>",
+            "pin" => "<path d='M12 17V22M8 3H16L15 7V11L19 15V17H5V15L9 11V7Z'/>",
+            "settings" => {
+                "<path d='M3 7H7M13 7H21M3 17H13M19 17H21'/><circle cx='10' cy='7' r='3'/><circle cx='16' cy='17' r='3'/>"
+            }
+            "close" => "<path d='M6 6L18 18M18 6L6 18'/>",
+            "headphones" => {
+                "<path d='M4 14V12A8 8 0 0 1 20 12V14'/><rect x='3' y='12' width='4' height='8' rx='2'/><rect x='17' y='12' width='4' height='8' rx='2'/>"
+            }
+            "heart" => "<path d='M12 20L4 12C-2 4 8 0 12 7C16 0 26 4 20 12Z'/>",
+            "moon" => "<path d='M20 15A9 9 0 0 1 9 3A9 9 0 1 0 20 15Z'/>",
             _ => return Ok(None),
         };
         Ok(Some(Cow::Owned(format!(
@@ -152,7 +119,7 @@ impl AssetSource for Assets {
     }
 }
 
-fn icon(name: &'static str, size: f32) -> impl IntoElement {
+pub(super) fn icon(name: &'static str, size: f32) -> impl IntoElement {
     svg().path(name).size(px(size)).flex_shrink_0()
 }
 
@@ -166,7 +133,21 @@ fn muted_label(value: String) -> Div {
     div().text_size(px(12.)).text_color(rgb(MUTED)).child(value)
 }
 
-fn artwork(edge: f32) -> Div {
+pub(super) fn artwork(edge: f32, image: Option<std::sync::Arc<gpui::RenderImage>>) -> Div {
+    if let Some(image) = image {
+        return div()
+            .size(px(edge))
+            .flex_shrink_0()
+            .rounded(px(12.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgb(BORDER))
+            .child(
+                gpui::img(image)
+                    .size_full()
+                    .object_fit(gpui::ObjectFit::Cover),
+            );
+    }
     div()
         .size(px(edge))
         .flex_shrink_0()
@@ -195,7 +176,7 @@ fn artwork(edge: f32) -> Div {
         )
 }
 
-struct Tip(String);
+pub(super) struct Tip(pub String);
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -281,13 +262,9 @@ impl Player {
             self.available && self.host_ready,
         )
         .is_some();
-        let width = if self.mode == Mode::Compact {
-            416.
-        } else {
-            f32::from(window.viewport_size().width)
-                - if self.webview.is_some() { 368. } else { 32. }
-        };
-        let padding = self.mode.padding();
+        let width = f32::from(window.viewport_size().width)
+            - if self.webview.is_some() { 368. } else { 32. };
+        let padding = 16.;
         column()
             .h(px(32.))
             .flex_shrink_0()
@@ -497,10 +474,10 @@ impl Player {
 
     fn now_playing(&self) -> Div {
         row()
-            .h(px(64.))
+            .h(px(94.))
             .flex_shrink_0()
             .gap(px(12.))
-            .child(artwork(56.))
+            .child(artwork(94., self.artwork.clone()))
             .child(
                 column()
                     .min_w_0()
@@ -537,7 +514,6 @@ impl Render for Player {
         use super::ui_music::Action;
         self.music_ui.scrolling.begin_frame(window, cx);
         self.music_ui.rendered_authority = self.native.authority();
-        let compact = self.mode == Mode::Compact;
         let provider = self.webview.is_some();
         let detail = self.music_ui.panel.is_some();
         let room = row()
@@ -589,27 +565,19 @@ impl Render for Player {
                 .bg(rgb(CARD))
                 .rounded(px(12.))
         };
-        let playback = if compact {
-            controls.flex_none().h(px(190.))
-        } else {
-            row()
-                .h(px(224.))
-                .flex_shrink_0()
-                .items_start()
-                .gap(px(16.))
-                .child(controls)
-                .when(provider, |s| s.child(provider_slot().w(px(320.))))
-        };
+        let playback = row()
+            .h(px(224.))
+            .flex_shrink_0()
+            .items_start()
+            .gap(px(16.))
+            .child(controls)
+            .when(provider, |s| s.child(provider_slot().w(px(320.))));
         let mut primary = column()
-            .gap(px(if compact { 6. } else { 8. }))
+            .gap(px(8.))
             .min_h_0()
             .flex_1()
             .child(room)
             .child(playback);
-        // The child HWND owns a fixed rectangle; no native overlay crosses it.
-        if compact && provider {
-            primary = primary.child(provider_slot());
-        }
         primary = primary.child(
             div()
                 .h(px(28.))
@@ -627,7 +595,7 @@ impl Render for Player {
             primary = primary.child(self.join_input.clone());
         }
         primary = primary.child(self.panel_navigation(cx));
-        if !compact && detail {
+        if detail {
             primary = primary.child(self.detail_panel(cx));
         } else {
             primary = primary.child(
@@ -654,15 +622,8 @@ impl Render for Player {
             .gap(px(12.))
             .min_h_0()
             .flex_1()
-            .p(px(self.mode.padding()))
-            .child(
-                primary
-                    .h_full()
-                    .when(compact, |s| s.flex_none().w(px(416.))),
-            )
-            .when(compact && detail, |s| {
-                s.child(self.detail_panel(cx).h_full())
-            });
+            .p(px(16.))
+            .child(primary.h_full());
         div()
             .size_full()
             .flex()
@@ -717,9 +678,9 @@ impl Render for Player {
                                 cx,
                             ))
                             .child(self.labeled_button(
-                                if compact { "expand" } else { "compact" },
-                                if compact { "expand" } else { "compact" },
-                                Control::ToggleMode,
+                                "compact",
+                                "compact",
+                                Control::ToggleWidget,
                                 cx,
                             )),
                     ),
@@ -753,35 +714,13 @@ mod tests {
     }
 
     #[test]
-    fn modes_keep_the_provider_visible_and_do_not_reserve_it_when_idle() {
-        for mode in [Mode::Full, Mode::Compact] {
-            let (width, height) = mode.window_size(true);
-            let rect = mode.provider_rect(width);
-            assert!(rect.width >= 200. && rect.height >= 200.);
-            assert!(rect.x >= 0. && rect.y >= 0.);
-            assert!(rect.x + rect.width <= width && rect.y + rect.height <= height);
-            assert_eq!(mode.toggled().toggled(), mode);
-        }
-        assert!(Mode::Compact.window_size(false).1 < Mode::Compact.window_size(true).1);
-    }
-
-    #[test]
-    fn detail_panels_are_bounded_and_leave_the_widget_provider_in_place() {
-        for mode in [Mode::Full, Mode::Compact] {
-            for provider in [false, true] {
-                let (width, height) = mode.layout_size(provider, true);
-                assert!(height <= 680.);
-                let rect = mode.provider_rect(width);
-                assert!(rect.y + rect.height < height);
-                assert!(rect.x + rect.width <= width);
-            }
-        }
-        let closed = Mode::Compact.provider_rect(Mode::Compact.layout_size(true, false).0);
-        let open = Mode::Compact.provider_rect(Mode::Compact.layout_size(true, true).0);
-        assert_eq!(
-            (closed.x, closed.y, closed.width, closed.height),
-            (open.x, open.y, open.width, open.height)
-        );
+    fn main_provider_slot_stays_bounded_and_separate_from_artwork() {
+        let rect = provider_rect(PLAYER_SIZE.0);
+        assert!(rect.width >= 200. && rect.height >= 200.);
+        assert!(rect.x > 16. + 94.);
+        assert_eq!(rect.y, 88.);
+        assert!(rect.x + rect.width <= PLAYER_SIZE.0);
+        assert!(rect.y + rect.height < PLAYER_SIZE.1);
     }
 
     #[test]

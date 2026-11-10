@@ -301,7 +301,7 @@ impl MusicUi {
             timeout_sequence: 0,
         }
     }
-    fn busy(&self, s: &NativeState) -> bool {
+    pub(super) fn busy(&self, s: &NativeState) -> bool {
         s.http_busy || self.pending_http.is_some()
     }
 }
@@ -365,6 +365,7 @@ impl Player {
     }
     fn reset_playback_authority(&mut self) {
         self.dispose_host();
+        self.clear_artwork();
         self.observer_sequence = self.observer_sequence.wrapping_add(1);
         self.observer = undertone_desktop::bridge::Observer::new(self.observer_sequence);
         self.connection_ready = false;
@@ -545,17 +546,18 @@ impl Player {
             false
         }
     }
-    fn drive_pages(&mut self) {
+    pub(super) fn drive_pages(&mut self) {
         let authority = self.native.authority();
         if !self.native.can().account_write || self.music_ui.busy(&self.native) {
             return;
         }
-        let next = self
-            .music_ui
-            .reload
-            .iter()
-            .position(|r| *r)
-            .or_else(|| next_page(&self.native, self.music_ui.panel, &self.music_ui.attempted));
+        let next = self.music_ui.reload.iter().position(|r| *r).or_else(|| {
+            next_page(
+                &self.native,
+                self.music_ui.panel.or(self.widget.map(|_| Panel::Moods)),
+                &self.music_ui.attempted,
+            )
+        });
         if let Some(index) = next {
             let (command, work) = match index {
                 0 => (

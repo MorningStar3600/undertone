@@ -136,6 +136,11 @@ impl Drop for Network {
 }
 
 impl Network {
+    /// Run bounded public artwork work on the existing runtime, without session credentials.
+    pub fn runtime_handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
     pub fn new() -> anyhow::Result<Self> {
         let runtime = Builder::new_current_thread().enable_all().build()?;
         let handle = runtime.handle().clone();

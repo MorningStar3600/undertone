@@ -178,3 +178,17 @@ references, partial-page unknown tags and replacement-track completion fencing.
 Existing playback bridge/IPC/transport tests remain applicable. No native GUI,
 browser, audio, running development service, database, Redis or real credential
 has been touched. Parent review and native UI wiring/build remain required.
+
+## Floating widget integration
+
+The separate native widget observes the existing Player owner. Its quick tag
+callbacks retain the rendered CommandAuthority, track UUID and track generation
+and route through the same music_action/SetTag guards; Unknown tags cannot write.
+Opening the widget admits only bounded initial mood/favorite/vocabulary pages,
+with the same failure and explicit Load more policy as the main panel. Personal
+Active coloring requires a validated signed-in account. Add, See queue, Settings
+and mood-picker actions restore the corresponding main panel; no forms, account
+state, connection, observer or provider are duplicated. Current artwork uses only
+the atomic playback attachment YouTube ID, not an HTTP/music payload URL. Public
+thumbnail work receives no session client or credentials and is fenced on current
+room/account/socket/track replacement. See [native UI](desktop-ui.md).

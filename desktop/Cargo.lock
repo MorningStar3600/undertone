@@ -5977,12 +5977,15 @@ dependencies = [
  "async-channel 2.5.0",
  "futures-util",
  "gpui",
+ "image",
+ "raw-window-handle",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
  "url",
+ "windows 0.61.3",
  "wry",
 ]
 

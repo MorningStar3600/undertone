@@ -141,9 +141,39 @@ fn discovery_requires_capability_own_nonce_and_atomic_attachment() {
         observer.observe(&snapshot("youtube")),
         Ok(Observation::Source(Some(Source {
             youtube: true,
+            youtube_id: undertone_desktop::artwork::YoutubeId::parse("abcdefghijk"),
             title: "Fixture".into()
         })))
     );
+}
+
+#[test]
+fn artwork_uses_only_the_exact_youtube_attachment_id_and_ignores_urls() {
+    let mut message = snapshot("youtube");
+    message["attachment"]["item"]["thumbnail"] = json!("http://127.0.0.1/private?token=secret");
+    let mut observer = Observer::new(1);
+    observer.observe(&capability()).unwrap();
+    let Observation::Source(Some(source)) = observer.observe(&message).unwrap() else {
+        panic!("source");
+    };
+    assert_eq!(
+        source.youtube_id.unwrap().thumbnail_url(),
+        "https://i.ytimg.com/vi/abcdefghijk/hqdefault.jpg"
+    );
+    for id in [
+        "abcdefghij/",
+        "abcdefghijk/../../private",
+        "https://user:password@example.com",
+    ] {
+        let mut observer = Observer::new(1);
+        observer.observe(&capability()).unwrap();
+        message["attachment"]["item"]["id"] = json!(id);
+        let Observation::Source(Some(source)) = observer.observe(&message).unwrap() else {
+            panic!("source");
+        };
+        assert!(!source.youtube);
+        assert!(source.youtube_id.is_none());
+    }
 }
 
 #[test]

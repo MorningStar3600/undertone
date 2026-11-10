@@ -19,10 +19,12 @@ use undertone_desktop::{
 };
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
+mod native_window;
 mod ui;
 mod ui_input;
 mod ui_music;
 mod ui_scroll;
+mod ui_widget;
 
 #[derive(Clone, Copy)]
 enum Control {
@@ -36,7 +38,7 @@ enum Control {
     Quieter,
     Louder,
     Volume(u8),
-    ToggleMode,
+    ToggleWidget,
 }
 
 struct Player {
@@ -61,7 +63,12 @@ struct Player {
     available: bool,
     volume: u8,
     muted: bool,
-    mode: ui::Mode,
+    widget: Option<gpui::WindowHandle<ui_widget::Widget>>,
+    widget_open_pending: bool,
+    artwork_loader: undertone_desktop::artwork::Loader,
+    artwork_selection: undertone_desktop::artwork::Selection,
+    artwork_task: Option<gpui::Task<()>>,
+    artwork: Option<Arc<gpui::RenderImage>>,
     room_name: String,
     details: ui::TrackDetails,
     up_next: Vec<ui::UpcomingTrack>,
@@ -112,9 +119,24 @@ impl Player {
         let music_ui = ui_music::MusicUi::new(window, cx);
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let owner = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let widget_open = owner
+                .upgrade()
+                .is_some_and(|owner| owner.read(cx).widget_open(cx));
+            if ui_widget::keep_owner_on_close(widget_open) {
+                window.minimize_window();
+                false
+            } else {
+                true
+            }
+        });
+        let network = Network::new().expect("desktop network runtime");
+        let artwork_loader = undertone_desktop::artwork::Loader::new(network.runtime_handle())
+            .expect("public thumbnail client");
         Self {
             focus,
-            network: Network::new().expect("desktop network runtime"),
+            network,
             events,
             connection: None,
             connection_ready: false,
@@ -134,7 +156,12 @@ impl Player {
             available: false,
             volume: 50,
             muted,
-            mode: ui::Mode::Full,
+            widget: None,
+            widget_open_pending: false,
+            artwork_loader,
+            artwork_selection: Default::default(),
+            artwork_task: None,
+            artwork: None,
             room_name: String::new(),
             details: ui::TrackDetails::default(),
             up_next: Vec::new(),
@@ -150,7 +177,7 @@ impl Player {
 
     fn video_bounds(&self, window: &Window) -> wry::Rect {
         let viewport = window.viewport_size();
-        let rect = self.mode.provider_rect(f32::from(viewport.width));
+        let rect = ui::provider_rect(f32::from(viewport.width));
         wry::Rect {
             position: wry::dpi::LogicalPosition::new(rect.x, rect.y).into(),
             size: wry::dpi::LogicalSize::new(rect.width, rect.height).into(),
@@ -158,9 +185,7 @@ impl Player {
     }
 
     fn sync_layout(&self, window: &mut Window) {
-        let (width, height) = self
-            .mode
-            .layout_size(self.webview.is_some(), self.music_ui.panel.is_some());
+        let (width, height) = ui::PLAYER_SIZE;
         let viewport = window.viewport_size();
         if (f32::from(viewport.width) - width).abs() > 0.5
             || (f32::from(viewport.height) - height).abs() > 0.5
@@ -194,6 +219,7 @@ impl Player {
         self.connection = None;
         self.connection_ready = false;
         self.dispose_host();
+        self.clear_artwork();
         self.observer = Observer::default();
         self.status = text("idle");
         self.title.clear();
@@ -375,6 +401,11 @@ impl Player {
                     }
                     Ok(Observation::Source(source)) => {
                         self.title = source.as_ref().map(|s| s.title.clone()).unwrap_or_default();
+                        self.select_artwork(
+                            source.as_ref().and_then(|s| s.youtube_id.clone()),
+                            window,
+                            cx,
+                        );
                         if source.as_ref().is_some_and(|s| s.youtube) {
                             if self.title.is_empty() {
                                 self.title = text("untitled");
@@ -553,9 +584,8 @@ impl Player {
                 self.update_volume();
                 None
             }
-            Control::ToggleMode => {
-                self.mode = self.mode.toggled();
-                self.sync_layout(window);
+            Control::ToggleWidget => {
+                self.toggle_widget(window, cx);
                 None
             }
         };
@@ -634,7 +664,7 @@ fn main() -> anyhow::Result<()> {
     // Smoke mode is always offline, even when other CLI parameters were supplied.
     Application::new().with_assets(ui::Assets).run(move |cx: &mut App| {
         cx.on_window_closed(|cx| { if cx.windows().is_empty() { cx.quit(); } }).detach();
-        let (width, height) = ui::Mode::Full.window_size(false);
+        let (width, height) = ui::PLAYER_SIZE;
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         cx.open_window(WindowOptions {
             titlebar: Some(TitlebarOptions { title: Some(text("app").into()), ..Default::default() }),

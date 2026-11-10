@@ -185,6 +185,7 @@ pub fn parse_ipc(uri: &str, body: &str) -> Option<Ipc> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     pub youtube: bool,
+    pub youtube_id: Option<crate::artwork::YoutubeId>,
     pub title: String,
 }
 
@@ -346,13 +347,14 @@ impl Observer {
             .as_str()
             .filter(|s| !s.is_empty() && s.len() <= 8192)
             .ok_or("invalidTimeline")?;
-        let youtube = service == "youtube"
-            && id.len() == 11
-            && id
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c));
+        let youtube_id = if service == "youtube" {
+            crate::artwork::YoutubeId::parse(id)
+        } else {
+            None
+        };
         Ok(Source {
-            youtube,
+            youtube: youtube_id.is_some(),
+            youtube_id,
             title: item["title"]
                 .as_str()
                 .unwrap_or("")
