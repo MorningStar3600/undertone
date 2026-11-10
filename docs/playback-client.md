@@ -41,6 +41,8 @@ Its first arrival starts a one-second capability deadline, while the session buf
 that generation's legacy playback fields. Disconnect, open, outgoing auth, or silence alone cannot
 start fallback. Without a valid capability by the deadline, ownership returns to legacy and Room
 projects the merged fields through `room/sync`, restoring both player and existing request controls.
+Room also reapplies buffered play/pause through its guarded legacy handler, so a browser autoplay
+rejection exposes the local Play gesture immediately without waiting for another server sync.
 This applies on first connection and reconnect. There is no temporary legacy autoplay before the
 deadline. Invalid capability envelopes cannot extend it. A valid capability, including one cached
 before Room mounts or arriving after legacy fallback, clears the legacy buffer, holds rendering and

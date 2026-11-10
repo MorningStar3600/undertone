@@ -471,6 +471,8 @@ export default defineComponent({
 			},
 			onLegacyState(sync) {
 				store.dispatch("room/sync", sync);
+				// Replay the buffered play intent so autoplay failures expose local activation.
+				void onSyncMsg(sync);
 			},
 			onStatus(status) {
 				playbackStatus.value = status.code;
