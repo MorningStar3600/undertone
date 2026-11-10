@@ -535,6 +535,7 @@ impl Player {
 impl Render for Player {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         use super::ui_music::Action;
+        self.music_ui.scrolling.begin_frame(window, cx);
         self.music_ui.rendered_authority = self.native.authority();
         let compact = self.mode == Mode::Compact;
         let provider = self.webview.is_some();

@@ -3,7 +3,7 @@ use super::{
     Player, ui,
     ui_input::{InputEvent, NativeInput},
 };
-use gpui::{Context, Div, Entity, Stateful, Window, div, prelude::*, px, rgb};
+use gpui::{Context, Div, Entity, Focusable, Stateful, Window, div, prelude::*, px, rgb};
 use std::collections::BTreeMap;
 use undertone_desktop::{
     music::{
@@ -215,6 +215,7 @@ fn marker(work: HttpWork, s: &NativeState) -> String {
 }
 
 pub struct MusicUi {
+    pub scrolling: super::ui_scroll::PanelScroll,
     pub panel: Option<Panel>,
     pub rendered_authority: CommandAuthority,
     pub user: Entity<NativeInput>,
@@ -276,6 +277,7 @@ impl MusicUi {
         })
         .detach();
         Self {
+            scrolling: super::ui_scroll::PanelScroll::default(),
             panel: None,
             rendered_authority: NativeState::default().authority(),
             user,
@@ -339,6 +341,10 @@ impl Player {
         self.native.room.busy || self.music_ui.pending_room.is_some()
     }
     pub fn clear_native_forms(&mut self, cx: &mut Context<Self>) {
+        self.music_ui
+            .scrolling
+            .handle
+            .set_offset(gpui::point(px(0.), px(0.)));
         for input in [
             &self.music_ui.user,
             &self.music_ui.password,
@@ -588,6 +594,10 @@ impl Player {
         let can = self.native.can();
         match action {
             Action::Panel(panel) => {
+                self.music_ui
+                    .scrolling
+                    .handle
+                    .set_offset(gpui::point(px(0.), px(0.)));
                 self.music_ui.panel = if self.music_ui.panel == Some(panel) {
                     None
                 } else {
@@ -836,6 +846,11 @@ fn label(key: &str) -> Div {
 }
 
 impl Player {
+    fn panel_input(&self, input: &Entity<NativeInput>, cx: &Context<Self>) -> Div {
+        self.music_ui
+            .scrolling
+            .watch(div().w_full().child(input.clone()), input.focus_handle(cx))
+    }
     pub fn action_button(
         &self,
         id: impl Into<gpui::ElementId>,
@@ -846,7 +861,14 @@ impl Player {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let authority = self.native.authority();
-        div()
+        let id = id.into();
+        let focus = self.music_ui.scrolling.focus(id.clone(), cx);
+        let element = if self.music_ui.scrolling.rendering.get() {
+            self.music_ui.scrolling.watch(div(), focus.clone())
+        } else {
+            div()
+        };
+        element
             .id(id)
             .px(px(10.))
             .py(px(6.))
@@ -858,7 +880,7 @@ impl Player {
             .text_color(rgb(if enabled { ui::TEXT } else { ui::MUTED }))
             .when(enabled, |s| {
                 s.cursor_pointer()
-                    .focusable()
+                    .track_focus(&focus)
                     .tab_stop(true)
                     .focus(|s| s.border_color(rgb(ui::AMBER)))
                     .hover(|s| s.bg(rgb(ui::SECONDARY)))
@@ -1025,8 +1047,8 @@ impl Player {
             }))
             .when_some(account.username.clone(), |s, name| s.child(name))
             .child(label("passwordAccountsOnly"))
-            .child(self.music_ui.user.clone())
-            .child(self.music_ui.password.clone())
+            .child(self.panel_input(&self.music_ui.user, cx))
+            .child(self.panel_input(&self.music_ui.password, cx))
             .child(
                 row()
                     .child(self.button(
@@ -1077,7 +1099,7 @@ impl Player {
             .child(self.page_controls(0, cx))
             .child(self.page_controls(1, cx))
             .child(label("vocabulary"))
-            .child(self.music_ui.search.clone())
+            .child(self.panel_input(&self.music_ui.search, cx))
             .children(
                 self.vocabulary()
                     .iter()
@@ -1086,7 +1108,7 @@ impl Player {
             )
             .child(self.page_controls(2, cx))
             .child(label("createMoodHelp"))
-            .child(self.music_ui.name.clone())
+            .child(self.panel_input(&self.music_ui.name, cx))
             .child(row().children(ICON_KEYS.iter().enumerate().map(|(i, key)| {
                 self.action_button(
                     ("mood-icon", i),
@@ -1191,7 +1213,7 @@ impl Player {
             .when(self.native.room.active() && !can.add_mix, |s| {
                 s.child(label("addPermissionNeeded"))
             })
-            .child(self.music_ui.url.clone())
+            .child(self.panel_input(&self.music_ui.url, cx))
             .child(self.button(
                 "previewUrl",
                 Action::Preview,
@@ -1364,6 +1386,7 @@ impl Player {
         let Some(panel) = self.music_ui.panel else {
             return column();
         };
+        self.music_ui.scrolling.rendering.set(true);
         let content = match panel {
             Panel::Account => self.account_panel(cx),
             Panel::Moods => self.moods_panel(cx),
@@ -1383,7 +1406,23 @@ impl Player {
                     cx,
                 )),
         };
+        let content = column()
+            .child(self.native_status())
+            .child(self.recovery_controls(cx))
+            .child(content);
+        self.music_ui.scrolling.rendering.set(false);
         column()
+            .on_key_down(cx.listener(|p, event: &gpui::KeyDownEvent, _, cx| {
+                if !event.keystroke.modifiers.control
+                    && !event.keystroke.modifiers.alt
+                    && !event.keystroke.modifiers.platform
+                    && matches!(event.keystroke.key.as_str(), "pageup" | "pagedown")
+                {
+                    p.music_ui.scrolling.page(event.keystroke.key == "pagedown");
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
             .min_h_0()
             .flex_1()
             .p(px(12.))
@@ -1403,12 +1442,8 @@ impl Player {
                     .min_h_0()
                     .flex_1()
                     .overflow_y_scroll()
-                    .child(
-                        column()
-                            .child(self.native_status())
-                            .child(self.recovery_controls(cx))
-                            .child(content),
-                    ),
+                    .track_scroll(&self.music_ui.scrolling.handle)
+                    .child(content),
             )
     }
     pub fn native_status(&self) -> Div {

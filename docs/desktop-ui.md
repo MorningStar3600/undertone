@@ -25,55 +25,58 @@ to paint over WebView2.
 
 ## Working native flows
 
-- Join accepts a typed room link and Enter, retaining the empty-field clipboard
-  fallback. Disconnect drops the one connection/host and clears native forms,
-  private summaries and drafts. The title bar and header use Undertone.
-- Playback, seeking, mute and local volume retain the playback-only host path.
-  Transport buttons and sliders explicitly opt into Tab traversal. The root
-  handles Tab / Shift+Tab; the independently maintained input handles IME and
-  Unicode boundaries. Enter/Space activates focused GPUI buttons.
-- Account has username/email and masked password fields. Submit copies the
-  native input into the command and immediately clears its display before
-  dispatch. Credentials never enter browser markup, IPC, diagnostics or events.
-  Guest, account, pending and expired states are distinct. Only password account
-  login is offered. Errors localize HTTPS requirements, 401, 429 and numeric
-  Retry-After. Check account and Refresh room are explicit recovery operations.
-- Track moods is available from both modes. It displays contributor priority
-  moods and the complement of loaded own tags/favorite shortcuts. Only confirmed
-  own Active tags use blue. Unknown tags cannot be toggled until an explicit
-  refresh or Load more establishes their state. Tags require the current stable
-  catalogue UUID and captured track generation. Guests can inspect public moods
-  and see why personal writes need an account. No ID is inferred or imported.
-- First tags, favorites and vocabulary pages load sequentially when needed.
-  Search filters loaded vocabulary locally. Load more never drains subsequent
-  pages automatically. Failed pages need explicit refresh; failed writes do not
-  automatically retry. Successful tag/favorite writes reload their stale first
-  page once, including when the user has closed the panel. Creating a named mood
-  uses a native selection from the allowed icon keys and performs no tag or
-  favorite write. The created row offers those two separate explicit actions.
-- Room preferences are a separate draft: Include, Neutral and Exclude are visible
-  buttons, including a keyboard-accessible exclusion action. Defaults, server
-  public custom vocabulary and loaded catalogue moods are available. Unknown
-  saved IDs remain in the draft and visible until explicitly changed. Save Keep
-  and Save Renew are distinct operations with an explanation of Renew. Live
-  membership, Music mode and `can.preferences` gate writes. Conflicts/uncertainty
-  expose Retry saved intent and Refresh room; no mutation is automatically replayed.
-- Add music previews one URL and displays the real title. Mix and Next are explicit,
-  permission-gated actions using the native stored reference; no whole preview
-  payload or library checkbox is submitted. Displayed previews have a local
-  version, so editing the URL invalidates their actions. New requests receive a
-  new ID; native Retry preserves the original request ID and reference.
-- Confirmation renders the authoritative participant names and moods from the
-  offer. Its action captures the opaque `ConfirmationOffer` shown at render and
-  requires `can.confirm`. Native code rejects replaced offers/revisions. Cancel,
-  pending count, explicit pending-page refresh and page navigation support recovery.
-  Missing conflict metadata disables confirmation. Other requests remain cancellable.
-- Upcoming uses actual public queue entries and optional supplied artists. The
-  expanded Queue panel navigates real native pages. Show/Hide upcoming works in
-  both modes and only affects this window. Local Settings stays separate from
-  room preferences. No fabricated duration, artwork or inactive management control
-  is shown. Legacy/non-Music rooms retain playback and explain collective-control
-  restrictions; no room mode or content is changed automatically.
+-   Join accepts a typed room link and Enter, retaining the empty-field clipboard
+    fallback. Disconnect drops the one connection/host and clears native forms,
+    private summaries and drafts. The title bar and header use Undertone.
+-   Playback, seeking, mute and local volume retain the playback-only host path.
+    Transport buttons and sliders explicitly opt into Tab traversal. The root
+    handles Tab / Shift+Tab; the independently maintained input handles IME and
+    Unicode boundaries. Enter/Space activates focused GPUI buttons.
+    Scrolling panels reveal newly focused buttons and text fields. Page Up / Page Down
+    scroll the panel while leaving playback in place; ordinary repainting does not
+    override manual scrolling. Opening another panel starts at its top.
+-   Account has username/email and masked password fields. Submit copies the
+    native input into the command and immediately clears its display before
+    dispatch. Credentials never enter browser markup, IPC, diagnostics or events.
+    Guest, account, pending and expired states are distinct. Only password account
+    login is offered. Errors localize HTTPS requirements, 401, 429 and numeric
+    Retry-After. Check account and Refresh room are explicit recovery operations.
+-   Track moods is available from both modes. It displays contributor priority
+    moods and the complement of loaded own tags/favorite shortcuts. Only confirmed
+    own Active tags use blue. Unknown tags cannot be toggled until an explicit
+    refresh or Load more establishes their state. Tags require the current stable
+    catalogue UUID and captured track generation. Guests can inspect public moods
+    and see why personal writes need an account. No ID is inferred or imported.
+-   First tags, favorites and vocabulary pages load sequentially when needed.
+    Search filters loaded vocabulary locally. Load more never drains subsequent
+    pages automatically. Failed pages need explicit refresh; failed writes do not
+    automatically retry. Successful tag/favorite writes reload their stale first
+    page once, including when the user has closed the panel. Creating a named mood
+    uses a native selection from the allowed icon keys and performs no tag or
+    favorite write. The created row offers those two separate explicit actions.
+-   Room preferences are a separate draft: Include, Neutral and Exclude are visible
+    buttons, including a keyboard-accessible exclusion action. Defaults, server
+    public custom vocabulary and loaded catalogue moods are available. Unknown
+    saved IDs remain in the draft and visible until explicitly changed. Save Keep
+    and Save Renew are distinct operations with an explanation of Renew. Live
+    membership, Music mode and `can.preferences` gate writes. Conflicts/uncertainty
+    expose Retry saved intent and Refresh room; no mutation is automatically replayed.
+-   Add music previews one URL and displays the real title. Mix and Next are explicit,
+    permission-gated actions using the native stored reference; no whole preview
+    payload or library checkbox is submitted. Displayed previews have a local
+    version, so editing the URL invalidates their actions. New requests receive a
+    new ID; native Retry preserves the original request ID and reference.
+-   Confirmation renders the authoritative participant names and moods from the
+    offer. Its action captures the opaque `ConfirmationOffer` shown at render and
+    requires `can.confirm`. Native code rejects replaced offers/revisions. Cancel,
+    pending count, explicit pending-page refresh and page navigation support recovery.
+    Missing conflict metadata disables confirmation. Other requests remain cancellable.
+-   Upcoming uses actual public queue entries and optional supplied artists. The
+    expanded Queue panel navigates real native pages. Show/Hide upcoming works in
+    both modes and only affects this window. Local Settings stays separate from
+    room preferences. No fabricated duration, artwork or inactive management control
+    is shown. Legacy/non-Music rooms retain playback and explain collective-control
+    restrictions; no room mode or content is changed automatically.
 
 ## Native session and authority wiring
 

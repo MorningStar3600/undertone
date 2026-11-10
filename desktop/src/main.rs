@@ -22,6 +22,7 @@ use wry::{WebView, WebViewBuilder, WebViewBuilderExtWindows};
 mod ui;
 mod ui_input;
 mod ui_music;
+mod ui_scroll;
 
 #[derive(Clone, Copy)]
 enum Control {
