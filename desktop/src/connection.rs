@@ -1,12 +1,12 @@
 use crate::bridge::{Ipc, MAX_MESSAGE, RoomAddress, allowed_outbound};
 use crate::session::{
-    self, CommandAuthority, ErrorCode, NativeCommand, NativeError, NativeState, RestKind,
-    SessionCache,
+    self, AccountState, CommandAuthority, ErrorCode, HttpActivity, NativeCommand, NativeError,
+    NativeState, RestKind, SessionCache,
 };
 use async_channel::Sender;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::{
@@ -65,6 +65,7 @@ pub struct Connection {
     abort: AbortHandle,
     native_sender: mpsc::Sender<NativeEnvelope>,
     native: watch::Receiver<NativeState>,
+    tickets: AtomicU64,
 }
 
 struct PlaybackEnvelope {
@@ -81,6 +82,7 @@ impl PlaybackEnvelope {
 struct NativeEnvelope {
     authority: CommandAuthority,
     command: NativeCommand,
+    ticket: u64,
 }
 
 struct CacheLease {
@@ -106,13 +108,28 @@ impl Connection {
     }
     /// A separate native queue; never callable by WebView IPC.
     pub fn send_native(&self, authority: CommandAuthority, command: NativeCommand) -> bool {
+        self.send_native_ticket(authority, command).is_some()
+    }
+    /// Like [`Self::send_native`], returning the command's ticket: the caller knows its command
+    /// is done when [`NativeState::settled`] says so, even if nothing else in the state changed.
+    pub fn send_native_ticket(
+        &self,
+        authority: CommandAuthority,
+        command: NativeCommand,
+    ) -> Option<u64> {
         let state = self.native.borrow();
         if !authority.matches_native(&state, &command) {
-            return false;
+            return None;
         }
+        let ticket = self.tickets.fetch_add(1, Ordering::Relaxed) + 1;
         self.native_sender
-            .try_send(NativeEnvelope { authority, command })
-            .is_ok()
+            .try_send(NativeEnvelope {
+                authority,
+                command,
+                ticket,
+            })
+            .ok()
+            .map(|_| ticket)
     }
     /// Coalesced snapshots are bounded and contain no bearer/password/raw REST payload.
     pub fn subscribe_native(&self) -> watch::Receiver<NativeState> {
@@ -227,8 +244,34 @@ impl Network {
             abort: task.abort_handle(),
             native_sender,
             native,
+            tickets: AtomicU64::new(0),
         }
     }
+}
+
+/// The one native HTTP request in flight.
+struct Inflight {
+    future: RestFuture,
+    kind: RestKind,
+    /// Account before an account request fenced it, restored if that request fails without
+    /// rejecting the session itself.
+    restore: Option<AccountState>,
+}
+
+/// Drops the in-flight request (aborting its HTTP). A page it was loading is left unloaded but
+/// not failed, so it loads again later.
+fn cancel_rest(rest: &mut Option<Inflight>, state: &mut NativeState) {
+    if let Some(inflight) = rest.take() {
+        state.http_busy = false;
+        state.http_activity = None;
+        state.inflight_ticket = None;
+        session::finish(state, &inflight.kind, false);
+    }
+}
+
+fn searching(rest: &Option<Inflight>) -> bool {
+    rest.as_ref()
+        .is_some_and(|r| matches!(r.kind, RestKind::Preview(_)))
 }
 
 async fn run(
@@ -243,7 +286,7 @@ async fn run(
     let client = session::client().map_err(|_| "connectionFailed")?;
     let base = session::base(&address);
     let cached = cache.shared.lock().unwrap().token.clone();
-    let token = if let Some(token) = cached {
+    let mut token = if let Some(token) = cached {
         token
     } else {
         let token = session::grant(&client, &address)
@@ -252,6 +295,8 @@ async fn run(
         cache.update(|cache| cache.token = Some(token.clone()));
         token
     };
+    // Set when the server answered 401 to this bearer: Refresh room then mints a new one.
+    let mut token_rejected = false;
     let mut state = NativeState {
         generation,
         account: cache.shared.lock().unwrap().account.clone(),
@@ -283,9 +328,7 @@ async fn run(
         let mut sends = Vec::with_capacity(32);
         let mut snapshot: Option<(String, tokio::time::Instant)> = None;
         // Keeping the future in this actor ensures abort/drop cancels all HTTP work too.
-        let mut rest: Option<RestFuture> = None;
-        let mut identity_busy = false;
-        let mut search_busy = false;
+        let mut rest: Option<Inflight> = None;
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
             let snapshot_deadline = snapshot
@@ -300,6 +343,8 @@ async fn run(
                 }
                 command = native.recv() => {
                     let Some(envelope) = command else { return Ok(()); };
+                    let ticket = envelope.ticket;
+                    state.dequeued_ticket = ticket;
                     let search_request = match &envelope.command {
                         NativeCommand::SearchMusic { request_id, .. } => Some(*request_id),
                         _ => None,
@@ -311,16 +356,43 @@ async fn run(
                             state.invalidate_preview();
                             state.preview_request_id = search_request;
                             // A new query/edit supersedes only search work, never account work.
-                            if search_busy {
-                                rest = None;
-                                state.http_busy = false;
-                                search_busy = false;
-                            }
+                            if searching(&rest) { cancel_rest(&mut rest, &mut state); }
                         }
                         match envelope.command {
                             NativeCommand::InvalidatePreview => { state.error = None; }
                             NativeCommand::RefreshRoom => {
-                                if rest.is_some() { state.error=Some(NativeError::new(ErrorCode::Busy)); state_events.send_replace(state.clone()); continue; }
+                                // User-started requests (account, search, writes) settle on
+                                // their own within their timeout; only page loads are dropped.
+                                if rest.as_ref().is_some_and(|r| r.kind.activity() != HttpActivity::Page) {
+                                    state.error=Some(NativeError::new(ErrorCode::Busy));
+                                    state_events.send_replace(state.clone());
+                                    continue;
+                                }
+                                // The explicit recovery path: drop background work, replace a
+                                // bearer the server rejected, then resynchronize the room.
+                                cancel_rest(&mut rest, &mut state);
+                                if token_rejected {
+                                    match session::grant(&client, &address).await {
+                                        Ok(fresh) => {
+                                            cache.update(|cache| cache.token = Some(fresh.clone()));
+                                            token = fresh;
+                                            token_rejected = false;
+                                        }
+                                        Err(error) => {
+                                            state.error = Some(error);
+                                            state_events.send_replace(state.clone());
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if state.account.expired {
+                                    // Back to an unchecked guest view; "Check account" or the
+                                    // room's own membership data tell the rest.
+                                    state.account_generation += 1;
+                                    state.clear_private();
+                                    cache.update(|cache| cache.account = Default::default());
+                                }
+                                state.error = None;
                                 state.http_busy = false; state.socket_generation += 1;
                                 state.connected = false; state.room = state.room.refreshed(); state.invalidate_preview();
                                 state_events.send_replace(state.clone());
@@ -334,27 +406,38 @@ async fn run(
                             }
                             command => {
                                 let identity = matches!(command,NativeCommand::Login{..}|NativeCommand::Logout);
-                                if rest.is_some() && (!identity || identity_busy) { state.error=Some(NativeError::new(ErrorCode::Busy)); }
+                                // The user is waiting for a search; a mood page reloads afterwards.
+                                if matches!(command, NativeCommand::SearchMusic { .. })
+                                    && rest.as_ref().is_some_and(|r| r.kind.activity() == HttpActivity::Page) {
+                                    cancel_rest(&mut rest, &mut state);
+                                }
+                                if rest.as_ref().is_some_and(|r| !identity || r.kind.identity()) { state.error=Some(NativeError::new(ErrorCode::Busy)); }
                                 else {
                                     match session::prepare(&client,&base,&token,&state,command) {
                                         Ok((kind,request)) => {
-                                            if identity || matches!(kind,RestKind::Account) {
+                                            // A sign-in or sign-out replaces background work.
+                                            cancel_rest(&mut rest, &mut state);
+                                            let restore = kind.account().then(|| state.account.clone());
+                                            if kind.account() {
                                                 state.account_generation += 1; state.clear_private(); state.account.expired=true; state.connected=false; state.room=Default::default();
                                                 cache.update(|cache|cache.account=Default::default());
                                             }
                                             session::start(&mut state,&kind);
                                             state.error=None; state.http_busy=true;
-                                            identity_busy=kind.identity();
-                                            search_busy=matches!(kind,RestKind::Preview(_));
+                                            state.http_activity = Some(kind.activity());
+                                            state.inflight_ticket = Some(ticket);
                                             let client=client.clone(); let base=base.clone(); let token=token.clone();
                                             let account=state.account_generation; let track=state.track_generation;
-                                            rest=Some(Box::pin(async move {
-                                                let mut result=session::response(request).await;
+                                            let future_kind = kind.clone();
+                                            let future: RestFuture = Box::pin(async move {
+                                                let kind = future_kind;
+                                                let mut result=session::response_for(&kind, request).await;
                                                 if kind.identity() && result.is_ok() {
                                                     result=session::response(client.get(base.join("user/").unwrap()).bearer_auth(token)).await;
                                                 }
                                                 RestCompletion {account,track,kind,result}
-                                            }));
+                                            });
+                                            rest = Some(Inflight { future, kind, restore });
                                         }
                                         Err(error) => state.error=Some(error),
                                     }
@@ -362,21 +445,32 @@ async fn run(
                             }
                         }
                     }
+                    if search_request.is_some() && !searching(&rest) {
+                        // The search never started: keep why, next to the search field.
+                        state.preview_error = state.error.clone();
+                    }
                     if let Some(request_id) = search_request
-                        && (!search_busy || state.preview_request_id != Some(request_id)) {
+                        && (!searching(&rest) || state.preview_request_id != Some(request_id)) {
                         state.preview_completed_id = Some(request_id);
                     }
                     state_events.send_replace(state.clone());
                 }
-                done = async { rest.as_mut().unwrap().await }, if rest.is_some() => {
-                    if search_busy { state.preview_completed_id = state.preview_request_id; }
-                    rest=None; state.http_busy=false; identity_busy=false; search_busy=false;
+                done = async { rest.as_mut().unwrap().future.as_mut().await }, if rest.is_some() => {
+                    let inflight = rest.take().expect("completed request");
+                    state.http_busy=false; state.http_activity=None; state.inflight_ticket=None;
+                    let search = matches!(done.kind, RestKind::Preview(_));
+                    if search { state.preview_completed_id = state.preview_request_id; }
                     let identity=done.kind.identity();
-                    if done.account==state.account_generation && done.result.as_ref().is_err_and(|e|e.code==ErrorCode::Auth) {
+                    // 401 means the bearer was rejected, except on sign-in where it means wrong
+                    // credentials for a still valid session.
+                    let rejected = done.result.as_ref().is_err_and(|e|e.code==ErrorCode::Auth)
+                        && !matches!(done.kind, RestKind::Login);
+                    if done.account==state.account_generation && rejected {
                         state.account_generation += 1;
                         state.clear_private();
                         state.account.expired=true;
                         state.room=Default::default();
+                        token_rejected = true;
                         cache.update(|cache| {cache.account=state.account.clone(); cache.token=None;});
                         state.error=done.result.err();
                     } else if done.account != state.account_generation || (matches!(done.kind,RestKind::Tags(..)|RestKind::Tag(_)) && done.track!=state.track_generation) {
@@ -394,11 +488,25 @@ async fn run(
                                     continue 'reconnect;
                                 }
                             }
-                            Err(error) => {
+                            Err(mut error) => {
+                                if matches!(done.kind, RestKind::Login) && error.code == ErrorCode::Auth {
+                                    error.code = ErrorCode::Credentials;
+                                }
                                 state.error=Some(error);
+                                if done.kind.account() {
+                                    // Network, rate limit, refused sign-in...: the server session
+                                    // did not change. Restore the account and resynchronize the
+                                    // room rather than leaving every room feature fenced.
+                                    if let Some(account) = inflight.restore { state.account = account; }
+                                    cache.update(|cache| cache.account = state.account.clone());
+                                    state.socket_generation += 1; state.connected=false; state.room=Default::default();
+                                    state_events.send_replace(state.clone());
+                                    continue 'reconnect;
+                                }
                             }
                         }
                     }
+                    if search { state.preview_error = state.error.clone(); }
                     state_events.send_replace(state.clone());
                 }
                 _ = &mut capability_deadline, if !capability => return Err("protocolRequired"),
@@ -429,9 +537,9 @@ async fn run(
                             state.room.project(&message,state.account_generation);
                             let current_can = state.can();
                             if (!current_can.add_mix || (previous_can.add_next && !current_can.add_next))
-                                && (state.preview.is_some() || search_busy) {
+                                && (state.preview.is_some() || searching(&rest)) {
                                 state.invalidate_preview();
-                                if search_busy { rest=None; state.http_busy=false; search_busy=false; }
+                                if searching(&rest) { cancel_rest(&mut rest, &mut state); }
                             }
                             if state.connected && state.account.logged_in && state.room.own_logged_in==Some(false) {
                                 state.account_generation+=1; state.clear_private(); state.account.expired=true;
@@ -490,6 +598,7 @@ mod playback_fence_tests {
             abort: task.abort_handle(),
             native_sender,
             native,
+            tickets: AtomicU64::new(0),
         };
         let subscribe = json!({"action":"playback-subscribe","version":1,"nonce":"fixture"});
         assert!(connection.send(original, subscribe.clone()));

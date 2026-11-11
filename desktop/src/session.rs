@@ -62,19 +62,36 @@ pub enum ErrorCode {
     Busy,
     Stale,
     Unavailable,
+    /// Sign-in refused (wrong username or password). The session itself is still valid.
+    Credentials,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeError {
     pub code: ErrorCode,
     pub retry_after_seconds: Option<u64>,
+    /// HTTP status of a rejected response. Bodies are never kept.
+    pub status: Option<u16>,
 }
 impl NativeError {
-    pub(crate) fn new(code: ErrorCode) -> Self {
+    pub fn new(code: ErrorCode) -> Self {
         Self {
             code,
             retry_after_seconds: None,
+            status: None,
         }
     }
+}
+
+/// What the single native HTTP slot is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HttpActivity {
+    /// Sign-in, sign-out or account check: the account is fenced meanwhile.
+    Account,
+    Search,
+    /// Background mood page load. A search preempts it.
+    Page,
+    /// Tag, favorite or mood creation.
+    Write,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -118,7 +135,14 @@ pub struct NativeState {
     pub preview_completed_id: Option<u64>,
     pub created_mood: Option<Mood>,
     pub http_busy: bool,
+    pub http_activity: Option<HttpActivity>,
     pub error: Option<NativeError>,
+    /// Failure of the latest search, kept until the next search or edit.
+    pub preview_error: Option<NativeError>,
+    /// Ticket of the latest native command taken from the queue (commands run in order).
+    pub dequeued_ticket: u64,
+    /// Ticket of the command whose HTTP request is in flight.
+    pub inflight_ticket: Option<u64>,
 }
 
 /// Capture from the state that produced a control or host, never at send time.
@@ -170,6 +194,20 @@ impl NativeState {
         }
         can
     }
+    /// True once the command with this ticket was taken from the queue and is not in flight:
+    /// rejected, completed, cancelled or superseded. Never inferred from unchanged state.
+    pub fn settled(&self, ticket: u64) -> bool {
+        self.dequeued_ticket >= ticket && self.inflight_ticket != Some(ticket)
+    }
+    /// A search must wait only for account or write requests; it preempts page loads and
+    /// supersedes an older search.
+    pub fn search_blocked(&self) -> bool {
+        self.http_busy
+            && matches!(
+                self.http_activity,
+                Some(HttpActivity::Account | HttpActivity::Write) | None
+            )
+    }
     pub fn mood_groups(&self) -> MoodGroups {
         mood_groups(&self.room, &self.tags, &self.favorites)
     }
@@ -188,6 +226,7 @@ impl NativeState {
         }
         self.preview_generation = self.preview_generation.wrapping_add(1);
         self.preview = None;
+        self.preview_error = None;
     }
     pub(crate) fn preview_reference(&self, command: &MusicCommand) -> Option<&Reference> {
         let MusicCommand::RequestPreview { reference, .. } = command else {
@@ -250,6 +289,19 @@ pub(crate) fn credentials_allowed(base: &Url) -> bool {
 pub(crate) async fn response(builder: RequestBuilder) -> Result<Value, NativeError> {
     bounded_response(builder, MAX_MESSAGE).await
 }
+/// Search results (playlists in particular) can exceed a socket message.
+pub const MAX_PREVIEW_BODY: usize = 2 * 1024 * 1024;
+pub(crate) async fn response_for(
+    kind: &RestKind,
+    builder: RequestBuilder,
+) -> Result<Value, NativeError> {
+    let max = if matches!(kind, RestKind::Preview(_)) {
+        MAX_PREVIEW_BODY
+    } else {
+        MAX_MESSAGE
+    };
+    bounded_response(builder, max).await
+}
 async fn bounded_response(builder: RequestBuilder, max: usize) -> Result<Value, NativeError> {
     let mut response = builder
         .send()
@@ -263,6 +315,7 @@ async fn bounded_response(builder: RequestBuilder, max: usize) -> Result<Value, 
         };
         return Err(NativeError {
             code,
+            status: Some(response.status().as_u16()),
             retry_after_seconds: response
                 .headers()
                 .get("retry-after")
@@ -320,6 +373,18 @@ pub(crate) enum RestKind {
 impl RestKind {
     pub fn identity(&self) -> bool {
         matches!(self, Self::Login | Self::Logout)
+    }
+    /// Requests that fence the account while they run.
+    pub fn account(&self) -> bool {
+        matches!(self, Self::Login | Self::Logout | Self::Account)
+    }
+    pub fn activity(&self) -> HttpActivity {
+        match self {
+            Self::Login | Self::Logout | Self::Account => HttpActivity::Account,
+            Self::Preview(_) => HttpActivity::Search,
+            Self::Moods(_) | Self::Favorites(_) | Self::Tags(..) => HttpActivity::Page,
+            Self::Tag(_) | Self::Favorite | Self::Create => HttpActivity::Write,
+        }
     }
 }
 
@@ -451,15 +516,13 @@ pub(crate) fn apply(
                 return Err(NativeError::new(ErrorCode::Stale));
             }
             let items = value["result"].as_array().ok_or_else(invalid)?;
-            let mut results = Vec::new();
-            for item in items.iter().take(MAX_PREVIEW_RESULTS) {
+            // One unreadable item (unknown provider, missing id) is skipped, not the whole
+            // answer. An original reference is never replaced by the playback identity.
+            let mut valid = items.iter().filter_map(|item| {
                 let reference: Reference =
                     serde_json::from_value(item.get("originalReference").unwrap_or(item).clone())
-                        .map_err(|_| invalid())?;
-                if !reference.valid() {
-                    return Err(invalid());
-                }
-                results.push(Preview {
+                        .ok()?;
+                reference.valid().then(|| Preview {
                     title: item["title"]
                         .as_str()
                         .map(|s| s.chars().take(512).collect()),
@@ -467,11 +530,16 @@ pub(crate) fn apply(
                         .as_f64()
                         .filter(|v| v.is_finite() && *v > 0. && *v < 1e7),
                     reference,
-                });
+                })
+            });
+            let results: Vec<Preview> = valid.by_ref().take(MAX_PREVIEW_RESULTS).collect();
+            let truncated = valid.next().is_some();
+            if results.is_empty() && !items.is_empty() {
+                return Err(invalid());
             }
             state.preview = Some(PreviewResults {
                 items: results,
-                truncated: items.len() > MAX_PREVIEW_RESULTS,
+                truncated,
             });
         }
         RestKind::Moods(offset) => merge_page(&mut state.moods, value, *offset)?,
@@ -701,6 +769,46 @@ mod tests {
             state.preview.is_none(),
             "invalid original metadata must not fall back to playback identity"
         );
+        // One invalid item among valid ones is skipped; the others stay selectable.
+        state.invalidate_preview();
+        apply(&mut state, &RestKind::Preview(3), json!({"result":[
+            {"service":"youtube","id":"kept-first"},
+            {"service":"youtube","id":"playback-fallback","originalReference":{"service":"unknown","id":"x"}},
+            {"title":"no id"},
+            {"service":"youtube","id":"kept-second"}
+        ]})).unwrap();
+        let ids: Vec<_> = state
+            .preview
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|p| p.reference.id.as_str())
+            .collect();
+        assert_eq!(ids, ["kept-first", "kept-second"]);
+        assert!(!state.preview.as_ref().unwrap().truncated);
+    }
+    #[test]
+    fn tickets_settle_only_after_dequeue_and_completion() {
+        let mut state = NativeState::default();
+        assert!(!state.settled(1));
+        state.dequeued_ticket = 1;
+        state.inflight_ticket = Some(1);
+        assert!(!state.settled(1));
+        state.dequeued_ticket = 2; // a later command was rejected meanwhile
+        assert!(state.settled(2) && !state.settled(1) && !state.settled(3));
+        state.inflight_ticket = None;
+        assert!(state.settled(1));
+        state.http_busy = true;
+        for (activity, blocked) in [
+            (HttpActivity::Page, false),
+            (HttpActivity::Search, false),
+            (HttpActivity::Account, true),
+            (HttpActivity::Write, true),
+        ] {
+            state.http_activity = Some(activity);
+            assert_eq!(state.search_blocked(), blocked, "{activity:?}");
+        }
     }
     #[test]
     fn pages_append_only_contiguously_and_stale_pages_cannot_imply_inactive() {

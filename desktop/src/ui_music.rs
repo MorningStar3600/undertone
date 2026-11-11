@@ -2377,6 +2377,7 @@ impl Player {
                 ErrorCode::Busy => "nativeBusy",
                 ErrorCode::Stale => "nativeStale",
                 ErrorCode::Unavailable => "nativeUnavailable",
+                ErrorCode::Credentials => "nativeCredentials",
             };
             refresh |= matches!(
                 error.code,
@@ -2500,6 +2501,7 @@ mod tests {
         state.error = Some(undertone_desktop::session::NativeError {
             code: undertone_desktop::session::ErrorCode::Busy,
             retry_after_seconds: None,
+            status: None,
         });
         assert!(!pending.completed(&state));
         state.preview_request_id = Some(11);

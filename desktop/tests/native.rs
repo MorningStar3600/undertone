@@ -11,7 +11,7 @@ use undertone_desktop::{
     bridge::RoomAddress,
     connection::{EventKind, Network},
     music::{Content, Intent, MusicCommand, MusicStatus, Reference},
-    session::{ErrorCode, NativeCommand, NativeState},
+    session::{ErrorCode, HttpActivity, NativeCommand, NativeState},
 };
 
 async fn request(
@@ -693,4 +693,332 @@ async fn replaced_tag_reply(status: &'static str, expected: ErrorCode) {
         .await
         .unwrap()
         .unwrap();
+}
+
+async fn grant(listener: &TcpListener) {
+    request(
+        listener,
+        "GET",
+        "/prefix/api/auth/grant",
+        "200 OK",
+        r#"{"token":"dummy-retained-token"}"#,
+        "",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn search_failures_stay_next_to_the_search_with_their_status() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let network = Network::new().unwrap();
+        let (events, _playback) = async_channel::bounded(8);
+        let c = network.connect(
+            91,
+            RoomAddress::parse(&format!("http://127.0.0.1:{port}/prefix/room/test")).unwrap(),
+            events,
+        );
+        let mut native = c.subscribe_native();
+        grant(&listener).await;
+        let _ws = socket(&listener, false).await;
+        let joined = until(&mut native, |s| s.can().add_mix).await;
+
+        // 429: the rate limit and its delay are kept for the search area, not only globally.
+        let limited = c
+            .send_native_ticket(
+                joined.authority(),
+                NativeCommand::SearchMusic {
+                    input: "toomany".into(),
+                    request_id: 1,
+                },
+            )
+            .unwrap();
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/data/previewAdd?input=toomany",
+            "429 Too Many Requests",
+            r#"{"error":{"message":"private-limiter-detail"}}"#,
+            "Retry-After: 7\r\n",
+        )
+        .await;
+        let state = until(&mut native, |s| s.settled(limited)).await;
+        let error = state.preview_error.clone().expect("429 surfaced");
+        assert_eq!(
+            (error.code, error.status, error.retry_after_seconds),
+            (ErrorCode::RateLimit, Some(429), Some(7))
+        );
+        assert!(state.preview.is_none() && !state.http_busy);
+        assert!(!format!("{state:?}").contains("private-limiter-detail"));
+
+        // 400 (quota, query too short...) keeps its status so the UI can say which.
+        let refused = c
+            .send_native_ticket(
+                state.authority(),
+                NativeCommand::SearchMusic {
+                    input: "ab".into(),
+                    request_id: 2,
+                },
+            )
+            .unwrap();
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/data/previewAdd?input=ab",
+            "400 Bad Request",
+            r#"{"success":false,"error":{"name":"InvalidAddPreviewInputException"}}"#,
+            "",
+        )
+        .await;
+        let state = until(&mut native, |s| s.settled(refused)).await;
+        let error = state.preview_error.clone().expect("400 surfaced");
+        assert_eq!((error.code, error.status), (ErrorCode::Rejected, Some(400)));
+        assert_eq!(state.preview_completed_id, Some(2));
+
+        // Editing the query clears the stale explanation.
+        let edit = c
+            .send_native_ticket(state.authority(), NativeCommand::InvalidatePreview)
+            .unwrap();
+        let state = until(&mut native, |s| s.settled(edit)).await;
+        assert!(state.preview_error.is_none() && state.error.is_none());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_account_requests_keep_the_room_and_refresh_room_recovers() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let network = Network::new().unwrap();
+        let (events, _playback) = async_channel::bounded(16);
+        let c = network.connect(
+            92,
+            RoomAddress::parse(&format!("http://127.0.0.1:{port}/prefix/room/test")).unwrap(),
+            events,
+        );
+        let mut native = c.subscribe_native();
+        grant(&listener).await;
+        let _first = socket(&listener, false).await;
+        let joined = until(&mut native, |s| s.can().add_mix).await;
+
+        // The automatic account check fails (server error): the room resynchronizes instead of
+        // staying fenced with every music feature disabled.
+        assert!(c.send_native(joined.authority(), NativeCommand::RefreshAccount));
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/user/",
+            "500 Internal Server Error",
+            r#"{"success":false}"#,
+            "",
+        )
+        .await;
+        let _second = socket(&listener, false).await;
+        let recovered = until(&mut native, |s| {
+            s.socket_generation > joined.socket_generation && s.can().add_mix
+        })
+        .await;
+        assert!(!recovered.account.expired);
+        let error = recovered.error.clone().unwrap();
+        assert_eq!((error.code, error.status), (ErrorCode::Rejected, Some(500)));
+
+        // A refused sign-in (401 from /login) is a credentials error, not an expired session.
+        assert!(c.send_native(
+            recovered.authority(),
+            NativeCommand::Login {
+                user: "fixture".into(),
+                password: "dummy-wrong-password".into(),
+            }
+        ));
+        request(
+            &listener,
+            "POST",
+            "/prefix/api/user/login",
+            "401 Unauthorized",
+            r#"{"success":false,"error":{"message":"private"}}"#,
+            "",
+        )
+        .await;
+        let _third = socket(&listener, false).await;
+        let refused = until(&mut native, |s| {
+            s.error
+                .as_ref()
+                .is_some_and(|e| e.code == ErrorCode::Credentials)
+                && s.can().add_mix
+        })
+        .await;
+        assert!(!refused.account.expired && !refused.account.logged_in);
+
+        // A 401 on the account check means the bearer itself was rejected...
+        assert!(c.send_native(refused.authority(), NativeCommand::RefreshAccount));
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/user/",
+            "401 Unauthorized",
+            r#"{"success":false}"#,
+            "",
+        )
+        .await;
+        let expired = until(&mut native, |s| {
+            s.error.as_ref().is_some_and(|e| e.code == ErrorCode::Auth)
+        })
+        .await;
+        assert!(expired.account.expired && !expired.can().add_mix);
+        // ...and Refresh room recovers with a fresh guest grant and a new socket.
+        assert!(c.send_native(expired.authority(), NativeCommand::RefreshRoom));
+        grant(&listener).await;
+        let _fourth = socket(&listener, false).await;
+        let fresh = until(&mut native, |s| {
+            s.socket_generation > expired.socket_generation && s.can().add_mix
+        })
+        .await;
+        assert!(!fresh.account.expired && fresh.error.is_none());
+
+        // Search works again.
+        assert!(c.send_native(
+            fresh.authority(),
+            NativeCommand::SearchMusic {
+                input: "after recovery".into(),
+                request_id: 1,
+            }
+        ));
+        let mut http = search_socket(&listener, "after recovery").await;
+        search_reply(&mut http, json!([{"service":"youtube","id":"recovered"}])).await;
+        until(&mut native, |s| {
+            s.preview.as_ref().is_some_and(|p| p.items.len() == 1)
+        })
+        .await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_search_preempts_a_mood_page_load_and_keeps_partially_valid_results() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let network = Network::new().unwrap();
+        let (events, _playback) = async_channel::bounded(16);
+        let c = network.connect(
+            93,
+            RoomAddress::parse(&format!("http://127.0.0.1:{port}/prefix/room/test")).unwrap(),
+            events,
+        );
+        let mut native = c.subscribe_native();
+        grant(&listener).await;
+        let _first = socket(&listener, false).await;
+        let guest = until(&mut native, |s| s.room.active()).await;
+        assert!(c.send_native(
+            guest.authority(),
+            NativeCommand::Login {
+                user: "fixture".into(),
+                password: "dummy-password".into(),
+            }
+        ));
+        request(
+            &listener,
+            "POST",
+            "/prefix/api/user/login",
+            "200 OK",
+            r#"{"success":true}"#,
+            "",
+        )
+        .await;
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/user/",
+            "200 OK",
+            r#"{"loggedIn":true,"username":"Fixture"}"#,
+            "",
+        )
+        .await;
+        let _second = socket(&listener, true).await;
+        let logged = until(&mut native, |s| {
+            s.account.logged_in && s.can().add_mix && s.can().account_write
+        })
+        .await;
+
+        // A background mood page holds the HTTP slot, the server stays silent...
+        let page = c
+            .send_native_ticket(logged.authority(), NativeCommand::LoadMoods { offset: 0 })
+            .unwrap();
+        let (mut held, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut buf = [0; 1024];
+            let n = held.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            head.extend_from_slice(&buf[..n]);
+        }
+        assert!(head.starts_with(b"GET /prefix/api/music/moods?limit=100&offset=0 "));
+        let loading = until(&mut native, |s| {
+            s.http_activity == Some(HttpActivity::Page)
+        })
+        .await;
+        assert!(!loading.search_blocked());
+
+        // ...yet the search starts at once and the page is dropped, not failed.
+        let search = c
+            .send_native_ticket(
+                loading.authority(),
+                NativeCommand::SearchMusic {
+                    input: "while loading".into(),
+                    request_id: 1,
+                },
+            )
+            .unwrap();
+        let mut http = search_socket(&listener, "while loading").await;
+        let searching = until(&mut native, |s| {
+            s.http_activity == Some(HttpActivity::Search)
+        })
+        .await;
+        assert!(searching.settled(page) && !searching.settled(search));
+        assert!(!searching.moods.loading && !searching.moods.failed && !searching.moods.loaded);
+        assert!(searching.error.is_none());
+
+        // One unreadable item does not throw away the others.
+        search_reply(
+            &mut http,
+            json!([
+                {"title":"Kept","service":"youtube","id":"kept-first"},
+                {"title":"Broken","service":"youtube","id":"x","originalReference":{"service":"unknown","id":"x"}},
+                {"title":"No id"},
+                {"title":"Also kept","service":"youtube","id":"kept-second"}
+            ]),
+        )
+        .await;
+        let done = until(&mut native, |s| s.settled(search) && s.preview.is_some()).await;
+        let ids: Vec<_> = done
+            .preview
+            .as_ref()
+            .unwrap()
+            .items
+            .iter()
+            .map(|p| p.reference.id.clone())
+            .collect();
+        assert_eq!(ids, ["kept-first", "kept-second"]);
+        assert!(done.preview_error.is_none());
+
+        // The dropped page loads again afterwards.
+        assert!(c.send_native(done.authority(), NativeCommand::LoadMoods { offset: 0 }));
+        request(
+            &listener,
+            "GET",
+            "/prefix/api/music/moods?limit=100&offset=0",
+            "200 OK",
+            r#"{"items":[],"total":0,"offset":0,"limit":100}"#,
+            "",
+        )
+        .await;
+        until(&mut native, |s| s.moods.loaded && !s.http_busy).await;
+        drop(held);
+    })
+    .await
+    .unwrap();
 }
