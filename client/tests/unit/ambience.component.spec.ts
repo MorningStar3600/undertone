@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import AmbienceSky from "@/components/ambience/AmbienceSky.vue";
+import UndertoneLogo from "@/components/ambience/UndertoneLogo.vue";
 import VideoControls from "@/components/controls/VideoControls.vue";
 import {
 	ambienceForCover,
@@ -132,6 +133,14 @@ describe("undertone ambiences", () => {
 			expect(scenes()).toHaveLength(1);
 			expect(scenes()[0].attributes("data-ambience")).toBe("grenat");
 			expect(scenes()[0].findAll("i")).toHaveLength(5);
+		});
+	});
+
+	describe("logo", () => {
+		it("keeps the chosen Horizon mark whatever the ambience", () => {
+			const { wrapper } = mountComponent(UndertoneLogo, { props: { ambience: "jade" } });
+			expect(wrapper.html()).toContain('d="M2 12h20"');
+			expect(wrapper.html()).not.toContain("M7.5 5.5a9.5");
 		});
 	});
 

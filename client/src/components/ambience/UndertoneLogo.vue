@@ -16,10 +16,11 @@ import { computed } from "vue";
 import { getAmbience, type AmbienceId } from "ott-common/ambience";
 
 /**
- * The logo follows the ambience while the final mark is being chosen: each ambience has its
- * own candidate. Set PINNED_LOGO to an ambience id to use one logo everywhere.
+ * Undertone's mark is logo 01, "Horizon": a sun just under the line, the tone beneath. Every
+ * ambience keeps its own candidate in common/ambience; set this to null to let the logo follow
+ * the ambience again.
  */
-const PINNED_LOGO: AmbienceId | null = null;
+const PINNED_LOGO: AmbienceId | null = "heure-bleue";
 
 const props = withDefaults(defineProps<{ ambience: AmbienceId; size?: number }>(), { size: 22 });
 const logo = computed(() => getAmbience(PINNED_LOGO ?? props.ambience).logo);
