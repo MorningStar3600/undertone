@@ -16,6 +16,26 @@ export interface SettingsState {
 	chatPlacement: ChatPlacement;
 	/** Width of the room's chat side panel, in pixels. */
 	chatPanelWidth: number;
+	/** Animated ambience backgrounds: follow the system's reduced-motion setting, or force. */
+	ambienceMotion: AmbienceMotionPreference;
+	/** Where the floating player sits, and whether it is folded. Null until moved. */
+	playerWidget: PlayerWidgetPlacement | null;
+}
+
+export type AmbienceMotionPreference = "auto" | "on" | "off";
+
+/**
+ * Floating player position, relative to the viewport corner it was dropped nearest to, so
+ * it stays in that corner when the window is resized.
+ */
+export interface PlayerWidgetPlacement {
+	horizontal: "start" | "end";
+	vertical: "top" | "bottom";
+	/** Distance from the horizontal edge, in pixels. */
+	dx: number;
+	/** Distance from the vertical edge, in pixels. */
+	dy: number;
+	collapsed: boolean;
 }
 
 export type DefaultRoomSettings = Pick<RoomSettings, "autoSkipSegmentCategories">;
@@ -64,6 +84,8 @@ export const settingsModule: Module<SettingsState, unknown> = {
 		nativeYoutubeControls: false,
 		chatPlacement: ChatPlacement.panel,
 		chatPanelWidth: DEFAULT_CHAT_PANEL_WIDTH,
+		ambienceMotion: "auto",
+		playerWidget: null,
 	},
 	mutations: {
 		UPDATE(state, settings: Partial<SettingsState>) {

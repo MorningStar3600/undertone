@@ -1,0 +1,655 @@
+/* ===========================================================================
+ *  UNDERTONE AMBIENCES
+ *  Twelve dark color families picked from the playing track's cover
+ *  (see common/ambience.ts). Each one has an animated "sky": 2 to 5
+ *  pre-computed gradients moved only with transform and opacity.
+ *  No canvas, no blur filter, no backdrop-filter, no particles.
+ * ======================================================================== */
+
+@property --ut-bg0 {
+	syntax: "<color>";
+	inherits: true;
+	initial-value: #0f1226;
+}
+@property --ut-bg1 {
+	syntax: "<color>";
+	inherits: true;
+	initial-value: #1c1529;
+}
+@property --ut-ink {
+	syntax: "<color>";
+	inherits: true;
+	initial-value: #f1ecf7;
+}
+@property --ut-ink2 {
+	syntax: "<color>";
+	inherits: true;
+	initial-value: #dbd4ec;
+}
+@property --ut-mu {
+	syntax: "<color>";
+	inherits: true;
+	initial-value: #bdb7d3;
+}
+@property --ut-acc {
+	syntax: "<color>";
+	inherits: true;
+	initial-value: #f2ae92;
+}
+@property --ut-on {
+	syntax: "<color>";
+	inherits: true;
+	initial-value: #2a1620;
+}
+
+/* Elements carrying an ambience palette fade between palettes. */
+.ut-palette {
+	--ut-ease: cubic-bezier(0.4, 0, 0.2, 1);
+	--ut-f-display: "Segoe UI Variable Display", "Hanken Grotesk", system-ui, sans-serif;
+	--ut-f-text: "Segoe UI Variable Text", "Hanken Grotesk", system-ui, sans-serif;
+	--ut-f-voice: "Sitka Heading", "Sitka Display", "Iowan Old Style", "Palatino Linotype", Palatino,
+		ui-serif, Georgia, serif;
+	--ut-line: color-mix(in srgb, var(--ut-ink) 13%, transparent);
+	--ut-glass: color-mix(in srgb, var(--ut-ink) 7%, transparent);
+	--ut-glassx: color-mix(in srgb, var(--ut-bg0) 70%, transparent);
+	--ut-tint: color-mix(in srgb, var(--ut-ink) 15%, transparent);
+	--ut-tintline: color-mix(in srgb, var(--ut-ink) 42%, transparent);
+	--ut-shadow: color-mix(in srgb, var(--ut-bg0) 75%, #000);
+	transition: --ut-bg0 0.9s var(--ut-ease), --ut-bg1 0.9s var(--ut-ease),
+		--ut-ink 0.9s var(--ut-ease), --ut-ink2 0.9s var(--ut-ease), --ut-mu 0.9s var(--ut-ease),
+		--ut-acc 0.9s var(--ut-ease), --ut-on 0.9s var(--ut-ease);
+}
+
+/* ---------------------------------------------------------------------------
+ *  Ambient room page: the whole page takes the track's color, in dark themes.
+ *  html carries the palette; body and #app become transparent so the fixed
+ *  sky (teleported to body, z-index -1) shows behind every in-flow block.
+ * ------------------------------------------------------------------------ */
+html.ut-ambient {
+	--ink: var(--ut-bg0);
+	--background: var(--ut-bg0);
+	--foreground: var(--ut-ink);
+	--card: color-mix(in srgb, var(--ut-bg1) 78%, transparent);
+	--card-foreground: var(--ut-ink);
+	--popover: color-mix(in srgb, var(--ut-bg1) 94%, var(--ut-ink));
+	--popover-foreground: var(--ut-ink);
+	--primary: var(--ut-acc);
+	--primary-foreground: var(--ut-on);
+	--primary-bright: color-mix(in srgb, var(--ut-acc) 80%, white);
+	--primary-deep: color-mix(in srgb, var(--ut-acc) 70%, var(--ut-bg0));
+	--secondary: color-mix(in srgb, var(--ut-ink) 9%, var(--ut-bg1));
+	--secondary-foreground: var(--ut-ink);
+	--muted: color-mix(in srgb, var(--ut-ink) 7%, var(--ut-bg0));
+	--muted-foreground: var(--ut-mu);
+	--accent: color-mix(in srgb, var(--ut-ink) 12%, var(--ut-bg1));
+	--accent-foreground: var(--ut-ink);
+	--surface-2: color-mix(in srgb, var(--ut-ink) 6%, var(--ut-bg1));
+	--surface-3: color-mix(in srgb, var(--ut-ink) 10%, var(--ut-bg1));
+	--border: color-mix(in srgb, var(--ut-ink) 13%, transparent);
+	--input: color-mix(in srgb, var(--ut-ink) 17%, transparent);
+	--ring: var(--ut-acc);
+	--signal: var(--ut-acc);
+	--signal-deep: color-mix(in srgb, var(--ut-acc) 70%, var(--ut-bg0));
+	--glow-primary: 0 0 0 1px color-mix(in srgb, var(--ut-acc) 35%, transparent);
+	--glow-signal: var(--glow-primary);
+	--text-glow-primary: none;
+	--hero-text-glow: none;
+	--shadow-panel: 0 18px 50px -24px var(--ut-shadow);
+	--font-display: var(--ut-f-display);
+	--radius: 0.75rem;
+	background: linear-gradient(170deg, var(--ut-bg0), var(--ut-bg1)) fixed;
+	scrollbar-color: color-mix(in srgb, var(--ut-ink) 25%, transparent) transparent;
+}
+html.ut-ambient body,
+html.ut-ambient #app {
+	background: transparent;
+}
+/* The drive-in display face shouts; the room speaks softly. Tailwind inlines theme fonts,
+ * so the faces are replaced here rather than through --font-display. */
+html.ut-ambient :is(h1, h2, h3, .display, .font-display) {
+	font-family: var(--ut-f-display);
+	font-weight: 350;
+	letter-spacing: -0.01em;
+	line-height: 1.1;
+	text-transform: none;
+}
+html.ut-ambient .label-mono {
+	font-family: var(--ut-f-text);
+	font-size: 0.72rem;
+	letter-spacing: 0.06em;
+	text-transform: none;
+}
+/* No neon: the marquee flicker and scanlines belong to the old drive-in look. */
+html.ut-ambient .marquee-flicker {
+	animation: none;
+}
+html.ut-ambient .ott-text-scanlines::after {
+	content: none;
+}
+
+.ut-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: -1;
+	pointer-events: none;
+	overflow: hidden;
+	contain: strict;
+}
+.ut-backdrop .ut-sky {
+	/* The page sky sits further back than the widget's: calmer and dimmer. */
+	opacity: 0.55;
+	--a: 0.8;
+	--s: 1.25;
+}
+
+/* ---------------------------------------------------------------------------
+ *  Sky and scenes
+ * ------------------------------------------------------------------------ */
+.ut-sky {
+	--a: 1;
+	--s: 1;
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+	overflow: hidden;
+	pointer-events: none;
+	border-radius: inherit;
+}
+.ut-scene {
+	position: absolute;
+	inset: 0;
+	transition: opacity 0.9s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ut-scene[data-phase="enter"],
+.ut-scene[data-phase="leave"] {
+	opacity: 0;
+}
+.ut-scene i {
+	position: absolute;
+	display: block;
+}
+/* More specific than the scenes' `animation` shorthands, which would reset to running. */
+.ut-sky .ut-scene i {
+	animation-play-state: paused;
+}
+.ut-sky[data-running="true"] .ut-scene i {
+	animation-play-state: running;
+	will-change: transform, opacity;
+}
+.ut-rg1 {
+	background: radial-gradient(closest-side, var(--g1), transparent);
+}
+.ut-rg2 {
+	background: radial-gradient(closest-side, var(--g2), transparent);
+}
+.ut-rg3 {
+	background: radial-gradient(closest-side, var(--g3), transparent);
+}
+
+/* 01 drift: veils gliding along the horizon */
+.ut-m-drift .l1 {
+	left: -35%;
+	top: -18%;
+	width: 130%;
+	height: 70%;
+	animation: ut-k-drift-a calc(9s * var(--s)) ease-in-out infinite alternate;
+}
+.ut-m-drift .l2 {
+	right: -40%;
+	bottom: -14%;
+	width: 135%;
+	height: 62%;
+	animation: ut-k-drift-b calc(11s * var(--s)) ease-in-out calc(-4s * var(--s)) infinite alternate;
+}
+.ut-m-drift .l3 {
+	left: -25%;
+	right: -25%;
+	top: 42%;
+	height: 26%;
+	animation: ut-k-breathe calc(6s * var(--s)) ease-in-out infinite alternate;
+}
+/* 02 rise: heat discs going up */
+.ut-m-rise i {
+	aspect-ratio: 1;
+}
+.ut-m-rise .l1 {
+	left: -22%;
+	bottom: -38%;
+	width: 95%;
+	animation: ut-k-rise-a calc(10s * var(--s)) ease-in-out infinite alternate;
+}
+.ut-m-rise .l2 {
+	right: -22%;
+	bottom: -30%;
+	width: 72%;
+	animation: ut-k-rise-b calc(8s * var(--s)) ease-in-out calc(-3s * var(--s)) infinite alternate;
+}
+.ut-m-rise .l3 {
+	left: 26%;
+	bottom: -22%;
+	width: 50%;
+	animation: ut-k-rise-c calc(7s * var(--s)) ease-in-out calc(-5s * var(--s)) infinite alternate;
+}
+/* 03 sway: light shafts under the leaves */
+.ut-m-sway .l1,
+.ut-m-sway .l2,
+.ut-m-sway .l3 {
+	top: -30%;
+	height: 150%;
+	transform-origin: 50% 0;
+	background: radial-gradient(50% 100% at 50% 0, var(--g1), transparent);
+}
+.ut-m-sway .l1 {
+	left: 4%;
+	width: 24%;
+	animation: ut-k-sway calc(7s * var(--s)) ease-in-out calc(-2s * var(--s)) infinite alternate;
+}
+.ut-m-sway .l2 {
+	left: 38%;
+	width: 32%;
+	animation: ut-k-sway calc(9s * var(--s)) ease-in-out calc(-6s * var(--s)) infinite
+		alternate-reverse;
+}
+.ut-m-sway .l3 {
+	left: 70%;
+	width: 18%;
+	background: radial-gradient(50% 100% at 50% 0, var(--g2), transparent);
+	animation: ut-k-sway calc(6s * var(--s)) ease-in-out calc(-1s * var(--s)) infinite alternate;
+}
+.ut-m-sway .l4 {
+	left: -20%;
+	right: -20%;
+	bottom: -18%;
+	height: 50%;
+	animation: ut-k-breathe calc(8s * var(--s)) ease-in-out infinite alternate;
+}
+/* 04 ripple: rings widening from a low point */
+.ut-m-ripple .l1,
+.ut-m-ripple .l2,
+.ut-m-ripple .l3 {
+	left: 50%;
+	top: 70%;
+	width: 130%;
+	aspect-ratio: 1;
+	margin: -65% 0 0 -65%;
+	background: radial-gradient(closest-side, transparent 56%, var(--g1) 71%, transparent 86%);
+	opacity: 0;
+	animation: ut-k-ripple calc(9s * var(--s)) linear infinite;
+}
+.ut-m-ripple .l2 {
+	animation-delay: calc(-3s * var(--s));
+}
+.ut-m-ripple .l3 {
+	animation-delay: calc(-6s * var(--s));
+	background: radial-gradient(closest-side, transparent 56%, var(--g2) 71%, transparent 86%);
+}
+.ut-m-ripple .l4 {
+	left: -15%;
+	right: -15%;
+	bottom: -16%;
+	height: 46%;
+	animation: ut-k-breathe calc(7s * var(--s)) ease-in-out infinite alternate;
+}
+/* 05 orbit: two glows turning around each other */
+.ut-m-orbit .l1 {
+	left: 50%;
+	top: 42%;
+	width: 125%;
+	aspect-ratio: 1;
+	margin: -62.5% 0 0 -62.5%;
+	background: radial-gradient(circle at 28% 30%, var(--g1), transparent 33%),
+		radial-gradient(circle at 72% 70%, var(--g2), transparent 33%);
+	animation: ut-k-spin calc(18s * var(--s)) linear infinite;
+}
+.ut-m-orbit .l2 {
+	left: 50%;
+	top: 62%;
+	width: 165%;
+	aspect-ratio: 1;
+	margin: -82.5% 0 0 -82.5%;
+	background: radial-gradient(circle at 50% 22%, var(--g3), transparent 28%);
+	animation: ut-k-spin calc(26s * var(--s)) linear calc(-9s * var(--s)) infinite reverse;
+}
+/* 06 breathe: one glow breathing */
+.ut-m-breathe .l1 {
+	left: -12%;
+	width: 124%;
+	top: 8%;
+	aspect-ratio: 1;
+	animation: ut-k-swell calc(7s * var(--s)) ease-in-out infinite alternate;
+}
+.ut-m-breathe .l2 {
+	left: -40%;
+	top: 52%;
+	width: 95%;
+	aspect-ratio: 1;
+	animation: ut-k-drift-a calc(12s * var(--s)) ease-in-out calc(-3s * var(--s)) infinite alternate;
+}
+.ut-m-breathe .l3 {
+	left: 22%;
+	top: -24%;
+	width: 72%;
+	aspect-ratio: 1;
+	animation: ut-k-breathe calc(5s * var(--s)) ease-in-out calc(-2s * var(--s)) infinite alternate;
+}
+/* 07 curtain: velvet folds */
+.ut-m-curtain .l1,
+.ut-m-curtain .l2,
+.ut-m-curtain .l3,
+.ut-m-curtain .l4 {
+	top: -10%;
+	height: 120%;
+	width: 32%;
+	background: linear-gradient(90deg, transparent, var(--g1) 50%, transparent);
+	animation: ut-k-fold calc(7s * var(--s)) ease-in-out infinite alternate;
+}
+.ut-m-curtain .l1 {
+	left: -14%;
+}
+.ut-m-curtain .l2 {
+	left: 13%;
+	background: linear-gradient(90deg, transparent, var(--g3) 50%, transparent);
+	animation-delay: calc(-2.2s * var(--s));
+}
+.ut-m-curtain .l3 {
+	left: 41%;
+	animation-delay: calc(-4.4s * var(--s));
+}
+.ut-m-curtain .l4 {
+	left: 69%;
+	background: linear-gradient(90deg, transparent, var(--g3) 50%, transparent);
+	animation-delay: calc(-1.1s * var(--s));
+}
+.ut-m-curtain .l5 {
+	left: -20%;
+	right: -20%;
+	bottom: -20%;
+	height: 52%;
+	animation: ut-k-breathe calc(8s * var(--s)) ease-in-out infinite alternate;
+}
+/* 08 pendulum: a low lamp swinging */
+.ut-m-pendulum .l1 {
+	left: 4%;
+	width: 92%;
+	top: -6%;
+	aspect-ratio: 1;
+	transform-origin: 50% -60%;
+	animation: ut-k-pend calc(6s * var(--s)) ease-in-out infinite alternate;
+}
+.ut-m-pendulum .l2 {
+	left: -12%;
+	right: -12%;
+	bottom: -12%;
+	height: 42%;
+	animation: ut-k-pool calc(6s * var(--s)) ease-in-out infinite alternate;
+}
+.ut-m-pendulum .l3 {
+	left: -30%;
+	right: -30%;
+	top: -20%;
+	height: 40%;
+	animation: ut-k-breathe calc(9s * var(--s)) ease-in-out infinite alternate;
+}
+/* 09 aurora: bending curtains */
+.ut-m-aurora .l1,
+.ut-m-aurora .l2 {
+	left: -22%;
+	width: 144%;
+	height: 56%;
+	background: radial-gradient(60% 50% at 50% 100%, var(--g1), transparent 78%);
+}
+.ut-m-aurora .l1 {
+	top: 0;
+	animation: ut-k-aur calc(8s * var(--s)) ease-in-out infinite alternate;
+}
+.ut-m-aurora .l2 {
+	top: 20%;
+	background: radial-gradient(60% 50% at 50% 100%, var(--g2), transparent 78%);
+	animation: ut-k-aur calc(10s * var(--s)) ease-in-out calc(-4s * var(--s)) infinite
+		alternate-reverse;
+}
+.ut-m-aurora .l3 {
+	left: -20%;
+	right: -20%;
+	bottom: -18%;
+	height: 46%;
+	animation: ut-k-breathe calc(7s * var(--s)) ease-in-out infinite alternate;
+}
+/* 10 halo: a ring of colors turning around a low center */
+.ut-m-halo .l1 {
+	left: 50%;
+	top: 64%;
+	width: 175%;
+	aspect-ratio: 1;
+	margin: -87.5% 0 0 -87.5%;
+	opacity: calc(0.5 + var(--a) * 0.35);
+	background: conic-gradient(
+		from 0deg,
+		var(--g1),
+		transparent 17%,
+		var(--g2) 34%,
+		transparent 51%,
+		var(--g3) 68%,
+		transparent 85%,
+		var(--g1)
+	);
+	-webkit-mask: radial-gradient(closest-side, #000 18%, transparent 74%);
+	mask: radial-gradient(closest-side, #000 18%, transparent 74%);
+	animation: ut-k-turn calc(20s * var(--s)) linear infinite;
+}
+.ut-m-halo .l2 {
+	left: 50%;
+	top: 64%;
+	width: 70%;
+	aspect-ratio: 1;
+	margin: -35% 0 0 -35%;
+	animation: ut-k-swell calc(6s * var(--s)) ease-in-out infinite alternate;
+}
+/* 11 call: two glows answering each other */
+.ut-m-call .l1 {
+	left: -28%;
+	top: 14%;
+	width: 88%;
+	aspect-ratio: 1;
+	animation: ut-k-call calc(5s * var(--s)) ease-in-out infinite alternate;
+}
+.ut-m-call .l2 {
+	right: -28%;
+	top: 40%;
+	width: 88%;
+	aspect-ratio: 1;
+	animation: ut-k-call calc(5s * var(--s)) ease-in-out infinite alternate-reverse;
+}
+.ut-m-call .l3 {
+	left: -10%;
+	right: -10%;
+	top: 38%;
+	height: 32%;
+	animation: ut-k-pool calc(5s * var(--s)) ease-in-out infinite alternate-reverse;
+}
+/* 12 sweep: wide headlight beams passing */
+.ut-m-sweep .l1,
+.ut-m-sweep .l2 {
+	left: 0;
+	top: -50%;
+	height: 200%;
+	width: 40%;
+	background: linear-gradient(90deg, transparent, var(--g1) 50%, transparent);
+	animation: ut-k-sweep calc(10s * var(--s)) cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+.ut-m-sweep .l2 {
+	width: 24%;
+	background: linear-gradient(90deg, transparent, var(--g3) 50%, transparent);
+	animation-delay: calc(-5s * var(--s));
+}
+.ut-m-sweep .l3 {
+	left: -30%;
+	right: -30%;
+	bottom: -16%;
+	height: 52%;
+	animation: ut-k-drift-b calc(12s * var(--s)) ease-in-out infinite alternate;
+}
+
+@keyframes ut-k-drift-a {
+	from {
+		transform: translate3d(calc(var(--a) * -14%), 0, 0);
+	}
+	to {
+		transform: translate3d(calc(var(--a) * 14%), calc(var(--a) * 6%), 0) scale(1.06);
+	}
+}
+@keyframes ut-k-drift-b {
+	from {
+		transform: translate3d(calc(var(--a) * 14%), 0, 0);
+	}
+	to {
+		transform: translate3d(calc(var(--a) * -16%), calc(var(--a) * -7%), 0) scale(1.1);
+	}
+}
+@keyframes ut-k-breathe {
+	from {
+		opacity: 0.35;
+		transform: scaleX(0.88);
+	}
+	to {
+		opacity: 1;
+		transform: scaleX(1.08);
+	}
+}
+@keyframes ut-k-rise-a {
+	from {
+		transform: translate3d(0, calc(var(--a) * 10%), 0);
+	}
+	to {
+		transform: translate3d(calc(var(--a) * 6%), calc(var(--a) * -38%), 0) scale(1.08);
+	}
+}
+@keyframes ut-k-rise-b {
+	from {
+		transform: translate3d(0, calc(var(--a) * 12%), 0) scale(0.92);
+	}
+	to {
+		transform: translate3d(calc(var(--a) * -8%), calc(var(--a) * -46%), 0) scale(1.06);
+	}
+}
+@keyframes ut-k-rise-c {
+	from {
+		opacity: 0.3;
+		transform: translate3d(0, calc(var(--a) * 20%), 0);
+	}
+	to {
+		opacity: 1;
+		transform: translate3d(calc(var(--a) * 5%), calc(var(--a) * -70%), 0);
+	}
+}
+@keyframes ut-k-sway {
+	from {
+		opacity: 0.5;
+		transform: rotate(calc(var(--a) * -10deg));
+	}
+	to {
+		opacity: 1;
+		transform: rotate(calc(var(--a) * 10deg));
+	}
+}
+@keyframes ut-k-ripple {
+	0% {
+		opacity: 0;
+		transform: scale(0.15);
+	}
+	22% {
+		opacity: 1;
+	}
+	100% {
+		opacity: 0;
+		transform: scale(calc(0.75 + var(--a) * 0.45));
+	}
+}
+@keyframes ut-k-spin {
+	from {
+		transform: rotate(0) scale(calc(0.8 + var(--a) * 0.2));
+	}
+	to {
+		transform: rotate(360deg) scale(calc(0.8 + var(--a) * 0.2));
+	}
+}
+@keyframes ut-k-swell {
+	from {
+		opacity: 0.3;
+		transform: scale(calc(1 - var(--a) * 0.25));
+	}
+	to {
+		opacity: 1;
+		transform: scale(calc(1 + var(--a) * 0.12));
+	}
+}
+@keyframes ut-k-fold {
+	from {
+		opacity: 0.45;
+		transform: translate3d(calc(var(--a) * -12%), 0, 0) scaleX(0.72);
+	}
+	to {
+		opacity: 1;
+		transform: translate3d(calc(var(--a) * 12%), 0, 0) scaleX(1.2);
+	}
+}
+@keyframes ut-k-pend {
+	from {
+		transform: rotate(calc(var(--a) * -16deg));
+	}
+	to {
+		transform: rotate(calc(var(--a) * 16deg));
+	}
+}
+@keyframes ut-k-pool {
+	from {
+		transform: translate3d(calc(var(--a) * -14%), 0, 0);
+	}
+	to {
+		transform: translate3d(calc(var(--a) * 14%), 0, 0);
+	}
+}
+@keyframes ut-k-aur {
+	from {
+		opacity: 0.5;
+		transform: translate3d(calc(var(--a) * -12%), 0, 0) skewX(calc(var(--a) * -16deg))
+			scaleY(0.85);
+	}
+	to {
+		opacity: 1;
+		transform: translate3d(calc(var(--a) * 12%), calc(var(--a) * 4%), 0)
+			skewX(calc(var(--a) * 16deg)) scaleY(1.15);
+	}
+}
+@keyframes ut-k-turn {
+	to {
+		transform: rotate(360deg);
+	}
+}
+@keyframes ut-k-call {
+	from {
+		opacity: 0.2;
+		transform: scale(calc(1 - var(--a) * 0.2));
+	}
+	to {
+		opacity: 1;
+		transform: scale(calc(1 + var(--a) * 0.08));
+	}
+}
+@keyframes ut-k-sweep {
+	from {
+		transform: translate3d(-170%, 0, 0) rotate(20deg);
+	}
+	to {
+		transform: translate3d(330%, 0, 0) rotate(20deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.ut-palette {
+		transition: none;
+	}
+	.ut-scene {
+		transition-duration: 0.2s;
+	}
+}

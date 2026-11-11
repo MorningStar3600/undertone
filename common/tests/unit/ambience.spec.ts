@@ -17,7 +17,7 @@ import {
  * update the Rust copy and regenerate the vectors' expectations.
  */
 const fixture = JSON.parse(
-	readFileSync(fileURLToPath(new URL("../fixtures/ambience.json", import.meta.url)), "utf8")
+	readFileSync(fileURLToPath(new URL("../fixtures/ambience.json", import.meta.url)), "utf8"),
 ) as {
 	rules: unknown;
 	ambiences: unknown;
@@ -41,7 +41,7 @@ describe("ambiences", () => {
 	it("defines twelve distinct ambiences in gallery order", () => {
 		expect(AMBIENCES.map(ambience => ambience.id)).toEqual([...AMBIENCE_IDS]);
 		expect(AMBIENCES.map(ambience => ambience.number)).toEqual(
-			Array.from({ length: 12 }, (_, i) => i + 1)
+			Array.from({ length: 12 }, (_, i) => i + 1),
 		);
 		expect(new Set(AMBIENCES.map(ambience => ambience.motion)).size).toBe(12);
 		expect(new Set(AMBIENCES.map(ambience => ambience.logo)).size).toBe(12);
@@ -64,7 +64,7 @@ describe("ambiences", () => {
 		"picks the expected ambience for %s",
 		(_, vector) => {
 			expect(pickAmbienceFromPixels(rgba(vector.pixels))).toBe(vector.expected);
-		}
+		},
 	);
 
 	it("maps common cover colors to the intended families", () => {

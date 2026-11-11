@@ -1,6 +1,45 @@
 import { OttWebsocketError } from "ott-common/models/types";
 
 export default {
+	ambience: {
+		names: {
+			"heure-bleue": "Heure bleue",
+			braise: "Braise",
+			"sous-bois": "Sous-bois",
+			lagune: "Lagune",
+			aurore: "Aurore",
+			brume: "Brume",
+			grenat: "Grenat",
+			tabac: "Tabac",
+			jade: "Jade",
+			amethyste: "Améthyste",
+			cendre: "Cendre",
+			"route-de-nuit": "Route de nuit",
+		},
+	},
+	"player-widget": {
+		brand: "undertone",
+		move: "Déplacer le lecteur",
+		"move-hint": "Fais glisser le lecteur où tu veux, ou utilise les flèches ici (Maj pour aller plus vite, Début pour le replacer)",
+		fold: "Replier le lecteur",
+		unfold: "Déplier le lecteur",
+		together: "personne | rien que toi | {count} ensemble",
+		"ambience-number": "ambiance {number}",
+		"brought-by": "apporté par {name}",
+		"only-you": "pour toi seul",
+		"up-next": "Ensuite",
+		"in-room-queue": "dans la file du salon",
+		untitled: "Sans titre",
+		synced: "lecture synchronisée",
+		"paused-for-room": "en pause pour tout le salon",
+		motion: {
+			label: "Mouvement du fond",
+			auto: "Auto",
+			on: "Activé",
+			off: "Désactivé",
+			"system-reduced": "Ton système demande de réduire les animations : en Auto, les fonds restent fixes.",
+		},
+	},
 	common: {
 		yes: "Oui",
 		no: "Non",

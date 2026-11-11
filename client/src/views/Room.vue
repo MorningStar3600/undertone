@@ -1,5 +1,5 @@
 <template>
-	<RoomPlayerLayout :fullscreen="store.state.fullscreen">
+	<RoomPlayerLayout :fullscreen="store.state.fullscreen" :avoid-selector="playerAvoidSelector">
 		<!-- HACK: For some reason, safari really doesn't like typescript enums. As a result, we are forced to not use the enums, and use their literal values instead. -->
 		<div
 			class="room-content group/room p-4 max-xl:p-0 data-[fullscreen=true]:p-0 data-[layout=theater]:p-0"
@@ -107,19 +107,7 @@
 								@ready="onPlayerReady"
 							/>
 						</div>
-						<Card
-							v-if="mediaMode === 'audio'"
-							class="h-full justify-center"
-							data-cy="room-audio-view"
-						>
-							<CardHeader class="justify-items-center text-center">
-								<Headphones class="size-10" aria-hidden="true" />
-								<CardTitle>{{ $t("room.media-mode.audio-title") }}</CardTitle>
-								<CardDescription>{{
-									$t("room.media-mode.audio-description")
-								}}</CardDescription>
-							</CardHeader>
-						</Card>
+						<RoomAudioStage v-if="mediaMode === 'audio'" />
 						<Button
 							v-if="
 								mediaMode === 'video' &&
@@ -356,11 +344,16 @@
 		<ServerMessageHandler />
 		<WorkaroundPlaybackStatusUpdater />
 		<WorkaroundUserStateNotifier />
-		<template #player>
+		<template #player="widget">
 			<VideoControls
 				v-if="!showDisconnectedOverlay"
 				:slider-position="sliderPosition"
 				:true-position="truePosition"
+				:collapsed="widget.collapsed"
+				:docked="widget.docked"
+				:toggle-collapsed="widget.toggleCollapsed"
+				:move-by="widget.moveBy"
+				:reset-position="widget.resetPosition"
 			/>
 		</template>
 	</RoomPlayerLayout>
@@ -369,7 +362,7 @@
 <script lang="ts">
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Headphones, Video, Play, Pause } from "@lucide/vue";
 import { Icon } from "@/components/ui/icon";
@@ -433,6 +426,7 @@ import type { ServerMessageSync } from "ott-common/models/messages";
 import { useScreenOrientation } from "@vueuse/core";
 import { KeyboardShortcuts, RoomKeyboardShortcutsKey } from "@/util/keyboard-shortcuts";
 import VideoControls from "@/components/controls/VideoControls.vue";
+import RoomAudioStage from "@/components/ambience/RoomAudioStage.vue";
 import RestoreQueue from "@/components/RestoreQueue.vue";
 import RoomPlayerLayout from "@/components/RoomPlayerLayout.vue";
 import { waitForToken } from "@/util/token";
@@ -465,13 +459,13 @@ export default defineComponent({
 		Video,
 		Play,
 		Pause,
-		CardDescription,
 		RoomMusicQueue,
 		RoomMusicFilters,
 		RoomMusicSettings,
 		RoomMusicFeedback,
 		RoomMusicConfirmation,
 		VideoControls,
+		RoomAudioStage,
 		VideoQueue,
 		OmniPlayer,
 		Chat,
@@ -1084,6 +1078,12 @@ export default defineComponent({
 
 		// small helper aliases
 		const currentSource = computed(() => store.state.room.currentSource);
+		// YouTube's terms don't allow drawing over its player: the floating player moves off it.
+		const playerAvoidSelector = computed(() =>
+			mediaMode.value === "video" && currentSource.value?.service === "youtube"
+				? '[data-cy="room-video-surface"]'
+				: undefined,
+		);
 		const production = computed(() => store.state.production);
 
 		// debug mode
@@ -1138,6 +1138,7 @@ export default defineComponent({
 			setAddPreviewText,
 
 			currentSource,
+			playerAvoidSelector,
 			production,
 			debugMode,
 			orientation: orientation.orientation,

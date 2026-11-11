@@ -1,6 +1,45 @@
 import { BehaviorOption, OttWebsocketError, Role } from "ott-common/models/types";
 
 export default {
+	ambience: {
+		names: {
+			"heure-bleue": "Blue hour",
+			braise: "Embers",
+			"sous-bois": "Undergrowth",
+			lagune: "Lagoon",
+			aurore: "Dawn",
+			brume: "Mist",
+			grenat: "Garnet",
+			tabac: "Tobacco",
+			jade: "Jade",
+			amethyste: "Amethyst",
+			cendre: "Ash",
+			"route-de-nuit": "Night drive",
+		},
+	},
+	"player-widget": {
+		brand: "undertone",
+		move: "Move the player",
+		"move-hint": "Drag the player anywhere, or use the arrow keys here (Shift for bigger steps, Home to reset)",
+		fold: "Fold the player",
+		unfold: "Unfold the player",
+		together: "nobody here | just you | {count} together",
+		"ambience-number": "ambience {number}",
+		"brought-by": "brought by {name}",
+		"only-you": "just for you",
+		"up-next": "Up next",
+		"in-room-queue": "in the room's queue",
+		untitled: "Untitled",
+		synced: "playing in sync",
+		"paused-for-room": "paused for the whole room",
+		motion: {
+			label: "Background motion",
+			auto: "Auto",
+			on: "On",
+			off: "Off",
+			"system-reduced": "Your system asks for reduced motion; Auto keeps backgrounds still.",
+		},
+	},
 	playbackTimeline: {
 		"waiting-clock": "Calibrating playback clock...",
 		recovering: "Reconnecting playback...",
