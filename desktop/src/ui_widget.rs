@@ -308,10 +308,12 @@ impl Widget {
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let foreground = if enabled { ui::TEXT_SOFT } else { ui::FAINT };
-        self.control(id, key, route, authority, enabled, cx)
+        self.control(id, key, route, authority, enabled, ui::SECONDARY, cx)
             .child(ui::icon(glyph, 21.).text_color(rgb(foreground)))
     }
     /// Shared behaviour of the widget's controls: tooltip, focus, keyboard, captured authority.
+    /// GPUI allows one hover style per element, so callers pass theirs here.
+    #[allow(clippy::too_many_arguments)]
     fn control(
         &self,
         id: impl Into<gpui::ElementId>,
@@ -319,6 +321,7 @@ impl Widget {
         route: Route,
         authority: CommandAuthority,
         enabled: bool,
+        hover: ui::Tok,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let label = text(key);
@@ -339,7 +342,7 @@ impl Widget {
                 s.cursor_pointer()
                     .focusable()
                     .tab_stop(true)
-                    .hover(|s| s.bg(rgb(ui::SECONDARY)))
+                    .hover(move |s| s.bg(rgb(hover)))
                     .focus(|s| s.border_color(rgb(ui::TEXT)))
             })
             .tooltip(move |_, cx| cx.new(|_| ui::Tip(label.clone())).into())
@@ -366,12 +369,12 @@ impl Widget {
             Route::Playback(Control::PlayPause),
             authority,
             live,
+            ui::AMBER_HOVER,
             cx,
         )
         .size(px(edge))
         .bg(rgb(if live { ui::AMBER } else { ui::SECONDARY }))
         .text_color(rgb(foreground))
-        .when(live, |s| s.hover(|s| s.bg(rgb(ui::AMBER_HOVER))))
         .child(ui::icon(key, edge * 0.44).text_color(rgb(foreground)))
     }
     /// Window chrome (`.rb`): 32 px, glass, pressed state filled with ink.
@@ -952,7 +955,7 @@ impl Widget {
         } else {
             ui::MUTED
         };
-        self.control(id, key, route, authority, enabled, cx)
+        self.control(id, key, route, authority, enabled, ui::SECONDARY, cx)
             .w_auto()
             .max_w(px(150.))
             .h(px(32.))
@@ -1048,7 +1051,7 @@ impl Widget {
         authority: CommandAuthority,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
-        self.control(id, key, route, authority, true, cx)
+        self.control(id, key, route, authority, true, ui::SECONDARY, cx)
             .w_auto()
             .h(px(22.))
             .px(px(4.))

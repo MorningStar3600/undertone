@@ -633,17 +633,47 @@ impl Drop for Player {
     }
 }
 
+/// Keeps a trace of panics next to the preferences: a panic inside a Windows callback aborts
+/// the process (0xC0000409) before anything else can report it.
+fn log_panics() {
+    let Some(path) = undertone_desktop::prefs::default_path()
+        .and_then(|path| path.parent().map(|dir| dir.join("crash.log")))
+    else {
+        return;
+    };
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let trace = std::backtrace::Backtrace::force_capture();
+        let report = format!(
+            "{:?} undertone-desktop {}
+{info}
+{trace}
+",
+            std::time::SystemTime::now(),
+            env!("CARGO_PKG_VERSION"),
+        );
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&path, report);
+        previous(info);
+    }));
+}
+
 fn main() -> anyhow::Result<()> {
+    log_panics();
     let mut server = None;
     let mut room = None;
     let mut muted = false;
     let mut smoke = false;
+    let mut widget = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--server" => server = args.next(),
             "--room" => room = args.next(),
             "--muted" => muted = true,
+            "--widget" => widget = true,
             "--smoke-test" => {
                 smoke = true;
                 muted = true;
@@ -695,6 +725,9 @@ fn main() -> anyhow::Result<()> {
             let mut player = Player::new(window, cx, muted, prefs);
             if !smoke && let Some(initial) = initial { player.join(&initial, window, cx); }
             player.sync_layout(window);
+            if widget && !smoke {
+                player.toggle_widget(window, cx);
+            }
             if smoke {
                 assert!(player.webview.is_none() && player.connection.is_none() && player.muted);
                 cx.spawn(async |this, cx| {

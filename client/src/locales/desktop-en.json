@@ -57,7 +57,7 @@
 	"seekHint": "Seek · Left / Right: 10 seconds",
 	"localVolume": "Volume on this device · Left / Right to adjust",
 	"unknownTime": "–:––",
-	"help": "Undertone desktop: --server http://localhost:3000 --room NAME [--muted]. Or paste a full /room/NAME URL using the native Join button. --smoke-test starts offline, muted, and exits automatically.",
+	"help": "Undertone desktop: --server http://localhost:3000 --room NAME [--muted] [--widget]. Or paste a full /room/NAME URL using the native Join button. --widget opens the floating widget at launch. --smoke-test starts offline, muted, and exits automatically.",
 	"account": "Account",
 	"settings": "Settings",
 	"addMusic": "Add music",
