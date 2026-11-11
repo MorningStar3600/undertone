@@ -171,15 +171,10 @@ impl Widget {
             let _ = main.update(cx, |player, window, cx| match route {
                 Route::Playback(control) => player.control(control, authority, window, cx),
                 Route::Native(action) => {
-                    if matches!(action, Action::Panel(_)) && native_window::restore(window).is_err()
+                    // Panels open in the main window; Show never toggles an open panel shut.
+                    if matches!(action, Action::Show(_)) && native_window::restore(window).is_err()
                     {
                         player.notice = text("widgetRestoreFailed");
-                    }
-                    // Opening a panel is idempotent from the widget, rather than toggling it shut.
-                    if let Action::Panel(panel) = action
-                        && player.music_ui.panel == Some(panel)
-                    {
-                        return;
                     }
                     player.music_action(action, authority, window, cx);
                 }
@@ -276,7 +271,7 @@ impl Render for Widget {
         let player = owner.read(cx);
         let authority = player.native.authority();
         let live = player.available && player.host_ready;
-        let panel = |panel| Route::Native(Action::Panel(panel));
+        let panel = |panel| Route::Native(Action::Show(panel));
         let icon_button =
             |key, glyph, route| self.button(key, key, glyph, route, authority, true, cx);
         let current = player
@@ -285,18 +280,7 @@ impl Render for Widget {
             .music
             .as_ref()
             .and_then(|m| m.current.as_ref());
-        let contributor = current.and_then(|c| {
-            player
-                .native
-                .room
-                .music
-                .as_ref()?
-                .participants
-                .iter()
-                .find(|p| p.participant_id == c.entry.contributor_id)?
-                .name
-                .clone()
-        });
+        let contributor = current.and_then(|_| player.contributor_name());
         let chrome = row()
             .gap(px(3.))
             .child(self.button(
@@ -350,8 +334,33 @@ impl Render for Widget {
                     .focusable()
                     .tab_stop(true)
                     .child(ui::icon("minus", 18.))
+                    .rounded(px(9.))
+                    .hover(|s| s.bg(rgb(ui::SECONDARY)))
                     .tooltip(|_, cx| cx.new(|_| ui::Tip(text("widgetMinimize"))).into())
                     .on_click(|_, window, _| window.minimize_window()),
+            )
+            .child(
+                div()
+                    .id("widget-close")
+                    .size(px(32.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(9.))
+                    .cursor_pointer()
+                    .focusable()
+                    .tab_stop(true)
+                    .hover(|s| s.bg(rgb(ui::SECONDARY)))
+                    .child(ui::icon("close", 16.))
+                    .tooltip(|_, cx| cx.new(|_| ui::Tip(text("widgetClose"))).into())
+                    .on_click(cx.listener(|widget, _, window, cx| {
+                        let handle = window
+                            .window_handle()
+                            .downcast::<Widget>()
+                            .expect("widget root");
+                        forget_widget(widget.main, handle, cx);
+                        window.remove_window();
+                    })),
             );
         let header = row()
             .absolute()
@@ -381,6 +390,104 @@ impl Render for Widget {
                     ),
             )
             .child(chrome);
+        let footer_text = footer_status(&self.error, &player.notice, &player.status, live);
+        let footer_tip = footer_text.clone();
+        let root = div()
+            .size_full()
+            .relative()
+            .rounded(px(20.))
+            .overflow_hidden()
+            .bg(rgb(ui::CARD))
+            .border_1()
+            .border_color(rgb(ui::BORDER))
+            .font_family("Segoe UI")
+            .text_size(px(13.))
+            .text_color(rgb(ui::TEXT))
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
+                if event.keystroke.key == "tab"
+                    && !event.keystroke.modifiers.control
+                    && !event.keystroke.modifiers.alt
+                    && !event.keystroke.modifiers.platform
+                {
+                    if event.keystroke.modifiers.shift {
+                        window.focus_prev();
+                    } else {
+                        window.focus_next();
+                    }
+                    cx.stop_propagation();
+                }
+            }))
+            .child(header);
+        let footer = row()
+            .id("widget-status")
+            .tooltip(move |_, cx| cx.new(|_| ui::Tip(footer_tip.clone())).into())
+            .absolute()
+            .top(px(632.))
+            .left_0()
+            .w_full()
+            .h(px(29.))
+            .px(px(12.))
+            .gap(px(6.))
+            .justify_center()
+            .border_t_1()
+            .border_color(rgb(ui::BORDER))
+            .bg(rgb(ui::BACKGROUND))
+            .child(ui::icon("headphones", 11.).text_color(rgb(ui::MUTED)))
+            .child(quiet(footer_text, 10.))
+            .child(
+                div().absolute().right(px(8.)).child(
+                    icon_button("widgetQuit", "power", Route::Quit)
+                        .size(px(22.))
+                        .rounded(px(6.)),
+                ),
+            );
+        if player.connection.is_none() {
+            // Not in a room: one clear way back to the player, no disabled controls.
+            return root
+                .child(
+                    column()
+                        .absolute()
+                        .top(px(52.))
+                        .left_0()
+                        .w_full()
+                        .h(px(580.))
+                        .px(px(36.))
+                        .gap(px(12.))
+                        .items_center()
+                        .justify_center()
+                        .child(ui::artwork(94., None))
+                        .child(
+                            div()
+                                .mt(px(6.))
+                                .text_size(px(22.))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .child(text("widgetNoRoom")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(rgb(ui::MUTED))
+                                .child(text("widgetNoRoomHint")),
+                        )
+                        .child(
+                            icon_button("widgetOpenApp", "expand", Route::Restore)
+                                .w_auto()
+                                .h(px(40.))
+                                .mt(px(8.))
+                                .px(px(18.))
+                                .gap(px(8.))
+                                .rounded(px(12.))
+                                .border_1()
+                                .border_color(rgb(ui::BORDER))
+                                .bg(rgb(ui::POPOVER))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(text("widgetOpenApp")),
+                        ),
+                )
+                .child(footer)
+                .into_any_element();
+        }
         let room =
             slot(72., 20.)
                 .flex()
@@ -502,7 +609,7 @@ impl Render for Widget {
                         if seeking
                             && let Some(point) = event.mouse_position()
                             && let Some(bounds) = seek_bounds.get()
-                            && let Some(fraction) = slider_fraction(point.x, bounds)
+                            && let Some(fraction) = ui::slider_fraction(point.x, bounds)
                         {
                             widget.route(
                                 Route::Playback(Control::Seek(f64::from(fraction) * duration)),
@@ -608,7 +715,7 @@ impl Render for Widget {
                                 move |widget, event: &gpui::ClickEvent, _, cx| {
                                     if let Some(point) = event.mouse_position()
                                         && let Some(bounds) = volume_bounds.get()
-                                        && let Some(fraction) = slider_fraction(point.x, bounds)
+                                        && let Some(fraction) = ui::slider_fraction(point.x, bounds)
                                     {
                                         let volume = (fraction * 100.).round() as u8;
                                         widget.route(
@@ -638,8 +745,6 @@ impl Render for Widget {
             )
             .child(
                 row()
-                    .absolute()
-                    .left(px(106.))
                     .gap(px(13.))
                     .child(
                         self.button(
@@ -678,19 +783,8 @@ impl Render for Widget {
                         cx,
                     )),
             )
-            .child(
-                self.button(
-                    "widget-add-transport",
-                    "widgetAdd",
-                    "plus",
-                    panel(Panel::Add),
-                    authority,
-                    true,
-                    cx,
-                )
-                .border_1()
-                .border_color(rgb(ui::BORDER)),
-            );
+            // Balances the volume block so play/pause stays centred.
+            .child(div().w(px(94.)));
         let groups = player.native.mood_groups();
         let mut chips = row().gap(px(7.)).overflow_hidden();
         let can_tag = player.native.can().account_write && !player.music_ui.busy(&player.native);
@@ -709,7 +803,7 @@ impl Render for Widget {
                 self.button(
                     gpui::SharedString::from(format!("widget-mood-{}", chip.mood.id)),
                     if active { "tagActive" } else { "tagAdd" },
-                    mood_icon(&chip.mood.icon_key),
+                    ui::mood_glyph(&chip.mood.icon_key),
                     Route::Native(action),
                     authority,
                     enabled,
@@ -734,7 +828,7 @@ impl Render for Widget {
             );
         }
         chips = chips.child(
-            icon_button("trackMoods", "plus", panel(Panel::Moods))
+            icon_button("allMoods", "plus", panel(Panel::Moods))
                 .border_1()
                 .border_color(rgb(ui::BORDER)),
         );
@@ -757,10 +851,12 @@ impl Render for Widget {
             .child(chips)
             .child(quiet(
                 if suggestions.is_empty() {
-                    text(if player.native.can().account_write {
+                    text(if !player.native.room.active() {
+                        "musicModeShort"
+                    } else if player.native.can().account_write {
                         "widgetMoodsHint"
                     } else {
-                        "accountNeeded"
+                        "signInToTag"
                     })
                 } else {
                     format!("{} {suggestions}", text("widgetSuggestions"))
@@ -812,43 +908,14 @@ impl Render for Widget {
         if player.up_next.is_empty() {
             queue = queue.child(quiet(text("queueEmpty"), 11.));
         }
-        let footer_text = footer_status(&self.error, &player.notice, &player.status, live);
-        let footer_tip = footer_text.clone();
-        div()
-            .size_full()
-            .relative()
-            .rounded(px(20.))
-            .overflow_hidden()
-            .bg(rgb(ui::CARD))
-            .border_1()
-            .border_color(rgb(ui::BORDER))
-            .font_family("Segoe UI")
-            .text_size(px(13.))
-            .text_color(rgb(ui::TEXT))
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
-                if event.keystroke.key == "tab"
-                    && !event.keystroke.modifiers.control
-                    && !event.keystroke.modifiers.alt
-                    && !event.keystroke.modifiers.platform
-                {
-                    if event.keystroke.modifiers.shift {
-                        window.focus_prev();
-                    } else {
-                        window.focus_next();
-                    }
-                    cx.stop_propagation();
-                }
-            }))
-            .child(header)
-            .child(room)
+        root.child(room)
             .child(now)
             .child(timeline)
             .child(transport)
             .child(moods)
             .child(queue)
             .child(
-                slot(573., 39.).child(
+                slot(584., 40.).child(
                     self.button(
                         "widget-add-bottom",
                         "widgetAdd",
@@ -860,71 +927,15 @@ impl Render for Widget {
                     )
                     .size_full()
                     .gap(px(7.))
+                    .rounded(px(12.))
                     .border_1()
                     .border_color(rgb(ui::BORDER))
                     .bg(rgb(ui::POPOVER))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(text("widgetAdd")),
                 ),
             )
-            .child(
-                slot(614., 18.)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        icon_button("widgetRestore", "expand", Route::Restore)
-                            .w_auto()
-                            .h(px(18.))
-                            .gap(px(4.))
-                            .child(quiet(text("widgetRestore"), 9.)),
-                    )
-                    .child(
-                        div()
-                            .id("widget-close")
-                            .h(px(18.))
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .cursor_pointer()
-                            .focusable()
-                            .tab_stop(true)
-                            .child(ui::icon("close", 14.))
-                            .child(quiet(text("widgetClose"), 9.))
-                            .on_click(cx.listener(|widget, _, window, cx| {
-                                let handle = window
-                                    .window_handle()
-                                    .downcast::<Widget>()
-                                    .expect("widget root");
-                                forget_widget(widget.main, handle, cx);
-                                window.remove_window();
-                            })),
-                    )
-                    .child(
-                        icon_button("widgetQuit", "disconnect", Route::Quit)
-                            .w_auto()
-                            .h(px(18.))
-                            .gap(px(4.))
-                            .child(quiet(text("widgetQuit"), 9.)),
-                    ),
-            )
-            .child(
-                row()
-                    .id("widget-status")
-                    .tooltip(move |_, cx| cx.new(|_| ui::Tip(footer_tip.clone())).into())
-                    .absolute()
-                    .top(px(632.))
-                    .left_0()
-                    .w_full()
-                    .h(px(29.))
-                    .px(px(12.))
-                    .gap(px(6.))
-                    .justify_center()
-                    .border_t_1()
-                    .border_color(rgb(ui::BORDER))
-                    .bg(rgb(ui::BACKGROUND))
-                    .child(ui::icon("headphones", 11.).text_color(rgb(ui::MUTED)))
-                    .child(quiet(footer_text, 9.)),
-            )
+            .child(footer)
             .into_any_element()
     }
 }
@@ -939,21 +950,6 @@ fn forget_widget(main: WindowHandle<Player>, widget: WindowHandle<Widget>, cx: &
             }
         });
     });
-}
-
-fn mood_icon(key: &str) -> &'static str {
-    match key {
-        "heart" => "heart",
-        "headphones" => "headphones",
-        "moon" => "moon",
-        _ => "brand",
-    }
-}
-
-fn slider_fraction(x: Pixels, bounds: Bounds<Pixels>) -> Option<f32> {
-    let width = f32::from(bounds.size.width);
-    let offset = f32::from(x - bounds.origin.x);
-    (width.is_finite() && width > 0. && offset.is_finite()).then(|| (offset / width).clamp(0., 1.))
 }
 
 fn footer_status(error: &str, notice: &str, status: &str, live: bool) -> String {
@@ -1043,15 +1039,6 @@ mod tests {
         assert_eq!(footer_status("", "", &text("idle"), false), text("idle"));
     }
 
-    #[test]
-    fn sliders_use_rendered_endpoints_after_border_and_flex_shrink() {
-        let bounds = Bounds::new(gpui::point(px(56.), px(0.)), size(px(59.), px(28.)));
-        for (x, expected) in [(55., 0.), (56., 0.), (85.5, 0.5), (115., 1.), (116., 1.)] {
-            assert_eq!(slider_fraction(px(x), bounds), Some(expected));
-        }
-        let empty = Bounds::new(bounds.origin, size(px(0.), px(28.)));
-        assert_eq!(slider_fraction(px(56.), empty), None);
-    }
     #[test]
     fn closing_main_preserves_playback_owner_only_while_widget_exists() {
         assert!(keep_owner_on_close(true));

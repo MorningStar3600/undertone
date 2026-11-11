@@ -35,8 +35,6 @@ enum Control {
     Next,
     Seek(f64),
     Mute,
-    Quieter,
-    Louder,
     Volume(u8),
     ToggleWidget,
 }
@@ -230,6 +228,7 @@ impl Player {
         self.native = NativeState::default();
         self.authority = ui_music::Authority::default();
         self.account_refresh_requested = false;
+        self.music_ui.panel = None;
         self.clear_native_forms(cx);
     }
 
@@ -563,18 +562,6 @@ impl Player {
                 if !self.muted && self.volume == 0 {
                     self.volume = 50;
                 }
-                self.update_volume();
-                None
-            }
-            Control::Quieter => {
-                self.volume = self.volume.saturating_sub(10);
-                self.muted = self.volume == 0;
-                self.update_volume();
-                None
-            }
-            Control::Louder => {
-                self.volume = self.volume.saturating_add(10).min(100);
-                self.muted = self.volume == 0;
                 self.update_volume();
                 None
             }

@@ -88,6 +88,8 @@ pub struct AccountState {
 #[derive(Clone, Debug)]
 pub struct Preview {
     pub title: Option<String>,
+    /// Display only: finite positive seconds supplied by the server preview.
+    pub length: Option<f64>,
     pub reference: Reference,
 }
 pub const MAX_PREVIEW_RESULTS: usize = 10;
@@ -461,6 +463,9 @@ pub(crate) fn apply(
                     title: item["title"]
                         .as_str()
                         .map(|s| s.chars().take(512).collect()),
+                    length: item["length"]
+                        .as_f64()
+                        .filter(|v| v.is_finite() && *v > 0. && *v < 1e7),
                     reference,
                 });
             }

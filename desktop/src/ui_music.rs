@@ -1,14 +1,14 @@
 //! Native form orchestration and bounded detail panels. No playback IPC or raw REST data.
 use super::{
-    Player, ui,
+    Control, Player, ui,
     ui_input::{InputEvent, NativeInput},
 };
 use gpui::{Context, Div, Entity, Focusable, Stateful, Window, div, prelude::*, px, rgb};
 use std::collections::BTreeMap;
 use undertone_desktop::{
     music::{
-        ActiveTag, ConfirmationOffer, Content, ICON_KEYS, Intent, Mood, MusicCommand, MusicStatus,
-        Page, Reference,
+        ActiveTag, ConfirmationOffer, Content, ICON_KEYS, Intent, Mood, MoodChip, MusicCommand,
+        MusicStatus, Page, Reference,
     },
     session::{CommandAuthority, ErrorCode, NativeCommand, NativeState},
     text,
@@ -52,7 +52,7 @@ impl Authority {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Panel {
     Account,
     Moods,
@@ -76,7 +76,10 @@ impl Panel {
 
 #[derive(Clone)]
 pub enum Action {
+    /// Toggle a panel (header buttons).
     Panel(Panel),
+    /// Open a panel without toggling it closed (links, tabs, widget).
+    Show(Panel),
     Close,
     Login,
     Logout,
@@ -573,7 +576,7 @@ impl Player {
         let next = self.music_ui.reload.iter().position(|r| *r).or_else(|| {
             next_page(
                 &self.native,
-                self.music_ui.panel.or(self.widget.map(|_| Panel::Moods)),
+                visible_mood_surface(self.music_ui.panel, self.widget.is_some()),
                 &self.music_ui.attempted,
             )
         });
@@ -624,6 +627,16 @@ impl Player {
                 } else {
                     Some(panel)
                 };
+                self.drive_pages();
+            }
+            Action::Show(panel) => {
+                if self.music_ui.panel != Some(panel) {
+                    self.music_ui
+                        .scrolling
+                        .handle
+                        .set_offset(gpui::point(px(0.), px(0.)));
+                    self.music_ui.panel = Some(panel);
+                }
                 self.drive_pages();
             }
             Action::Close => self.music_ui.panel = None,
@@ -841,6 +854,15 @@ fn own_tag(page: &Page<Mood>, id: &str) -> ActiveTag {
         ActiveTag::Unknown
     }
 }
+/// Which mood surface is on screen. With no panel open, the main player shows the one-click
+/// mood strip; other panels hide it, unless the widget (which always shows chips) is open.
+fn visible_mood_surface(panel: Option<Panel>, widget: bool) -> Option<Panel> {
+    match panel {
+        None => Some(Panel::Moods),
+        Some(panel @ (Panel::Moods | Panel::Preferences)) => Some(panel),
+        Some(_) => widget.then_some(Panel::Moods),
+    }
+}
 fn next_page(s: &NativeState, panel: Option<Panel>, attempted: &[bool; 3]) -> Option<usize> {
     if !matches!(panel, Some(Panel::Moods | Panel::Preferences)) {
         return None;
@@ -861,14 +883,41 @@ fn next_page(s: &NativeState, panel: Option<Panel>, attempted: &[bool; 3]) -> Op
 pub fn column() -> Div {
     div().flex().flex_col().gap(px(8.))
 }
-fn row() -> Div {
-    div().flex().items_center().flex_wrap().gap(px(6.))
+/// Wrapping row for chips and button groups.
+fn wrap() -> Div {
+    div().flex().items_center().flex_wrap().gap(px(8.))
+}
+/// Single, non-wrapping row.
+fn line() -> Div {
+    div().flex().items_center().gap(px(8.))
 }
 fn label(key: &str) -> Div {
     div()
         .text_size(px(12.))
         .text_color(rgb(ui::MUTED))
         .child(text(key))
+}
+fn heading(key: &str) -> Div {
+    ui::section_label(text(key))
+}
+fn provider_name(service: &str) -> String {
+    match service {
+        "youtube" => "YouTube".into(),
+        "vimeo" => "Vimeo".into(),
+        "googledrive" => "Google Drive".into(),
+        "reddit" => "Reddit".into(),
+        "tubi" => "Tubi".into(),
+        "pluto" => "Pluto TV".into(),
+        "direct" | "hls" | "dash" => text("directSource"),
+        other => other.to_owned(),
+    }
+}
+pub(super) fn result_meta(service: &str, length: Option<f64>) -> String {
+    let mut parts = vec![provider_name(service)];
+    if let Some(length) = length {
+        parts.push(ui::time(length));
+    }
+    parts.join(" · ")
 }
 
 impl Player {
@@ -877,13 +926,13 @@ impl Player {
             .scrolling
             .watch(div().w_full().child(input.clone()), input.focus_handle(cx))
     }
-    pub fn action_button(
+
+    /// Shared behaviour of every native action control: focus, keyboard and captured authority.
+    fn action_base(
         &self,
         id: impl Into<gpui::ElementId>,
-        title: String,
         action: Action,
         enabled: bool,
-        selected: bool,
         cx: &Context<Self>,
     ) -> Stateful<Div> {
         let authority = self.native.authority();
@@ -896,27 +945,58 @@ impl Player {
         };
         element
             .id(id)
-            .px(px(10.))
-            .py(px(6.))
-            .rounded(px(8.))
-            .border_1()
-            .border_color(rgb(if selected { ui::AMBER } else { ui::BORDER }))
-            .bg(rgb(if selected { ui::SECONDARY } else { ui::CARD }))
-            .text_size(px(12.))
-            .text_color(rgb(if enabled { ui::TEXT } else { ui::MUTED }))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_shrink_0()
             .when(enabled, |s| {
                 s.cursor_pointer()
                     .track_focus(&focus)
                     .tab_stop(true)
-                    .focus(|s| s.border_color(rgb(ui::AMBER)))
-                    .hover(|s| s.bg(rgb(ui::SECONDARY)))
+                    .focus(|s| s.bg(rgb(ui::SECONDARY)))
             })
-            .child(title)
             .on_click(cx.listener(move |p, _, w, cx| {
                 if enabled {
                     p.music_action(action.clone(), authority, w, cx);
                 }
             }))
+    }
+
+    /// Bordered secondary button with a text label.
+    pub fn action_button(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        title: String,
+        action: Action,
+        enabled: bool,
+        selected: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        self.action_base(id, action, enabled, cx)
+            .h(px(32.))
+            .px(px(12.))
+            .gap(px(6.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(rgb(if selected { ui::AMBER } else { ui::BORDER }))
+            .bg(rgb(if selected {
+                ui::AMBER_SURFACE
+            } else {
+                ui::POPOVER
+            }))
+            .text_size(px(12.))
+            .text_color(rgb(if !enabled {
+                ui::FAINT
+            } else if selected {
+                ui::AMBER
+            } else {
+                ui::TEXT
+            }))
+            .when(enabled, |s| {
+                s.hover(|s| s.bg(rgb(ui::SECONDARY)))
+                    .focus(|s| s.border_color(rgb(ui::AMBER)))
+            })
+            .child(title)
     }
     fn button(
         &self,
@@ -927,29 +1007,168 @@ impl Player {
     ) -> Stateful<Div> {
         self.action_button(id, text(id), action, enabled, false, cx)
     }
-    pub fn panel_navigation(&self, cx: &Context<Self>) -> Div {
-        row().flex_shrink_0().children(
-            [
-                Panel::Moods,
-                Panel::Preferences,
-                Panel::Add,
-                Panel::Account,
-                Panel::Queue,
-                Panel::Settings,
-            ]
-            .into_iter()
-            .map(|panel| {
-                self.action_button(
-                    panel.key(),
-                    text(panel.key()),
-                    Action::Panel(panel),
-                    true,
-                    self.music_ui.panel == Some(panel),
-                    cx,
-                )
-            }),
-        )
+
+    /// The one amber action of a form or panel.
+    fn primary_button(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        glyph: Option<&'static str>,
+        title: String,
+        action: Action,
+        enabled: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let foreground = if enabled { ui::AMBER_TEXT } else { ui::FAINT };
+        self.action_base(id, action, enabled, cx)
+            .h(px(36.))
+            .px(px(16.))
+            .gap(px(8.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(rgb(if enabled { ui::AMBER } else { ui::BORDER }))
+            .bg(rgb(if enabled { ui::AMBER } else { ui::SECONDARY }))
+            .text_size(px(13.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(foreground))
+            .when(enabled, |s| {
+                s.hover(|s| s.bg(rgb(ui::AMBER_HOVER)))
+                    .focus(|s| s.border_color(rgb(ui::TEXT)))
+            })
+            .when_some(glyph, |s, glyph| {
+                s.child(ui::icon(glyph, 16.).text_color(rgb(foreground)))
+            })
+            .child(title)
     }
+
+    /// Square icon-only action with a tooltip.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "glyph, tooltip, action, enabled and selected state stay explicit"
+    )]
+    pub fn icon_action(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        glyph: &'static str,
+        tip: String,
+        action: Action,
+        enabled: bool,
+        selected: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let foreground = if !enabled {
+            ui::FAINT
+        } else if selected {
+            ui::AMBER
+        } else {
+            ui::TEXT
+        };
+        self.action_base(id, action, enabled, cx)
+            .size(px(32.))
+            .rounded(px(9.))
+            .when(selected, |s| s.bg(rgb(ui::AMBER_SURFACE)))
+            .when(enabled, |s| s.hover(|s| s.bg(rgb(ui::SECONDARY))))
+            .tooltip(move |_, cx| cx.new(|_| ui::Tip(tip.clone())).into())
+            .child(ui::icon(glyph, 16.).text_color(rgb(foreground)))
+    }
+
+    /// Header pill: icon plus a short label.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "glyph, label, action, selected and accent state stay explicit"
+    )]
+    pub fn pill_action(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        label: String,
+        action: Action,
+        selected: bool,
+        accent: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let foreground = if selected || accent {
+            ui::AMBER
+        } else {
+            ui::TEXT
+        };
+        self.action_base(id, action, true, cx)
+            .h(px(32.))
+            .max_w(px(170.))
+            .px(px(12.))
+            .gap(px(7.))
+            .rounded(px(9.))
+            .border_1()
+            .border_color(rgb(if selected {
+                ui::AMBER
+            } else if accent {
+                0x5a4520
+            } else {
+                ui::BORDER
+            }))
+            .bg(rgb(if selected {
+                ui::AMBER_SURFACE
+            } else {
+                ui::CARD
+            }))
+            .text_size(px(12.))
+            .text_color(rgb(foreground))
+            .hover(|s| s.bg(rgb(ui::SECONDARY)))
+            .focus(|s| s.border_color(rgb(ui::AMBER)))
+            .child(ui::icon(glyph, 15.).text_color(rgb(foreground)))
+            .child(div().min_w_0().truncate().child(label))
+    }
+
+    /// Quiet "See queue ›" style navigation.
+    pub fn link_action(
+        &self,
+        id: &'static str,
+        label: String,
+        action: Action,
+        enabled: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        self.action_base(id, action, enabled, cx)
+            .h(px(24.))
+            .px(px(6.))
+            .gap(px(2.))
+            .rounded(px(6.))
+            .text_size(px(12.))
+            .text_color(rgb(ui::MUTED))
+            .when(enabled, |s| s.hover(|s| s.text_color(rgb(ui::TEXT))))
+            .child(label)
+            .child(ui::icon("chevron", 14.).text_color(rgb(ui::MUTED)))
+    }
+
+    /// Full-width secondary action ("Add a track").
+    pub fn wide_action(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        label: String,
+        action: Action,
+        enabled: bool,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let foreground = if enabled { ui::TEXT } else { ui::FAINT };
+        self.action_base(id, action, enabled, cx)
+            .w_full()
+            .h(px(40.))
+            .gap(px(8.))
+            .rounded(px(12.))
+            .border_1()
+            .border_color(rgb(ui::BORDER))
+            .bg(rgb(ui::POPOVER))
+            .text_size(px(13.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(foreground))
+            .when(enabled, |s| {
+                s.hover(|s| s.bg(rgb(ui::SECONDARY)))
+                    .focus(|s| s.border_color(rgb(ui::AMBER)))
+            })
+            .child(ui::icon(glyph, 16.).text_color(rgb(foreground)))
+            .child(label)
+    }
+
     fn vocabulary(&self) -> Vec<Mood> {
         let mut map = BTreeMap::new();
         for mood in self
@@ -969,53 +1188,212 @@ impl Player {
     fn tag_state(&self, id: &str) -> ActiveTag {
         own_tag(&self.native.tags, id)
     }
-    fn mood_row(&self, mood: &Mood, scope: &str, cx: &Context<Self>) -> Div {
-        let own = self.native.can().account_write && !self.music_ui.busy(&self.native);
+
+    /// One mood. The body toggles your tag on the current track; the optional heart toggles the
+    /// favorite shortcut. Only confirmed own Active tags are blue; Unknown cannot be toggled.
+    fn mood_chip(&self, mood: &Mood, scope: &str, with_favorite: bool, cx: &Context<Self>) -> Div {
+        let can_write = self.native.can().account_write;
+        let own = can_write && !self.music_ui.busy(&self.native);
         let state = self.tag_state(&mood.id);
-        let active = state == ActiveTag::Active;
+        let confirmed = state == ActiveTag::Active;
+        let blue = confirmed && self.native.account.logged_in && !self.native.account.expired;
         let favorite = self.native.favorites.items.iter().any(|m| m.id == mood.id)
             && !self.native.favorites.stale
             && !self.native.favorites.failed;
         let favorite_known = favorite || self.native.favorites.complete();
         let track = self.native.room.track_id();
-        row()
-            .child(div().flex_1().min_w_0().child(mood.name.clone()))
+        let tag_enabled = own && track.is_some() && state != ActiveTag::Unknown;
+        let favorite_enabled = own && favorite_known;
+        let foreground = if blue {
+            ui::PERSONAL
+        } else if tag_enabled {
+            ui::TEXT
+        } else {
+            ui::MUTED
+        };
+        let tag_tip = text(if !can_write {
+            "signInToTag"
+        } else if track.is_none() {
+            "catalogueNeededShort"
+        } else {
+            match state {
+                ActiveTag::Active => "tagRemoveTip",
+                ActiveTag::Inactive => "tagAddTip",
+                ActiveTag::Unknown => "tagUnknownTip",
+            }
+        });
+        let favorite_tip = text(if !can_write {
+            "signInToTag"
+        } else if favorite {
+            "unfavoriteTip"
+        } else if favorite_known {
+            "favoriteTip"
+        } else {
+            "tagUnknownTip"
+        });
+        let id = &mood.id;
+        div()
+            .flex()
+            .items_center()
+            .flex_shrink_0()
+            .h(px(32.))
+            .rounded(px(10.))
+            .border_1()
+            .border_color(rgb(if blue {
+                ui::PERSONAL_BORDER
+            } else {
+                ui::BORDER
+            }))
+            .bg(rgb(if blue {
+                ui::PERSONAL_SURFACE
+            } else {
+                ui::POPOVER
+            }))
+            .overflow_hidden()
             .child(
-                self.action_button(
-                    gpui::SharedString::from(format!("{scope}-tag-{}", mood.id)),
-                    text(match state {
-                        ActiveTag::Active => "tagActive",
-                        ActiveTag::Inactive => "tagAdd",
-                        ActiveTag::Unknown => "tagUnknown",
-                    }),
+                self.action_base(
+                    gpui::SharedString::from(format!("{scope}-tag-{id}")),
                     Action::Tag {
                         track: track.unwrap_or_default().into(),
                         epoch: self.native.track_generation,
-                        mood: mood.id.clone(),
-                        active: !active,
+                        mood: id.clone(),
+                        active: !confirmed,
                     },
-                    own && track.is_some() && state != ActiveTag::Unknown,
-                    false,
+                    tag_enabled,
                     cx,
                 )
-                .when(active, |s| {
-                    s.bg(rgb(ui::PERSONAL_SURFACE))
-                        .text_color(rgb(ui::PERSONAL))
+                .h_full()
+                .pl(px(10.))
+                .pr(px(if with_favorite { 8. } else { 12. }))
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(rgb(foreground))
+                .when(tag_enabled, |s| {
+                    s.hover(move |s| s.bg(rgb(if blue { 0x29425e } else { ui::SECONDARY })))
+                })
+                .tooltip(move |_, cx| cx.new(|_| ui::Tip(tag_tip.clone())).into())
+                .child(ui::icon(ui::mood_glyph(&mood.icon_key), 14.).text_color(rgb(foreground)))
+                .child(div().max_w(px(150.)).truncate().child(mood.name.clone()))
+                .when(blue, |s| {
+                    s.child(ui::icon("check", 12.).text_color(rgb(ui::PERSONAL)))
                 }),
             )
-            .child(self.action_button(
-                gpui::SharedString::from(format!("{scope}-favorite-{}", mood.id)),
-                text(if favorite { "unfavorite" } else { "favorite" }),
-                Action::Favorite {
-                    mood: mood.id.clone(),
-                    active: !favorite,
-                },
-                own && favorite_known,
-                false,
-                cx,
-            ))
+            .when(with_favorite, |s| {
+                s.child(div().w(px(1.)).h(px(16.)).bg(rgb(ui::BORDER)))
+                    .child(
+                        self.action_base(
+                            gpui::SharedString::from(format!("{scope}-favorite-{id}")),
+                            Action::Favorite {
+                                mood: id.clone(),
+                                active: !favorite,
+                            },
+                            favorite_enabled,
+                            cx,
+                        )
+                        .h_full()
+                        .w(px(30.))
+                        .when(favorite_enabled, |s| s.hover(|s| s.bg(rgb(ui::SECONDARY))))
+                        .tooltip(move |_, cx| cx.new(|_| ui::Tip(favorite_tip.clone())).into())
+                        .child(
+                            ui::icon(if favorite { "heart-fill" } else { "heart" }, 13.)
+                                .text_color(rgb(if favorite {
+                                    ui::AMBER
+                                } else if favorite_enabled {
+                                    ui::MUTED
+                                } else {
+                                    ui::FAINT
+                                })),
+                        ),
+                    )
+            })
     }
-    fn page_controls(&self, kind: usize, cx: &Context<Self>) -> Div {
+
+    /// "My moods on this track" card of the main player: one-click tags, then All moods.
+    pub fn mood_strip(&self, cx: &Context<Self>) -> Div {
+        let groups = self.native.mood_groups();
+        let music = self.native.room.active();
+        let signed_in = self.native.can().account_write;
+        // Same order as the widget: your moods first, then the contributor's suggestions.
+        let chips: Vec<_> = groups
+            .complement
+            .iter()
+            .chain(&groups.priority)
+            .take(6)
+            .collect();
+        let suggestions = self.details.tags.join(" · ");
+        let hint = if !music {
+            text("musicModeShort")
+        } else if !signed_in {
+            text("signInToTag")
+        } else if !suggestions.is_empty() {
+            match self.contributor_name() {
+                Some(name) => format!("{} {name} : {suggestions}", text("suggestedBy")),
+                None => format!("{} {suggestions}", text("widgetSuggestions")),
+            }
+        } else if chips.is_empty() {
+            text("widgetMoodsHint")
+        } else {
+            text("widgetTagHint")
+        };
+        ui::card()
+            .flex_shrink_0()
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                line()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(text("widgetMoods")),
+                    )
+                    .child(self.link_action(
+                        "all-moods",
+                        text("allMoods"),
+                        Action::Show(Panel::Moods),
+                        true,
+                        cx,
+                    )),
+            )
+            .child(
+                wrap()
+                    .children(
+                        chips
+                            .iter()
+                            .map(|chip| self.mood_chip(&chip.mood, "strip", false, cx)),
+                    )
+                    .child(
+                        self.icon_action(
+                            "strip-more",
+                            "plus",
+                            text("allMoods"),
+                            Action::Show(Panel::Moods),
+                            true,
+                            false,
+                            cx,
+                        )
+                        .border_1()
+                        .border_color(rgb(ui::BORDER)),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(ui::MUTED))
+                    .truncate()
+                    .child(hint),
+            )
+    }
+
+    /// Only shown when something needs attention: loading, a failure, unloaded or more pages.
+    fn page_status(&self, kind: usize, cx: &Context<Self>) -> Option<Div> {
+        if !self.native.can().account_write || (kind == 0 && self.native.room.track_id().is_none())
+        {
+            return None;
+        }
         let (page, title) = match kind {
             0 => (&self.native.tags, "personalMoods"),
             1 => (&self.native.favorites, "favorites"),
@@ -1026,354 +1404,704 @@ impl Player {
             1 => Action::Favorites(offset),
             _ => Action::Moods(offset),
         };
-        let enabled = self.native.can().account_write
-            && !self.music_ui.busy(&self.native)
-            && (kind != 0 || self.native.room.track_id().is_some());
-        column().child(label(title)).child(
-            row()
+        if page.loading {
+            return Some(label("nativePending"));
+        }
+        let (state, button, offset) = if page.failed {
+            ("pageFailed", "retry", 0)
+        } else if !page.loaded || page.stale {
+            ("pageNotLoaded", "load", 0)
+        } else if page.has_more() {
+            ("pagePartial", "loadMore", page.next_offset())
+        } else {
+            return None;
+        };
+        Some(
+            line()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .text_color(rgb(if page.failed { ui::DANGER } else { ui::MUTED }))
+                        .child(format!("{} · {}", text(title), text(state))),
+                )
                 .child(self.action_button(
-                    ("refresh-page", kind),
-                    text("refresh"),
-                    action(0),
-                    enabled,
+                    ("page", kind),
+                    text(button),
+                    action(offset),
+                    !self.music_ui.busy(&self.native),
                     false,
                     cx,
-                ))
-                .child(self.action_button(
-                    ("more-page", kind),
-                    text("loadMore"),
-                    action(page.next_offset()),
-                    enabled && page.has_more(),
-                    false,
-                    cx,
-                ))
-                .child(label(if page.failed {
-                    "pageFailed"
-                } else if page.loading {
-                    "nativePending"
-                } else if page.complete() {
-                    "pageComplete"
-                } else {
-                    "pagePartial"
-                })),
+                )),
         )
     }
+
+    fn mood_section(
+        &self,
+        title: String,
+        moods: &[MoodChip],
+        empty: &str,
+        scope: &str,
+        cx: &Context<Self>,
+    ) -> Div {
+        column()
+            .gap(px(10.))
+            .child(ui::section_label(title))
+            .child(if moods.is_empty() {
+                label(empty)
+            } else {
+                wrap().children(
+                    moods
+                        .iter()
+                        .map(|chip| self.mood_chip(&chip.mood, scope, true, cx)),
+                )
+            })
+    }
+
     fn account_panel(&self, cx: &Context<Self>) -> Div {
         let account = &self.native.account;
         let free = !self.music_ui.busy(&self.native) && self.connection.is_some();
+        let signed_in = account.logged_in && !account.expired;
+        let check = self.button(
+            "refreshAccount",
+            Action::RefreshAccount,
+            self.connection.is_some() && !self.native.http_busy,
+            cx,
+        );
         column()
-            .child(label(if account.expired {
-                "accountExpired"
-            } else if !account.known {
-                "accountUnknown"
-            } else if account.logged_in {
-                "accountSignedIn"
-            } else {
-                "accountGuest"
-            }))
-            .when_some(account.username.clone(), |s, name| s.child(name))
-            .child(label("passwordAccountsOnly"))
-            .child(self.panel_input(&self.music_ui.user, cx))
-            .child(self.panel_input(&self.music_ui.password, cx))
+            .gap(px(16.))
             .child(
-                row()
-                    .child(self.button(
-                        "signIn",
-                        Action::Login,
-                        free && !account.logged_in
-                            && !self.music_ui.user.read(cx).value().trim().is_empty()
-                            && !self.music_ui.password.read(cx).value().is_empty(),
-                        cx,
-                    ))
-                    .child(self.button("signOut", Action::Logout, free && account.logged_in, cx))
-                    .child(self.button(
-                        "refreshAccount",
-                        Action::RefreshAccount,
-                        self.connection.is_some() && !self.native.http_busy,
-                        cx,
-                    )),
+                line()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .size(px(44.))
+                            .flex_shrink_0()
+                            .rounded_full()
+                            .bg(rgb(if signed_in {
+                                ui::AMBER_SURFACE
+                            } else {
+                                ui::SECONDARY
+                            }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(ui::icon("user", 20.).text_color(rgb(if signed_in {
+                                ui::AMBER
+                            } else {
+                                ui::MUTED
+                            }))),
+                    )
+                    .child(
+                        column()
+                            .gap(px(2.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .truncate()
+                                    .child(if signed_in {
+                                        account.username.clone().unwrap_or_else(|| text("account"))
+                                    } else {
+                                        text("guest")
+                                    }),
+                            )
+                            .child(label(if account.expired {
+                                "accountExpired"
+                            } else if !account.known {
+                                "accountUnknown"
+                            } else if account.logged_in {
+                                "accountSignedIn"
+                            } else {
+                                "accountGuest"
+                            })),
+                    ),
             )
+            .map(|panel| {
+                if signed_in {
+                    panel.child(
+                        wrap()
+                            .child(self.button("signOut", Action::Logout, free, cx))
+                            .child(check),
+                    )
+                } else {
+                    panel
+                        .child(label("accountGuestBody"))
+                        .child(self.panel_input(&self.music_ui.user, cx))
+                        .child(self.panel_input(&self.music_ui.password, cx))
+                        .child(
+                            wrap()
+                                .child(self.primary_button(
+                                    "signIn",
+                                    Some("user"),
+                                    text("signIn"),
+                                    Action::Login,
+                                    free && !self.music_ui.user.read(cx).value().trim().is_empty()
+                                        && !self.music_ui.password.read(cx).value().is_empty(),
+                                    cx,
+                                ))
+                                .child(check),
+                        )
+                        .child(label("passwordAccountsOnly"))
+                }
+            })
     }
+
     fn moods_panel(&self, cx: &Context<Self>) -> Div {
         let groups = self.native.mood_groups();
-        let query = self.music_ui.search.read(cx).value().to_lowercase();
-        column()
-            .when(
-                !self.native.account.logged_in || self.native.account.expired,
-                |s| s.child(label("accountNeeded")),
-            )
-            .when(self.native.room.track_id().is_none(), |s| {
-                s.child(label("catalogueNeeded"))
-            })
-            .child(label("contributorMoods"))
-            .children(
-                groups
-                    .priority
-                    .iter()
-                    .map(|m| self.mood_row(&m.mood, "priority", cx)),
-            )
-            .when(groups.priority.is_empty(), |s| {
-                s.child(label("noContributorMoods"))
-            })
-            .child(label("ownComplement"))
-            .children(
-                groups
-                    .complement
-                    .iter()
-                    .map(|m| self.mood_row(&m.mood, "complement", cx)),
-            )
-            .child(self.page_controls(0, cx))
-            .child(self.page_controls(1, cx))
-            .child(label("vocabulary"))
-            .child(self.panel_input(&self.music_ui.search, cx))
-            .children(
-                self.vocabulary()
-                    .iter()
-                    .filter(|m| m.name.to_lowercase().contains(&query))
-                    .map(|m| self.mood_row(m, "vocabulary", cx)),
-            )
-            .child(self.page_controls(2, cx))
-            .child(label("createMoodHelp"))
-            .child(self.panel_input(&self.music_ui.name, cx))
-            .child(row().children(ICON_KEYS.iter().enumerate().map(|(i, key)| {
-                self.action_button(
-                    ("mood-icon", i),
-                    text(&format!("icon-{key}")),
-                    Action::Icon(i),
-                    true,
-                    self.music_ui.icon == i,
-                    cx,
-                )
-            })))
-            .child(self.button(
-                "createMood",
-                Action::Create,
-                self.native.can().account_write
-                    && !self.music_ui.busy(&self.native)
-                    && !self.music_ui.name.read(cx).value().trim().is_empty(),
-                cx,
-            ))
-            .when_some(self.native.created_mood.as_ref(), |s, m| {
-                s.child(label("createdMoodChoice"))
-                    .child(self.mood_row(m, "created", cx))
-            })
-    }
-    fn preferences_panel(&self, cx: &Context<Self>) -> Div {
-        let draft = &self.music_ui.draft;
-        let enabled = self.native.can().preferences
-            && !self.room_busy()
-            && !self.native.http_busy
-            && !draft.awaiting_sync;
-        let mut vocabulary: BTreeMap<String, String> = self
+        let can = self.native.can();
+        let query = self.music_ui.search.read(cx).value().trim().to_lowercase();
+        let shown: Vec<&str> = groups
+            .priority
+            .iter()
+            .chain(&groups.complement)
+            .map(|chip| chip.mood.id.as_str())
+            .collect();
+        // Without a query, list what is not already shown above.
+        let found: Vec<Mood> = self
             .vocabulary()
             .into_iter()
-            .map(|m| (m.id, m.name))
+            .filter(|m| {
+                if query.is_empty() {
+                    !shown.contains(&m.id.as_str())
+                } else {
+                    m.name.to_lowercase().contains(&query)
+                }
+            })
+            .collect();
+        let contributor = match self.contributor_name() {
+            Some(name) => format!("{} {name}", text("suggestedBy")),
+            None => text("contributorMoods"),
+        };
+        let free = can.account_write && !self.music_ui.busy(&self.native);
+        column()
+            .gap(px(20.))
+            .when(!can.account_write, |s| {
+                s.child(
+                    ui::banner(ui::Tone::Info, text("signInToTag")).child(self.action_button(
+                        "moods-sign-in",
+                        text("signIn"),
+                        Action::Show(Panel::Account),
+                        self.connection.is_some(),
+                        false,
+                        cx,
+                    )),
+                )
+            })
+            .when(self.native.room.track_id().is_none(), |s| {
+                s.child(ui::banner(ui::Tone::Info, text("catalogueNeeded")))
+            })
+            .child(self.mood_section(
+                contributor,
+                &groups.priority,
+                "noContributorMoods",
+                "priority",
+                cx,
+            ))
+            .child(self.mood_section(
+                text("ownComplement"),
+                &groups.complement,
+                "noOwnMoods",
+                "complement",
+                cx,
+            ))
+            .when_some(self.page_status(0, cx), |s, status| s.child(status))
+            .when_some(self.page_status(1, cx), |s, status| s.child(status))
+            .child(
+                column()
+                    .gap(px(10.))
+                    .child(heading("findMood"))
+                    .child(self.panel_input(&self.music_ui.search, cx))
+                    .child(if found.is_empty() {
+                        label("noMoodMatch")
+                    } else {
+                        wrap().children(
+                            found
+                                .iter()
+                                .map(|m| self.mood_chip(m, "vocabulary", true, cx)),
+                        )
+                    })
+                    .when_some(self.page_status(2, cx), |s, status| s.child(status)),
+            )
+            .when(can.account_write, |s| {
+                s.child(
+                    column()
+                        .gap(px(10.))
+                        .pt(px(16.))
+                        .border_t_1()
+                        .border_color(rgb(ui::BORDER))
+                        .child(heading("createMoodTitle"))
+                        .child(label("createMoodHelp"))
+                        .child(
+                            wrap()
+                                .gap(px(4.))
+                                .children(ICON_KEYS.iter().enumerate().map(|(i, key)| {
+                                    let selected = self.music_ui.icon == i;
+                                    self.icon_action(
+                                        ("mood-icon", i),
+                                        ui::mood_glyph(key),
+                                        text(&format!("icon-{key}")),
+                                        Action::Icon(i),
+                                        true,
+                                        selected,
+                                        cx,
+                                    )
+                                    .border_1()
+                                    .border_color(rgb(
+                                        if selected { ui::AMBER } else { ui::BORDER },
+                                    ))
+                                })),
+                        )
+                        .child(
+                            line()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(self.panel_input(&self.music_ui.name, cx)),
+                                )
+                                .child(self.primary_button(
+                                    "createMood",
+                                    Some("plus"),
+                                    text("createMood"),
+                                    Action::Create,
+                                    free && !self.music_ui.name.read(cx).value().trim().is_empty(),
+                                    cx,
+                                )),
+                        )
+                        .when_some(self.native.created_mood.as_ref(), |s, m| {
+                            s.child(label("createdMoodChoice"))
+                                .child(wrap().child(self.mood_chip(m, "created", true, cx)))
+                        }),
+                )
+            })
+    }
+
+    fn preference_choice(&self, id: &str, choice: i8, enabled: bool, cx: &Context<Self>) -> Div {
+        div()
+            .flex()
+            .flex_shrink_0()
+            .h(px(28.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(rgb(ui::BORDER))
+            .overflow_hidden()
+            .bg(rgb(ui::CARD))
+            .children(
+                [
+                    ("include", 1i8, "includeTip"),
+                    ("neutral", 0, "neutralTip"),
+                    ("exclude", -1, "excludeTip"),
+                ]
+                .into_iter()
+                .map(|(key, value, tip)| {
+                    let selected = choice == value;
+                    let (surface, foreground) = match (selected, value) {
+                        (true, 1) => (ui::AMBER_SURFACE, ui::AMBER),
+                        (true, -1) => (ui::DANGER_SURFACE, ui::DANGER),
+                        (true, _) => (ui::SECONDARY, ui::TEXT),
+                        _ => (ui::CARD, if enabled { ui::MUTED } else { ui::FAINT }),
+                    };
+                    let tip = text(tip);
+                    self.action_base(
+                        gpui::SharedString::from(format!("{key}-{id}")),
+                        Action::Preference(id.to_owned(), value),
+                        enabled,
+                        cx,
+                    )
+                    .h_full()
+                    .px(px(10.))
+                    .bg(rgb(surface))
+                    .text_size(px(11.))
+                    .text_color(rgb(foreground))
+                    .when(enabled && !selected, |s| {
+                        s.hover(|s| s.bg(rgb(ui::SECONDARY)))
+                    })
+                    .tooltip(move |_, cx| cx.new(|_| ui::Tip(tip.clone())).into())
+                    .child(text(key))
+                }),
+            )
+    }
+
+    fn preferences_enabled(&self) -> bool {
+        self.native.can().preferences
+            && !self.room_busy()
+            && !self.native.http_busy
+            && !self.music_ui.draft.awaiting_sync
+    }
+
+    fn preferences_panel(&self, cx: &Context<Self>) -> Div {
+        let draft = &self.music_ui.draft;
+        let enabled = self.preferences_enabled();
+        let mut vocabulary: BTreeMap<String, (String, &'static str)> = self
+            .vocabulary()
+            .into_iter()
+            .map(|m| (m.id, (m.name, ui::mood_glyph(&m.icon_key))))
             .collect();
         // Unknown saved IDs remain visible and preserved. Only an explicit choice removes them.
         for id in draft.include.iter().chain(&draft.exclude) {
             vocabulary
                 .entry(id.clone())
-                .or_insert_with(|| format!("{} {id}", text("unknownMood")));
+                .or_insert_with(|| (text("unknownMood"), "brand"));
         }
         column()
+            .gap(px(12.))
             .child(label("preferencesHelp"))
             .when(draft.awaiting_sync, |s| {
-                s.child(label("preferencesAwaitingSync"))
+                s.child(ui::banner(ui::Tone::Info, text("preferencesAwaitingSync")))
             })
             .when(!self.native.room.active(), |s| {
-                s.child(label("musicModeNeeded"))
+                s.child(ui::banner(ui::Tone::Warn, text("musicModeNeeded")))
             })
-            .children(vocabulary.iter().map(|(id, name)| {
-                let choice = if draft.include.contains(id) {
-                    1
-                } else if draft.exclude.contains(id) {
-                    -1
-                } else {
-                    0
-                };
-                column().child(name.clone()).child(
-                    row().children(
-                        [("include", 1), ("neutral", 0), ("exclude", -1)]
-                            .into_iter()
-                            .map(|(key, value)| {
-                                self.action_button(
-                                    gpui::SharedString::from(format!("{key}-{id}")),
-                                    text(key),
-                                    Action::Preference(id.clone(), value),
-                                    enabled,
-                                    choice == value,
-                                    cx,
-                                )
-                            }),
-                    ),
-                )
-            }))
-            .child(self.page_controls(2, cx))
             .child(
-                row()
-                    .child(self.button(
-                        "saveKeep",
-                        Action::Save(Content::Keep),
-                        enabled && draft.dirty,
-                        cx,
-                    ))
-                    .child(self.button(
-                        "saveRenew",
-                        Action::Save(Content::Renew),
-                        enabled && draft.dirty,
-                        cx,
-                    ))
-                    .child(self.button("resetDraft", Action::ResetDraft, !self.room_busy(), cx)),
+                column()
+                    .gap(px(6.))
+                    .children(vocabulary.iter().map(|(id, (name, glyph))| {
+                        let choice = if draft.include.contains(id) {
+                            1
+                        } else if draft.exclude.contains(id) {
+                            -1
+                        } else {
+                            0
+                        };
+                        line()
+                            .h(px(40.))
+                            .px(px(10.))
+                            .gap(px(10.))
+                            .rounded(px(10.))
+                            .bg(rgb(ui::POPOVER))
+                            .child(ui::icon(glyph, 15.).text_color(rgb(match choice {
+                                1 => ui::AMBER,
+                                -1 => ui::DANGER,
+                                _ => ui::MUTED,
+                            })))
+                            .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                            .child(self.preference_choice(id, choice, enabled, cx))
+                    })),
             )
-            .child(label("renewHelp"))
+            .when_some(self.page_status(2, cx), |s, status| s.child(status))
     }
-    fn add_panel(&self, cx: &Context<Self>) -> Div {
-        let can = self.native.can();
-        let ready = self.native.connected && !self.room_busy() && !self.music_ui.busy(&self.native);
-        let preview = self.music_ui.preview_valid && self.native.preview.is_some();
-        let mut panel = column()
-            .child(label("addHelp"))
-            .when(!self.native.room.active(), |s| {
-                s.child(label("musicModeNeeded"))
-            })
-            .when(self.native.room.active() && !can.add_mix, |s| {
-                s.child(label("addPermissionNeeded"))
-            })
-            .child(self.panel_input(&self.music_ui.url, cx))
-            .child(self.button(
-                "previewUrl",
-                Action::Preview,
-                ready && can.add_mix && !self.music_ui.url.read(cx).value().trim().is_empty(),
-                cx,
-            ));
-        if preview && let Some(value) = &self.native.preview {
-            if value.items.is_empty() {
-                panel = panel.child(label("musicSearchEmpty"));
-            } else {
-                panel = panel.child(label("musicSearchChoose"));
-            }
-            if value.truncated {
-                panel = panel.child(label("musicSearchLimited"));
-            }
-            for (index, value) in value.items.iter().enumerate() {
-                panel = panel.child(
-                    column()
-                        .id(("music-result", index))
-                        .child(value.title.clone().unwrap_or_else(|| text("untitledTrack")))
+
+    /// Save bar of the room preferences tab, outside the scrolling list.
+    fn preference_footer(&self, cx: &Context<Self>) -> Div {
+        let dirty = self.music_ui.draft.dirty;
+        let enabled = self.preferences_enabled() && dirty;
+        let keep = text("keepHelp");
+        let renew = text("renewHelp");
+        line()
+            .flex_shrink_0()
+            .pt(px(12.))
+            .border_t_1()
+            .border_color(rgb(ui::BORDER))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .text_color(rgb(if dirty { ui::AMBER } else { ui::MUTED }))
+                    .child(text(if dirty {
+                        "unsavedChanges"
+                    } else {
+                        "noUnsavedChanges"
+                    })),
+            )
+            .child(self.button("resetDraft", Action::ResetDraft, !self.room_busy(), cx))
+            .child(
+                self.action_button(
+                    "saveRenew",
+                    text("saveRenew"),
+                    Action::Save(Content::Renew),
+                    enabled,
+                    false,
+                    cx,
+                )
+                .tooltip(move |_, cx| cx.new(|_| ui::Tip(renew.clone())).into()),
+            )
+            .child(
+                self.primary_button(
+                    "saveKeep",
+                    Some("check"),
+                    text("saveKeep"),
+                    Action::Save(Content::Keep),
+                    enabled,
+                    cx,
+                )
+                .tooltip(move |_, cx| cx.new(|_| ui::Tip(keep.clone())).into()),
+            )
+    }
+
+    fn confirmation_card(
+        &self,
+        offer: &undertone_desktop::music::Request,
+        ready: bool,
+        cx: &Context<Self>,
+    ) -> Div {
+        column()
+            .gap(px(8.))
+            .p(px(14.))
+            .rounded(px(12.))
+            .bg(rgb(ui::AMBER_SURFACE))
+            .border_1()
+            .border_color(rgb(ui::AMBER))
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(ui::AMBER))
+                    .child(text("confirmTitle")),
+            )
+            .child(
+                div()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .truncate()
+                    .child(offer.title.clone().unwrap_or_else(|| text("untitledTrack"))),
+            )
+            .child(label("confirmationHelp"))
+            .children(offer.conflicts.iter().map(|c| {
+                let detail = offer
+                    .conflict_metadata
+                    .iter()
+                    .find(|d| d.participant_id == c.participant_id && d.mood_id == c.mood_id);
+                match detail.and_then(|d| d.participant_name.as_ref().zip(d.mood.as_ref())) {
+                    Some((name, mood)) => line()
+                        .text_size(px(12.))
                         .child(
-                            row()
-                                .child(self.action_button(
-                                    ("music-mix", index),
-                                    text("addMix"),
-                                    Action::Request(
-                                        Intent::Mix,
-                                        value.reference.clone(),
-                                        self.music_ui.preview_version,
-                                    ),
-                                    ready && can.add_mix,
-                                    false,
-                                    cx,
-                                ))
-                                .child(self.action_button(
-                                    ("music-next", index),
-                                    text("addNext"),
-                                    Action::Request(
-                                        Intent::Next,
-                                        value.reference.clone(),
-                                        self.music_ui.preview_version,
-                                    ),
-                                    ready && can.add_next,
-                                    false,
-                                    cx,
-                                )),
-                        ),
-                );
-            }
-        }
-        if let Some(offer) = &self.native.room.confirmation {
-            panel = panel
-                .child(label("confirmationHelp"))
-                .child(offer.title.clone().unwrap_or_else(|| text("untitledTrack")))
-                .children(offer.conflicts.iter().map(|c| {
-                    let detail = offer
-                        .conflict_metadata
-                        .iter()
-                        .find(|d| d.participant_id == c.participant_id && d.mood_id == c.mood_id);
-                    div().child(
-                        detail
-                            .and_then(|d| d.participant_name.as_ref().zip(d.mood.as_ref()))
-                            .map(|(n, m)| format!("{n} · {}", m.name))
-                            .unwrap_or_else(|| text("confirmationIncomplete")),
-                    )
-                }))
-                .child(
-                    row()
-                        .child(self.button(
-                            "confirm",
-                            Action::Confirm(self.native.room.confirmation_offer()),
-                            ready && can.confirm,
-                            cx,
-                        ))
-                        .child(self.button(
-                            "cancel",
-                            Action::Cancel(offer.request_id.clone()),
-                            ready,
-                            cx,
-                        )),
-                );
-        }
-        let page = &self.native.room.requests_page;
-        panel
-            .child(label("pendingRequests"))
-            .when_some(self.native.room.pending_count, |s, count| {
-                s.child(format!("{}: {count}", text("pendingCount")))
-            })
-            .child(self.button(
-                "refreshRequests",
-                Action::Requests(0),
-                ready && self.native.room.active(),
-                cx,
-            ))
-            .children(page.items.iter().map(|r| {
-                row()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(r.title.clone().unwrap_or_else(|| text("untitledTrack"))),
-                    )
-                    .child(self.action_button(
-                        gpui::SharedString::from(format!("cancel-{}", r.request_id)),
-                        text("cancel"),
-                        Action::Cancel(r.request_id.clone()),
-                        ready && !page.stale,
-                        false,
-                        cx,
-                    ))
+                            ui::icon(ui::mood_glyph(&mood.icon_key), 14.)
+                                .text_color(rgb(ui::DANGER)),
+                        )
+                        .child(format!("{name} · {}", mood.name)),
+                    None => label("confirmationIncomplete"),
+                }
             }))
             .child(
-                row()
-                    .child(self.button(
-                        "previousPage",
-                        Action::Requests(page.offset.saturating_sub(page.limit)),
-                        ready && page.loaded && page.offset > 0,
+                wrap()
+                    .child(self.primary_button(
+                        "confirm",
+                        None,
+                        text("confirm"),
+                        Action::Confirm(self.native.room.confirmation_offer()),
+                        ready && self.native.can().confirm,
                         cx,
                     ))
                     .child(self.button(
-                        "nextPage",
-                        Action::Requests(page.next_offset()),
-                        ready && page.has_more(),
+                        "cancel",
+                        Action::Cancel(offer.request_id.clone()),
+                        ready,
                         cx,
                     )),
             )
-            .when(page.stale, |s| s.child(label("refreshPendingHelp")))
     }
+
+    fn pending_requests(&self, ready: bool, cx: &Context<Self>) -> Option<Div> {
+        let page = &self.native.room.requests_page;
+        let count = self.native.room.pending_count;
+        if count == Some(0) && page.items.is_empty() && !page.stale {
+            return None;
+        }
+        Some(
+            column()
+                .gap(px(8.))
+                .pt(px(14.))
+                .border_t_1()
+                .border_color(rgb(ui::BORDER))
+                .child(
+                    line()
+                        .justify_between()
+                        .child(ui::section_label(match count {
+                            Some(count) => format!("{} · {count}", text("pendingRequests")),
+                            None => text("pendingRequests"),
+                        }))
+                        .child(self.icon_action(
+                            "refreshRequests",
+                            "refresh",
+                            text("refreshRequests"),
+                            Action::Requests(0),
+                            ready && self.native.room.active(),
+                            false,
+                            cx,
+                        )),
+                )
+                .children(page.items.iter().map(|r| {
+                    line()
+                        .h(px(36.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(r.title.clone().unwrap_or_else(|| text("untitledTrack"))),
+                        )
+                        .child(self.action_button(
+                            gpui::SharedString::from(format!("cancel-{}", r.request_id)),
+                            text("cancel"),
+                            Action::Cancel(r.request_id.clone()),
+                            ready && !page.stale,
+                            false,
+                            cx,
+                        ))
+                }))
+                .when(!page.loaded, |s| s.child(label("pendingNotLoaded")))
+                .when(page.offset > 0 || page.has_more(), |s| {
+                    s.child(
+                        wrap()
+                            .child(self.button(
+                                "previousPage",
+                                Action::Requests(page.offset.saturating_sub(page.limit)),
+                                ready && page.loaded && page.offset > 0,
+                                cx,
+                            ))
+                            .child(self.button(
+                                "nextPage",
+                                Action::Requests(page.next_offset()),
+                                ready && page.has_more(),
+                                cx,
+                            )),
+                    )
+                })
+                .when(page.stale, |s| s.child(label("refreshPendingHelp"))),
+        )
+    }
+
+    fn add_panel(&self, cx: &Context<Self>) -> Div {
+        let can = self.native.can();
+        let ready = self.native.connected && !self.room_busy() && !self.music_ui.busy(&self.native);
+        let searching = self
+            .music_ui
+            .pending_http
+            .as_ref()
+            .is_some_and(|pending| matches!(pending.work, HttpWork::Preview(_)));
+        let query_empty = self.music_ui.url.read(cx).value().trim().is_empty();
+        let mut panel = column()
+            .gap(px(14.))
+            .when(!self.native.room.active(), |s| {
+                s.child(ui::banner(ui::Tone::Warn, text("musicModeNeeded")))
+            })
+            .when(self.native.room.active() && !can.add_mix, |s| {
+                s.child(ui::banner(ui::Tone::Warn, text("addPermissionNeeded")))
+            });
+        if let Some(offer) = &self.native.room.confirmation {
+            panel = panel.child(self.confirmation_card(offer, ready, cx));
+        }
+        panel = panel.child(
+            column()
+                .gap(px(6.))
+                .child(
+                    line()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(self.panel_input(&self.music_ui.url, cx)),
+                        )
+                        .child(self.primary_button(
+                            "previewUrl",
+                            Some("search"),
+                            text("previewUrl"),
+                            Action::Preview,
+                            ready && can.add_mix && !query_empty,
+                            cx,
+                        )),
+                )
+                .child(label("addHelp")),
+        );
+        if searching {
+            panel = panel.child(ui::banner(ui::Tone::Info, text("searching")));
+        } else if self.music_ui.preview_valid
+            && let Some(value) = &self.native.preview
+        {
+            let mix_tip = text("addMixTip");
+            let next_tip = text("addNextTip");
+            let mut results = column()
+                .gap(px(6.))
+                .child(heading(if value.items.is_empty() {
+                    "musicSearchEmpty"
+                } else {
+                    "musicSearchChoose"
+                }));
+            for (index, item) in value.items.iter().enumerate() {
+                let (mix_tip, next_tip) = (mix_tip.clone(), next_tip.clone());
+                results = results.child(
+                    line()
+                        .gap(px(10.))
+                        .p(px(8.))
+                        .rounded(px(12.))
+                        .bg(rgb(ui::POPOVER))
+                        .border_1()
+                        .border_color(rgb(ui::BORDER))
+                        .child(ui::artwork(40., None))
+                        .child(
+                            column()
+                                .gap(px(2.))
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(
+                                            item.title
+                                                .clone()
+                                                .unwrap_or_else(|| text("untitledTrack")),
+                                        ),
+                                )
+                                .child(ui::quiet(
+                                    result_meta(&item.reference.service, item.length),
+                                    11.,
+                                )),
+                        )
+                        .child(
+                            self.action_button(
+                                ("music-mix", index),
+                                text("addMix"),
+                                Action::Request(
+                                    Intent::Mix,
+                                    item.reference.clone(),
+                                    self.music_ui.preview_version,
+                                ),
+                                ready && can.add_mix,
+                                false,
+                                cx,
+                            )
+                            .tooltip(move |_, cx| cx.new(|_| ui::Tip(mix_tip.clone())).into()),
+                        )
+                        .child(
+                            self.action_button(
+                                ("music-next", index),
+                                text("addNext"),
+                                Action::Request(
+                                    Intent::Next,
+                                    item.reference.clone(),
+                                    self.music_ui.preview_version,
+                                ),
+                                ready && can.add_next,
+                                false,
+                                cx,
+                            )
+                            .tooltip(move |_, cx| cx.new(|_| ui::Tip(next_tip.clone())).into()),
+                        ),
+                );
+            }
+            if value.truncated {
+                results = results.child(label("musicSearchLimited"));
+            }
+            panel = panel.child(results);
+        }
+        panel.when_some(self.pending_requests(ready, cx), |s, pending| {
+            s.child(pending)
+        })
+    }
+
     fn queue_panel(&self, cx: &Context<Self>) -> Div {
         let page = &self.native.room.queue_page;
         let ready = self.native.connected
             && self.native.room.active()
             && !self.room_busy()
             && !self.native.http_busy;
-        let entries = if page.loaded && !page.stale {
+        let paged = page.loaded && !page.stale;
+        let entries = if paged {
             page.items.as_slice()
         } else {
             self.native
@@ -1383,52 +2111,208 @@ impl Player {
                 .map(|m| m.queue.as_slice())
                 .unwrap_or_default()
         };
+        let total = self.native.room.music.as_ref().map(|m| m.queue_total);
+        let first = if paged { page.offset } else { 0 };
         column()
-            .child(self.button(
-                if self.show_up_next {
-                    "hideUpcoming"
-                } else {
-                    "showUpcoming"
-                },
-                Action::ToggleUpcoming,
-                true,
-                cx,
-            ))
-            .when(!self.native.room.active(), |s| {
-                s.child(label("musicModeNeeded"))
-            })
+            .gap(px(10.))
             .child(
-                row()
-                    .child(self.button("refreshQueue", Action::Queue(0), ready, cx))
-                    .child(self.button(
-                        "previousPage",
-                        Action::Queue(page.offset.saturating_sub(page.limit)),
-                        ready && page.loaded && !page.stale && page.offset > 0,
-                        cx,
-                    ))
-                    .child(self.button(
-                        "nextPage",
-                        Action::Queue(page.next_offset()),
-                        ready && page.has_more(),
+                line()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(ui::MUTED))
+                            .when_some(total, |s, total| {
+                                s.child(format!("{total} {}", text("queueCount")))
+                            }),
+                    )
+                    .child(self.icon_action(
+                        "refreshQueue",
+                        "refresh",
+                        text("refreshQueue"),
+                        Action::Queue(0),
+                        ready,
+                        false,
                         cx,
                     )),
             )
+            .when(!self.native.room.active(), |s| {
+                s.child(ui::banner(ui::Tone::Warn, text("musicModeNeeded")))
+            })
+            .when(!self.show_up_next, |s| s.child(label("upcomingHidden")))
             .when(self.show_up_next, |s| {
-                s.children(entries.iter().map(|e| {
-                    column()
-                        .child(e.title.clone().unwrap_or_else(|| text("untitledTrack")))
-                        .when(!e.artists.is_empty(), |s| s.child(e.artists.join(", ")))
+                s.children(entries.iter().enumerate().map(|(i, e)| {
+                    line()
+                        .h(px(48.))
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .w(px(22.))
+                                .text_size(px(11.))
+                                .text_color(rgb(ui::FAINT))
+                                .child((first + i + 1).to_string()),
+                        )
+                        .child(ui::artwork(36., None))
+                        .child(
+                            column()
+                                .gap(px(2.))
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(
+                                            e.title
+                                                .clone()
+                                                .unwrap_or_else(|| text("untitledTrack")),
+                                        ),
+                                )
+                                .when(!e.artists.is_empty(), |s| {
+                                    s.child(ui::quiet(e.artists.join(", "), 11.))
+                                }),
+                        )
                 }))
             })
-            .when(entries.is_empty(), |s| s.child(label("queueEmpty")))
+            .when(entries.is_empty() && self.native.room.active(), |s| {
+                s.child(label("queueEmptyHint"))
+            })
+            .when(page.offset > 0 || page.has_more(), |s| {
+                s.child(
+                    wrap()
+                        .child(self.button(
+                            "previousPage",
+                            Action::Queue(page.offset.saturating_sub(page.limit)),
+                            ready && paged && page.offset > 0,
+                            cx,
+                        ))
+                        .child(self.button(
+                            "nextPage",
+                            Action::Queue(page.next_offset()),
+                            ready && page.has_more(),
+                            cx,
+                        )),
+                )
+            })
             .when(page.stale || page.failed, |s| {
-                s.child(label("queueRefreshNeeded"))
+                s.child(ui::banner(ui::Tone::Info, text("queueRefreshNeeded")))
             })
     }
+
+    fn settings_panel(&self, cx: &Context<Self>) -> Div {
+        let setting = |title: &str, help: &str| {
+            column()
+                .gap(px(2.))
+                .flex_1()
+                .min_w_0()
+                .child(div().text_size(px(13.)).child(text(title)))
+                .child(label(help))
+        };
+        column()
+            .gap(px(18.))
+            .child(label("volumeHelp"))
+            .child(
+                line()
+                    .gap(px(12.))
+                    .child(setting("upcomingSetting", "upcomingSettingHelp"))
+                    .child(self.action_button(
+                        "toggle-upcoming",
+                        text(if self.show_up_next { "on" } else { "off" }),
+                        Action::ToggleUpcoming,
+                        true,
+                        self.show_up_next,
+                        cx,
+                    )),
+            )
+            .child(
+                line()
+                    .gap(px(12.))
+                    .child(setting("widgetSetting", "localSettingsHelp"))
+                    .child(self.labeled_control(
+                        if self.widget.is_some() {
+                            "closeWidget"
+                        } else {
+                            "openWidget"
+                        },
+                        "compact",
+                        Control::ToggleWidget,
+                        cx,
+                    )),
+            )
+            .child(
+                line()
+                    .gap(px(12.))
+                    .child(setting("leaveSetting", "leaveHelp"))
+                    .child(self.labeled_control(
+                        "disconnect",
+                        "disconnect",
+                        Control::Disconnect,
+                        cx,
+                    )),
+            )
+    }
+
     pub fn detail_panel(&self, cx: &Context<Self>) -> Div {
         let Some(panel) = self.music_ui.panel else {
             return column();
         };
+        let tabs = matches!(panel, Panel::Moods | Panel::Preferences);
+        let header = line()
+            .justify_between()
+            .flex_shrink_0()
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child(text(if tabs { "moodsTitle" } else { panel.key() })),
+            )
+            .child(self.icon_action(
+                "closePanel",
+                "close",
+                text("closePanel"),
+                Action::Close,
+                true,
+                false,
+                cx,
+            ));
+        let tab_bar = tabs.then(|| {
+            div()
+                .flex()
+                .flex_shrink_0()
+                .p(px(3.))
+                .gap(px(2.))
+                .rounded(px(10.))
+                .bg(rgb(ui::POPOVER))
+                .children([Panel::Moods, Panel::Preferences].into_iter().map(|tab| {
+                    let selected = tab == panel;
+                    self.action_base(
+                        if tab == Panel::Moods {
+                            "tab-track"
+                        } else {
+                            "tab-room"
+                        },
+                        Action::Show(tab),
+                        !selected,
+                        cx,
+                    )
+                    .flex_1()
+                    .h(px(30.))
+                    .rounded(px(8.))
+                    .text_size(px(12.))
+                    .when(selected, |s| {
+                        s.bg(rgb(ui::SECONDARY))
+                            .text_color(rgb(ui::TEXT))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                    })
+                    .when(!selected, |s| {
+                        s.text_color(rgb(ui::MUTED))
+                            .hover(|s| s.text_color(rgb(ui::TEXT)))
+                    })
+                    .child(text(tab.key()))
+                }))
+        });
+        let banners = self.status_banners(cx);
         self.music_ui.scrolling.rendering.set(true);
         let content = match panel {
             Panel::Account => self.account_panel(cx),
@@ -1436,25 +2320,17 @@ impl Player {
             Panel::Preferences => self.preferences_panel(cx),
             Panel::Add => self.add_panel(cx),
             Panel::Queue => self.queue_panel(cx),
-            Panel::Settings => column()
-                .child(label("localSettingsHelp"))
-                .child(self.button(
-                    if self.show_up_next {
-                        "hideUpcoming"
-                    } else {
-                        "showUpcoming"
-                    },
-                    Action::ToggleUpcoming,
-                    true,
-                    cx,
-                )),
+            Panel::Settings => self.settings_panel(cx),
         };
-        let content = column()
-            .child(self.native_status())
-            .child(self.recovery_controls(cx))
-            .child(content);
         self.music_ui.scrolling.rendering.set(false);
-        column()
+        let footer = (panel == Panel::Preferences).then(|| self.preference_footer(cx));
+        ui::card()
+            .min_h_0()
+            .flex_1()
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
             .on_key_down(cx.listener(|p, event: &gpui::KeyDownEvent, _, cx| {
                 if !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.alt
@@ -1466,19 +2342,9 @@ impl Player {
                     cx.notify();
                 }
             }))
-            .min_h_0()
-            .flex_1()
-            .p(px(12.))
-            .rounded(px(12.))
-            .bg(rgb(ui::CARD))
-            .border_1()
-            .border_color(rgb(ui::BORDER))
-            .child(
-                row()
-                    .justify_between()
-                    .child(text(panel.key()))
-                    .child(self.button("closePanel", Action::Close, true, cx)),
-            )
+            .child(header)
+            .when_some(tab_bar, |s, tabs| s.child(tabs))
+            .when_some(banners, |s, banners| s.child(banners))
             .child(
                 div()
                     .id("native-detail-scroll")
@@ -1486,13 +2352,18 @@ impl Player {
                     .flex_1()
                     .overflow_y_scroll()
                     .track_scroll(&self.music_ui.scrolling.handle)
-                    .child(content),
+                    .child(content.pb(px(4.))),
             )
+            .when_some(footer, |s, footer| s.child(footer))
     }
-    pub fn native_status(&self) -> Div {
-        let mut status = column().gap(px(2.));
+
+    /// Server/room outcomes that need the user's attention, with their explicit recovery.
+    /// Nothing is rendered when everything is fine; Refresh room also lives in the header.
+    pub fn status_banners(&self, cx: &Context<Self>) -> Option<Div> {
+        let mut items: Vec<Div> = Vec::new();
+        let mut refresh = false;
         if self.native.http_busy || self.native.room.busy || self.music_ui.pending_http.is_some() {
-            status = status.child(label("nativePending"));
+            items.push(ui::banner(ui::Tone::Info, text("nativePending")));
         }
         if let Some(error) = &self.native.error {
             let key = match error.code {
@@ -1507,19 +2378,29 @@ impl Player {
                 ErrorCode::Stale => "nativeStale",
                 ErrorCode::Unavailable => "nativeUnavailable",
             };
-            status = status.child(label(key));
-            if let Some(seconds) = error.retry_after_seconds {
-                status = status.child(format!(
-                    "{} {seconds} {}",
+            refresh |= matches!(
+                error.code,
+                ErrorCode::Stale | ErrorCode::Auth | ErrorCode::Unavailable
+            );
+            let message = match error.retry_after_seconds {
+                Some(seconds) => format!(
+                    "{} {} {seconds} {}",
+                    text(key),
                     text("retryAfter"),
                     text("seconds")
-                ));
-            }
+                ),
+                None => text(key),
+            };
+            items.push(ui::banner(ui::Tone::Error, message));
         }
+        let mut review = false;
         if let Some(result) = self.native.room.status {
             let key = match result {
                 MusicStatus::Applied | MusicStatus::Duplicate => None,
-                MusicStatus::ConfirmationRequired => Some("musicConfirmation"),
+                MusicStatus::ConfirmationRequired => {
+                    review = self.music_ui.panel != Some(Panel::Add);
+                    Some("musicConfirmation")
+                }
                 MusicStatus::RevisionConflict => Some("musicRevision"),
                 MusicStatus::SlotConflict => Some("musicSlot"),
                 MusicStatus::RequestConflict => Some("musicRequest"),
@@ -1533,35 +2414,71 @@ impl Player {
                 MusicStatus::Unavailable => Some("nativeUnavailable"),
             };
             if let Some(key) = key {
-                status = status.child(label(key));
+                refresh |= !review;
+                items.push(ui::banner(ui::Tone::Warn, text(key)));
             }
         }
-        status
-    }
-    pub fn recovery_controls(&self, cx: &Context<Self>) -> Div {
-        row()
-            .when(self.native.room.retry_available, |s| {
-                s.child(self.button(
-                    "retryIntent",
-                    Action::Retry,
-                    self.native.connected && !self.room_busy() && !self.native.http_busy,
-                    cx,
-                ))
-            })
-            .when(self.connection.is_some(), |s| {
-                s.child(self.button(
-                    "refreshRoom",
-                    Action::RefreshRoom,
-                    !self.native.http_busy,
-                    cx,
-                ))
-            })
+        let retry = self.native.room.retry_available;
+        if retry || refresh || review {
+            items.push(
+                wrap()
+                    .when(review, |s| {
+                        s.child(self.action_button(
+                            "reviewConfirmation",
+                            text("reviewConfirmation"),
+                            Action::Show(Panel::Add),
+                            true,
+                            false,
+                            cx,
+                        ))
+                    })
+                    .when(retry, |s| {
+                        s.child(self.button(
+                            "retryIntent",
+                            Action::Retry,
+                            self.native.connected && !self.room_busy() && !self.native.http_busy,
+                            cx,
+                        ))
+                    })
+                    .when(refresh && self.connection.is_some(), |s| {
+                        s.child(self.button(
+                            "refreshRoom",
+                            Action::RefreshRoom,
+                            !self.native.http_busy,
+                            cx,
+                        ))
+                    }),
+            );
+        }
+        (!items.is_empty()).then(|| column().gap(px(8.)).flex_shrink_0().children(items))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mood_pages_load_only_while_a_mood_surface_is_visible() {
+        // Main player with no panel shows the mood strip.
+        assert_eq!(visible_mood_surface(None, false), Some(Panel::Moods));
+        assert_eq!(
+            visible_mood_surface(Some(Panel::Preferences), false),
+            Some(Panel::Preferences)
+        );
+        // Add/Queue/Account/Settings hide the strip; only the widget keeps chips visible.
+        for panel in [Panel::Add, Panel::Queue, Panel::Account, Panel::Settings] {
+            assert_eq!(visible_mood_surface(Some(panel), false), None);
+            assert_eq!(visible_mood_surface(Some(panel), true), Some(Panel::Moods));
+        }
+    }
+
+    #[test]
+    fn search_results_show_only_supplied_provider_and_duration() {
+        assert_eq!(result_meta("youtube", Some(225.)), "YouTube · 3:45");
+        assert_eq!(result_meta("vimeo", None), "Vimeo");
+        assert_eq!(result_meta("hls", None), text("directSource"));
+    }
 
     #[test]
     fn edit_snapshot_cannot_complete_a_newer_search() {

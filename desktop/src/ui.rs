@@ -1,12 +1,20 @@
 //! Native presentation only. Transport, timeline projection and provider activation stay in
 //! their existing owners. Optional metadata must be populated from validated room data.
-use super::{Control, Player};
+//!
+//! Layout of the main window (880 x 680): a 52 px top bar, then a left column with the
+//! current track (or one open panel under a compact track strip) and a fixed right column with
+//! the lazily created YouTube provider and the upcoming queue. The widget reuses the same tokens,
+//! glyphs and track/progress vocabulary.
+use super::{
+    Control, Player,
+    ui_music::{Action, Panel},
+};
 use gpui::{
-    AssetSource, Context, Div, IntoElement, Render, SharedString, Stateful, Window, canvas, div,
-    prelude::*, px, relative, rgb, svg,
+    AssetSource, Bounds, Context, Div, IntoElement, Pixels, Render, SharedString, Stateful, Window,
+    canvas, div, prelude::*, px, relative, rgb, svg,
 };
 use std::{borrow::Cow, cell::Cell, rc::Rc};
-use undertone_desktop::text;
+use undertone_desktop::{music::ICON_KEYS, text};
 
 pub(super) const BACKGROUND: u32 = 0x100f0e;
 pub(super) const TEXT: u32 = 0xf7f0e6;
@@ -14,13 +22,26 @@ pub(super) const CARD: u32 = 0x1b1917;
 pub(super) const POPOVER: u32 = 0x24211e;
 pub(super) const SECONDARY: u32 = 0x302b24;
 pub(super) const MUTED: u32 = 0xaaa296;
+pub(super) const FAINT: u32 = 0x6f675d;
 pub(super) const BORDER: u32 = 0x39342e;
 pub(super) const AMBER: u32 = 0xffbe3d;
+pub(super) const AMBER_HOVER: u32 = 0xffcf70;
 pub(super) const AMBER_TEXT: u32 = 0x271b07;
+pub(super) const AMBER_SURFACE: u32 = 0x33270f;
 pub(super) const PERSONAL: u32 = 0x8bc0ff;
 pub(super) const PERSONAL_SURFACE: u32 = 0x20354c;
+pub(super) const PERSONAL_BORDER: u32 = 0x35587d;
+pub(super) const DANGER: u32 = 0xf0957c;
+pub(super) const DANGER_SURFACE: u32 = 0x3a1f19;
+pub(super) const LIVE: u32 = 0xa9c6a1;
 
 pub const PLAYER_SIZE: (f32, f32) = (880., 680.);
+pub const HEADER_HEIGHT: f32 = 52.;
+pub const GUTTER: f32 = 16.;
+pub const SIDE_WIDTH: f32 = 320.;
+/// YouTube requires an embedded viewport of at least 200 x 200.
+pub const PROVIDER_HEIGHT: f32 = 224.;
+
 #[derive(Debug)]
 pub struct ProviderRect {
     pub x: f32,
@@ -28,12 +49,13 @@ pub struct ProviderRect {
     pub width: f32,
     pub height: f32,
 }
+/// Top of the right column. Must match `Render for Player` (header + gutter, right gutter).
 pub fn provider_rect(width: f32) -> ProviderRect {
     ProviderRect {
-        x: width - 336.,
-        y: 88.,
-        width: 320.,
-        height: 224.,
+        x: width - GUTTER - SIDE_WIDTH,
+        y: HEADER_HEIGHT + GUTTER,
+        width: SIDE_WIDTH,
+        height: PROVIDER_HEIGHT,
     }
 }
 
@@ -73,50 +95,104 @@ pub(super) fn time(seconds: f64) -> String {
     format!("{}:{:02}", seconds / 60, seconds % 60)
 }
 
+/// Fraction of a measured slider. Uses the painted bounds, so borders and flex shrink are exact.
+pub(super) fn slider_fraction(x: Pixels, bounds: Bounds<Pixels>) -> Option<f32> {
+    let width = f32::from(bounds.size.width);
+    let offset = f32::from(x - bounds.origin.x);
+    (width.is_finite() && width > 0. && offset.is_finite()).then(|| (offset / width).clamp(0., 1.))
+}
+
 // Small, original monochrome glyphs, embedded in the binary; no font or asset fetches.
+// Mood glyphs use the server's icon keys verbatim.
 pub struct Assets;
+
+fn glyph(path: &str) -> Option<&'static str> {
+    Some(match path {
+        "play" => "<path d='M8 5L20 12L8 19Z' fill='black' stroke='none'/>",
+        "pause" => "<path d='M8 5V19M16 5V19' stroke-width='3.4'/>",
+        "previous" => "<path d='M6 5V19M18 5L8 12L18 19Z'/>",
+        "next" => "<path d='M18 5V19M6 5L16 12L6 19Z'/>",
+        "volume" => "<path d='M3 9H7L12 5V19L7 15H3ZM16 8Q20 12 16 16M19 5Q26 12 19 19'/>",
+        "mute" => "<path d='M3 9H7L12 5V19L7 15H3ZM17 9L23 15M23 9L17 15'/>",
+        "minus" => "<path d='M6 12H18'/>",
+        "plus" => "<path d='M6 12H18M12 6V18'/>",
+        "compact" => {
+            "<rect x='3' y='5' width='18' height='14' rx='3'/><rect x='12' y='11' width='6' height='5' rx='1'/>"
+        }
+        "expand" => "<path d='M9 3H3V9M15 3H21V9M3 15V21H9M21 15V21H15'/>",
+        "open" => "<path d='M7 17L17 7M9 7H17V15'/>",
+        "queue" => "<path d='M4 6H20M4 12H20M4 18H12'/>",
+        "brand" => "<path d='M3 10V14M7 6V18M12 3V21M17 7V17M21 10V14'/>",
+        "link" => {
+            "<path d='M10 8L14 4Q17 1 21 5Q24 8 21 11L17 15M14 16L10 20Q7 23 3 19Q0 16 3 13L7 9M8 16L16 8'/>"
+        }
+        "disconnect" => "<path d='M9 5H4V19H9M12 12H22M18 8L22 12L18 16'/>",
+        "power" => "<path d='M12 3V11M7 6A8 8 0 1 0 17 6'/>",
+        "pin" => "<path d='M12 17V22M8 3H16L15 7V11L19 15V17H5V15L9 11V7Z'/>",
+        "settings" => {
+            "<path d='M3 7H7M13 7H21M3 17H13M19 17H21'/><circle cx='10' cy='7' r='3'/><circle cx='16' cy='17' r='3'/>"
+        }
+        "close" => "<path d='M6 6L18 18M18 6L6 18'/>",
+        "user" => {
+            "<circle cx='12' cy='8' r='4'/><path d='M4 21C4 16 8 14 12 14C16 14 20 16 20 21'/>"
+        }
+        "refresh" => "<path d='M20 12A8 8 0 1 1 17.7 6.3M20 4V9H15'/>",
+        "search" => "<circle cx='11' cy='11' r='6.5'/><path d='M16 16L21 21'/>",
+        "chevron" => "<path d='M9 6L15 12L9 18'/>",
+        "check" => "<path d='M5 12.5L10 17L19 7'/>",
+        "info" => "<circle cx='12' cy='12' r='9'/><path d='M12 11V16M12 8V8.2'/>",
+        "heart-fill" => {
+            "<path d='M12 20L4.5 12.5C1 9 3 4 7.5 4C9.5 4 11 5.2 12 7C13 5.2 14.5 4 16.5 4C21 4 23 9 19.5 12.5Z' fill='black'/>"
+        }
+        // Mood icon keys (music::ICON_KEYS).
+        "heart" => {
+            "<path d='M12 20L4.5 12.5C1 9 3 4 7.5 4C9.5 4 11 5.2 12 7C13 5.2 14.5 4 16.5 4C21 4 23 9 19.5 12.5Z'/>"
+        }
+        "headphones" => {
+            "<path d='M4 15V12A8 8 0 0 1 20 12V15'/><rect x='3' y='13' width='4' height='7' rx='2'/><rect x='17' y='13' width='4' height='7' rx='2'/>"
+        }
+        "bolt" => "<path d='M13 2L5 14H12L11 22L19 10H12Z'/>",
+        "sun" => {
+            "<circle cx='12' cy='12' r='4'/><path d='M12 2V4M12 20V22M2 12H4M20 12H22M5 5L6.5 6.5M17.5 17.5L19 19M5 19L6.5 17.5M17.5 6.5L19 5'/>"
+        }
+        "cloud-rain" => {
+            "<path d='M7 15A4 4 0 0 1 6.5 7A6 6 0 0 1 17.5 8A3.5 3.5 0 0 1 17.5 15Z'/><path d='M8 18L7 21M12 18L11 21M16 18L15 21'/>"
+        }
+        "moon" => "<path d='M20 15A9 9 0 0 1 9 3A9 9 0 1 0 20 15Z'/>",
+        "sparkles" => {
+            "<path d='M10 3L12 9L18 11L12 13L10 19L8 13L2 11L8 9Z'/><path d='M19 3V7M17 5H21'/>"
+        }
+        "coffee" => {
+            "<path d='M4 9H16V15A5 5 0 0 1 11 20H9A5 5 0 0 1 4 15Z'/><path d='M16 11H18A2.5 2.5 0 0 1 18 16H16M8 3V6M12 3V6'/>"
+        }
+        "flame" => {
+            "<path d='M12 22A7 7 0 0 0 19 15C19 10 14 8 13 3C10 6 9 8 9 10C7 9 6 8 6 7C5 9 5 12 5 15A7 7 0 0 0 12 22Z'/>"
+        }
+        _ => return None,
+    })
+}
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        let shape = match path {
-            "play" => "<path d='M8 5L20 12L8 19Z' fill='black' stroke='none'/>",
-            "pause" => "<path d='M8 5V19M16 5V19' stroke-width='4'/>",
-            "previous" => "<path d='M6 5V19M18 5L8 12L18 19Z'/>",
-            "next" => "<path d='M18 5V19M6 5L16 12L6 19Z'/>",
-            "volume" => "<path d='M3 9H7L12 5V19L7 15H3ZM16 8Q20 12 16 16M19 5Q26 12 19 19'/>",
-            "mute" => "<path d='M3 9H7L12 5V19L7 15H3ZM17 9L23 15M23 9L17 15'/>",
-            "minus" => "<path d='M6 12H18'/>",
-            "plus" => "<path d='M6 12H18M12 6V18'/>",
-            "compact" => {
-                "<rect x='4' y='4' width='16' height='16' rx='3'/><path d='M10 4V20M10 13H20'/>"
-            }
-            "expand" => "<path d='M9 3H3V9M15 3H21V9M3 15V21H9M21 15V21H15'/>",
-            "queue" => "<path d='M4 6H20M4 12H20M4 18H12'/>",
-            "brand" => "<path d='M3 10V14M7 6V18M12 3V21M17 7V17M21 10V14'/>",
-            "link" => {
-                "<path d='M10 8L14 4Q17 1 21 5Q24 8 21 11L17 15M14 16L10 20Q7 23 3 19Q0 16 3 13L7 9M8 16L16 8'/>"
-            }
-            "disconnect" => "<path d='M9 5H4V19H9M12 12H22M18 8L22 12L18 16'/>",
-            "pin" => "<path d='M12 17V22M8 3H16L15 7V11L19 15V17H5V15L9 11V7Z'/>",
-            "settings" => {
-                "<path d='M3 7H7M13 7H21M3 17H13M19 17H21'/><circle cx='10' cy='7' r='3'/><circle cx='16' cy='17' r='3'/>"
-            }
-            "close" => "<path d='M6 6L18 18M18 6L6 18'/>",
-            "headphones" => {
-                "<path d='M4 14V12A8 8 0 0 1 20 12V14'/><rect x='3' y='12' width='4' height='8' rx='2'/><rect x='17' y='12' width='4' height='8' rx='2'/>"
-            }
-            "heart" => "<path d='M12 20L4 12C-2 4 8 0 12 7C16 0 26 4 20 12Z'/>",
-            "moon" => "<path d='M20 15A9 9 0 0 1 9 3A9 9 0 1 0 20 15Z'/>",
-            _ => return Ok(None),
-        };
-        Ok(Some(Cow::Owned(format!(
-            "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'>{shape}</svg>"
-        ).into_bytes())))
+        Ok(glyph(path).map(|shape| {
+            Cow::Owned(format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'>{shape}</svg>"
+            ).into_bytes())
+        }))
     }
 
     fn list(&self, _: &str) -> anyhow::Result<Vec<SharedString>> {
         Ok(Vec::new())
     }
+}
+
+/// The embedded glyph for a server mood icon key. Unknown keys use the Undertone mark.
+pub(super) fn mood_glyph(key: &str) -> &'static str {
+    ICON_KEYS
+        .iter()
+        .copied()
+        .find(|known| *known == key)
+        .unwrap_or("brand")
 }
 
 pub(super) fn icon(name: &'static str, size: f32) -> gpui::Svg {
@@ -128,22 +204,80 @@ pub(super) fn icon(name: &'static str, size: f32) -> gpui::Svg {
         .text_color(rgb(TEXT))
 }
 
-fn row() -> Div {
+pub(super) fn row() -> Div {
     div().flex().items_center().gap(px(12.))
 }
-fn column() -> Div {
+pub(super) fn column() -> Div {
     div().flex().flex_col().gap(px(8.))
 }
-fn muted_label(value: String) -> Div {
-    div().text_size(px(12.)).text_color(rgb(MUTED)).child(value)
+pub(super) fn quiet(value: impl Into<SharedString>, size: f32) -> Div {
+    div()
+        .text_size(px(size))
+        .text_color(rgb(MUTED))
+        .truncate()
+        .child(value.into())
+}
+/// Small amber label above the current title, as in the widget reference.
+pub(super) fn eyebrow(label: String) -> Div {
+    row()
+        .gap(px(6.))
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(rgb(AMBER))
+        .child(icon("brand", 12.).text_color(rgb(AMBER)))
+        .child(label)
+}
+/// Uppercase-styled section label ("UP NEXT").
+pub(super) fn section_label(label: String) -> Div {
+    div()
+        .text_size(px(10.))
+        .font_weight(gpui::FontWeight::BOLD)
+        .text_color(rgb(MUTED))
+        .child(label)
+}
+pub(super) fn card() -> Div {
+    div()
+        .bg(rgb(CARD))
+        .rounded(px(16.))
+        .border_1()
+        .border_color(rgb(BORDER))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Tone {
+    Info,
+    Warn,
+    Error,
+}
+/// One status message. Actions may be appended as further children.
+pub(super) fn banner(tone: Tone, message: String) -> Div {
+    let (surface, foreground) = match tone {
+        Tone::Info => (POPOVER, MUTED),
+        Tone::Warn => (AMBER_SURFACE, AMBER),
+        Tone::Error => (DANGER_SURFACE, DANGER),
+    };
+    div()
+        .flex()
+        .items_center()
+        .flex_wrap()
+        .gap(px(8.))
+        .px(px(12.))
+        .py(px(8.))
+        .rounded(px(10.))
+        .bg(rgb(surface))
+        .text_size(px(12.))
+        .text_color(rgb(foreground))
+        .child(icon("info", 14.).text_color(rgb(foreground)))
+        .child(div().flex_1().min_w(px(160.)).child(message))
 }
 
 pub(super) fn artwork(edge: f32, image: Option<std::sync::Arc<gpui::RenderImage>>) -> Div {
+    let radius = (edge * 0.12).clamp(6., 14.);
     if let Some(image) = image {
         return div()
             .size(px(edge))
             .flex_shrink_0()
-            .rounded(px(12.))
+            .rounded(px(radius))
             .overflow_hidden()
             .border_1()
             .border_color(rgb(BORDER))
@@ -156,35 +290,50 @@ pub(super) fn artwork(edge: f32, image: Option<std::sync::Arc<gpui::RenderImage>
     div()
         .size(px(edge))
         .flex_shrink_0()
-        .rounded(px(12.))
+        .rounded(px(radius))
         .bg(rgb(SECONDARY))
         .border_1()
         .border_color(rgb(BORDER))
         .flex()
         .items_center()
         .justify_center()
+        .child(icon("brand", (edge * 0.38).max(12.)).text_color(rgb(AMBER)))
+}
+
+/// Visual track for progress and volume. `fraction` is already clamped.
+pub(super) fn track_bar(fraction: f32, fill: u32, thumb: f32) -> Div {
+    div()
+        .relative()
+        .w_full()
+        .h(px(4.))
+        .rounded_full()
+        .bg(rgb(SECONDARY))
         .child(
             div()
-                .size(px(edge * 0.72))
+                .h_full()
+                .w(relative(fraction))
                 .rounded_full()
-                .border_1()
-                .border_color(rgb(BORDER))
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(rgb(CARD))
-                .child(
-                    div()
-                        .text_color(rgb(AMBER))
-                        .child(icon("brand", edge * 0.30).text_color(rgb(AMBER))),
-                ),
+                .bg(rgb(fill)),
         )
+        .when(thumb > 0., |s| {
+            s.child(
+                div()
+                    .absolute()
+                    .top(px(2. - thumb / 2.))
+                    .left(relative(fraction))
+                    .ml(px(-thumb / 2.))
+                    .size(px(thumb))
+                    .rounded_full()
+                    .bg(rgb(fill)),
+            )
+        })
 }
 
 pub(super) struct Tip(pub String);
 impl Render for Tip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
+            .max_w(px(280.))
             .px(px(12.))
             .py(px(8.))
             .rounded(px(8.))
@@ -198,7 +347,29 @@ impl Render for Tip {
 }
 
 impl Player {
-    fn ui_button(
+    /// Name of the current track's contributor, only from authoritative participant metadata.
+    pub(super) fn contributor_name(&self) -> Option<String> {
+        let music = self.native.room.music.as_ref()?;
+        let current = music.current.as_ref()?;
+        music
+            .participants
+            .iter()
+            .find(|p| p.participant_id == current.entry.contributor_id)?
+            .name
+            .clone()
+    }
+
+    pub(super) fn listener_count(&self) -> Option<usize> {
+        self.native
+            .room
+            .music
+            .as_ref()
+            .map(|m| m.participants.len())
+            .filter(|count| *count > 0)
+    }
+
+    /// Round icon control for playback/local actions; the tooltip is the localized `id`.
+    pub(super) fn ui_button(
         &self,
         id: &'static str,
         glyph: &'static str,
@@ -210,7 +381,7 @@ impl Player {
         let label = text(id);
         let authority = self.native.authority();
         let foreground = if !enabled {
-            MUTED
+            FAINT
         } else if primary {
             AMBER_TEXT
         } else {
@@ -218,23 +389,29 @@ impl Player {
         };
         div()
             .id(id)
-            .size(px(if primary { 48. } else { 28. }))
+            .size(px(if primary { 52. } else { 34. }))
             .flex_shrink_0()
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb(if primary && enabled { AMBER } else { CARD }))
+            .bg(rgb(if primary && enabled {
+                AMBER
+            } else if primary {
+                SECONDARY
+            } else {
+                CARD
+            }))
             .text_color(rgb(foreground))
             .border_1()
-            .border_color(rgb(if primary && enabled { AMBER } else { BORDER }))
+            .border_color(rgb(if primary && enabled { AMBER } else { CARD }))
             .when(enabled, |button| {
                 button
                     .cursor_pointer()
                     .focusable()
                     .tab_stop(true)
-                    .hover(|s| s.bg(rgb(if primary { 0xffcf70 } else { SECONDARY })))
-                    .focus(|s| s.border_color(rgb(AMBER)))
+                    .hover(move |s| s.bg(rgb(if primary { AMBER_HOVER } else { SECONDARY })))
+                    .focus(move |s| s.border_color(rgb(if primary { TEXT } else { AMBER })))
             })
             .tooltip(move |_, cx| cx.new(|_| Tip(label.clone())).into())
             .child(icon(glyph, if primary { 24. } else { 18. }).text_color(rgb(foreground)))
@@ -245,22 +422,46 @@ impl Player {
             }))
     }
 
-    fn labeled_button(
+    /// Amber, labelled primary control (Join).
+    fn primary_control(
         &self,
         id: &'static str,
         glyph: &'static str,
         control: Control,
         cx: &Context<Self>,
-    ) -> impl IntoElement {
-        self.ui_button(id, glyph, control, true, false, cx)
+    ) -> Stateful<Div> {
+        self.ui_button(id, glyph, control, true, true, cx)
             .w_auto()
-            .px(px(12.))
+            .h(px(44.))
+            .px(px(18.))
             .gap(px(8.))
-            .rounded(px(8.))
+            .rounded(px(12.))
+            .text_size(px(14.))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
             .child(text(id))
     }
 
-    fn progress_bar(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+    /// Bordered secondary control with a visible label.
+    pub(super) fn labeled_control(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        control: Control,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        self.ui_button(id, glyph, control, true, false, cx)
+            .w_auto()
+            .h(px(32.))
+            .px(px(12.))
+            .gap(px(8.))
+            .rounded(px(9.))
+            .bg(rgb(POPOVER))
+            .border_color(rgb(BORDER))
+            .text_size(px(12.))
+            .child(text(id))
+    }
+
+    fn progress_bar(&self, cx: &Context<Self>) -> impl IntoElement {
         let authority = self.native.authority();
         let enabled = safe_seek(
             self.position,
@@ -268,20 +469,25 @@ impl Player {
             self.available && self.host_ready,
         )
         .is_some();
-        let width = f32::from(window.viewport_size().width)
-            - if self.webview.is_some() { 368. } else { 32. };
-        let padding = 16.;
+        let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let measured = bounds.clone();
         column()
-            .h(px(32.))
+            .gap(px(6.))
             .flex_shrink_0()
-            .gap(px(4.))
             .child(
                 div()
                     .id("seek")
-                    .h(px(20.))
+                    .relative()
+                    .h(px(16.))
                     .w_full()
                     .flex()
                     .items_center()
+                    .rounded(px(4.))
+                    .child(
+                        canvas(move |b, _, _| measured.set(Some(b)), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
                     .when(enabled, |s| {
                         s.cursor_pointer()
                             .focusable()
@@ -289,25 +495,18 @@ impl Player {
                             .focus(|s| s.bg(rgb(SECONDARY)))
                     })
                     .tooltip(|_, cx| cx.new(|_| Tip(text("seekHint"))).into())
-                    .child(
-                        div()
-                            .w_full()
-                            .h(px(4.))
-                            .rounded_full()
-                            .bg(rgb(BORDER))
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(progress(self.position, self.duration)))
-                                    .rounded_full()
-                                    .bg(rgb(AMBER)),
-                            ),
-                    )
+                    .child(track_bar(
+                        progress(self.position, self.duration),
+                        if enabled { AMBER } else { FAINT },
+                        if enabled { 10. } else { 0. },
+                    ))
                     .on_click(
                         cx.listener(move |player, event: &gpui::ClickEvent, window, cx| {
-                            if enabled && let Some(position) = event.mouse_position() {
-                                let fraction =
-                                    ((f32::from(position.x) - padding) / width).clamp(0., 1.);
+                            if enabled
+                                && let Some(point) = event.mouse_position()
+                                && let Some(b) = bounds.get()
+                                && let Some(fraction) = slider_fraction(point.x, b)
+                            {
                                 player.control(
                                     Control::Seek(f64::from(fraction) * player.duration),
                                     authority,
@@ -339,24 +538,85 @@ impl Player {
             .child(
                 row()
                     .justify_between()
-                    .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .child(time(self.position))
-                    .child(if self.duration > 0. {
-                        time(self.duration)
-                    } else {
-                        text("unknownTime")
-                    }),
+                    .child(quiet(time(self.position), 11.))
+                    .child(quiet(
+                        if self.duration > 0. {
+                            time(self.duration)
+                        } else {
+                            text("unknownTime")
+                        },
+                        11.,
+                    )),
             )
     }
 
-    fn transport(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn volume_control(&self, cx: &Context<Self>) -> Div {
+        let authority = self.native.authority();
+        let audible = if self.muted { 0 } else { self.volume };
+        let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let measured = bounds.clone();
+        row()
+            .gap(px(6.))
+            .child(self.ui_button(
+                if self.muted { "unmute" } else { "mute" },
+                if audible == 0 { "mute" } else { "volume" },
+                Control::Mute,
+                true,
+                false,
+                cx,
+            ))
+            .child(
+                div()
+                    .id("volume-slider")
+                    .relative()
+                    .w(px(88.))
+                    .h(px(24.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .focusable()
+                    .tab_stop(true)
+                    .focus(|s| s.bg(rgb(SECONDARY)))
+                    .tooltip(move |_, cx| {
+                        cx.new(|_| Tip(format!("{} · {audible}%", text("localVolume"))))
+                            .into()
+                    })
+                    .child(
+                        canvas(move |b, _, _| measured.set(Some(b)), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+                    .child(track_bar(f32::from(audible) / 100., MUTED, 8.))
+                    .on_click(
+                        cx.listener(move |player, event: &gpui::ClickEvent, window, cx| {
+                            if let Some(point) = event.mouse_position()
+                                && let Some(b) = bounds.get()
+                                && let Some(fraction) = slider_fraction(point.x, b)
+                            {
+                                let volume = (fraction * 100.).round() as u8;
+                                player.control(Control::Volume(volume), authority, window, cx);
+                            }
+                        }),
+                    )
+                    .on_key_down(cx.listener(
+                        move |player, event: &gpui::KeyDownEvent, window, cx| {
+                            let volume = match event.keystroke.key.as_str() {
+                                "left" => player.volume.saturating_sub(5),
+                                "right" => player.volume.saturating_add(5).min(100),
+                                _ => return,
+                            };
+                            cx.stop_propagation();
+                            player.control(Control::Volume(volume), authority, window, cx);
+                        },
+                    )),
+            )
+    }
+
+    fn transport(&self, cx: &Context<Self>) -> Div {
         let enabled = self.available && self.host_ready;
         row()
-            .h(px(48.))
-            .flex_shrink_0()
-            .justify_center()
-            .gap(px(24.))
+            .gap(px(14.))
             .child(self.ui_button(
                 "previous",
                 "previous",
@@ -376,260 +636,486 @@ impl Player {
             .child(self.ui_button("next", "next", Control::Next, enabled, false, cx))
     }
 
-    fn volume_control(&self, cx: &Context<Self>) -> impl IntoElement {
-        let authority = self.native.authority();
-        let audible = if self.muted { 0 } else { self.volume };
-        let slider_bounds = Rc::new(Cell::new(None::<gpui::Bounds<gpui::Pixels>>));
-        let measured_bounds = slider_bounds.clone();
-        row()
-            .h(px(28.))
+    fn display_title(&self) -> String {
+        if self.title.is_empty() {
+            text(if self.native.connected {
+                "waitingTitle"
+            } else {
+                "connecting"
+            })
+        } else {
+            self.title.clone()
+        }
+    }
+
+    /// The main "now playing" card. Mirrors the widget composition at a larger size.
+    fn now_card(&self, cx: &Context<Self>) -> Div {
+        let contributor = self.contributor_name();
+        card()
             .flex_shrink_0()
-            .justify_center()
-            .gap(px(8.))
-            .child(self.ui_button(
-                if self.muted { "unmute" } else { "mute" },
-                if audible == 0 { "mute" } else { "volume" },
-                Control::Mute,
-                true,
-                false,
-                cx,
-            ))
-            .child(self.ui_button(
-                "quieter",
-                "minus",
-                Control::Quieter,
-                self.volume > 0,
-                false,
-                cx,
-            ))
+            .p(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
             .child(
-                div()
-                    .id("volume-slider")
-                    .w(px(100.))
-                    .h(px(28.))
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .focusable()
-                    .tab_stop(true)
-                    .focus(|s| s.bg(rgb(SECONDARY)))
-                    .tooltip(|_, cx| cx.new(|_| Tip(text("localVolume"))).into())
-                    .relative()
+                row()
+                    .gap(px(18.))
+                    .items_start()
+                    .child(artwork(128., self.artwork.clone()))
                     .child(
-                        canvas(
-                            move |bounds, _, _| measured_bounds.set(Some(bounds)),
-                            |_, _, _, _| {},
-                        )
-                        .absolute()
-                        .size_full(),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .h(px(4.))
-                            .rounded_full()
-                            .bg(rgb(BORDER))
+                        column()
+                            .gap(px(6.))
+                            .pt(px(6.))
+                            .min_w_0()
+                            .flex_1()
+                            .child(eyebrow(text(if self.title.is_empty() {
+                                "listeningTogether"
+                            } else {
+                                "nowPlaying"
+                            })))
                             .child(
                                 div()
-                                    .w(relative(f32::from(audible) / 100.))
-                                    .h_full()
-                                    .rounded_full()
-                                    .bg(rgb(MUTED)),
-                            ),
-                    )
-                    .on_click(
-                        cx.listener(move |player, event: &gpui::ClickEvent, window, cx| {
-                            if let (Some(position), Some(bounds)) =
-                                (event.mouse_position(), slider_bounds.get())
-                            {
-                                let fraction = f32::from(position.x - bounds.origin.x)
-                                    / f32::from(bounds.size.width);
-                                let volume = (fraction.clamp(0., 1.) * 100.).round() as u8;
-                                player.control(Control::Volume(volume), authority, window, cx);
-                            }
-                        }),
-                    )
-                    .on_key_down(cx.listener(
-                        move |player, event: &gpui::KeyDownEvent, window, cx| {
-                            let volume = match event.keystroke.key.as_str() {
-                                "left" => player.volume.saturating_sub(5),
-                                "right" => player.volume.saturating_add(5),
-                                _ => return,
-                            };
-                            cx.stop_propagation();
-                            player.control(Control::Volume(volume), authority, window, cx);
-                        },
-                    )),
+                                    .text_size(px(26.))
+                                    .line_height(px(32.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .line_clamp(2)
+                                    .child(self.display_title()),
+                            )
+                            .when_some(self.details.artist.clone(), |s, artist| {
+                                s.child(quiet(artist, 15.))
+                            })
+                            .when_some(contributor, |s, name| {
+                                s.child(
+                                    row()
+                                        .gap(px(4.))
+                                        .text_size(px(12.))
+                                        .text_color(rgb(MUTED))
+                                        .child(text("widgetAddedBy"))
+                                        .child(
+                                            div()
+                                                .text_color(rgb(TEXT))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .truncate()
+                                                .child(name),
+                                        ),
+                                )
+                            }),
+                    ),
             )
-            .child(self.ui_button(
-                "louder",
-                "plus",
-                Control::Louder,
-                self.volume < 100,
-                false,
-                cx,
-            ))
+            .child(self.progress_bar(cx))
             .child(
-                div()
-                    .w(px(44.))
-                    .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .child(format!("{audible}%")),
+                row()
+                    .justify_between()
+                    .child(self.volume_control(cx).w(px(140.)))
+                    .child(self.transport(cx))
+                    // Balances the volume block so play/pause stays centred.
+                    .child(div().w(px(140.))),
             )
     }
 
-    fn now_playing(&self) -> Div {
-        row()
-            .h(px(94.))
+    /// Compact track strip above an open panel, so playback stays in view.
+    fn now_strip(&self, cx: &Context<Self>) -> Div {
+        let enabled = self.available && self.host_ready;
+        card()
             .flex_shrink_0()
+            .h(px(68.))
+            .px(px(12.))
+            .flex()
+            .items_center()
             .gap(px(12.))
-            .child(artwork(94., self.artwork.clone()))
+            .child(artwork(44., self.artwork.clone()))
             .child(
                 column()
+                    .gap(px(2.))
                     .min_w_0()
                     .flex_1()
-                    .child(muted_label(text(if self.title.is_empty() {
-                        "listeningTogether"
-                    } else {
-                        "nowPlaying"
-                    })))
                     .child(
                         div()
-                            .text_size(px(20.))
+                            .text_size(px(14.))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .truncate()
-                            .child(if self.title.is_empty() {
-                                text(if self.connection.is_some() {
-                                    "waitingTitle"
-                                } else {
-                                    "welcomeTitle"
-                                })
-                            } else {
-                                self.title.clone()
-                            }),
+                            .child(self.display_title()),
                     )
-                    .when_some(self.details.artist.clone(), |s, artist| {
-                        s.child(div().truncate().child(muted_label(artist)))
+                    .child(quiet(
+                        self.details
+                            .artist
+                            .clone()
+                            .unwrap_or_else(|| self.status.clone()),
+                        12.,
+                    )),
+            )
+            .child(
+                row()
+                    .gap(px(6.))
+                    .child(self.ui_button(
+                        "previous",
+                        "previous",
+                        Control::Previous,
+                        enabled,
+                        false,
+                        cx,
+                    ))
+                    .child(
+                        self.ui_button(
+                            if self.playing { "pause" } else { "play" },
+                            if self.playing { "pause" } else { "play" },
+                            Control::PlayPause,
+                            enabled,
+                            true,
+                            cx,
+                        )
+                        .size(px(40.)),
+                    )
+                    .child(self.ui_button("next", "next", Control::Next, enabled, false, cx)),
+            )
+    }
+
+    /// Right column list of the public upcoming preview, with the add entry point.
+    fn up_next_card(&self, rows: usize, cx: &Context<Self>) -> Div {
+        let music = self.native.room.active();
+        let mut list = column().gap(px(4.));
+        if !self.show_up_next {
+            list = list.child(quiet(text("upcomingHidden"), 12.));
+        } else if self.up_next.is_empty() {
+            list = list.child(
+                div()
+                    .py(px(8.))
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child(text(if music {
+                        "queueEmptyHint"
+                    } else {
+                        "musicModeShort"
+                    })),
+            );
+        } else {
+            for track in self.up_next.iter().take(rows) {
+                list = list.child(
+                    row()
+                        .h(px(44.))
+                        .gap(px(10.))
+                        // Queue DTO has no validated provider ID/art URL or duration.
+                        .child(artwork(36., None))
+                        .child(
+                            column()
+                                .gap(px(2.))
+                                .min_w_0()
+                                .flex_1()
+                                .child(
+                                    div()
+                                        .text_size(px(13.))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .truncate()
+                                        .child(track.title.clone()),
+                                )
+                                .when_some(track.artist.clone(), |s, a| s.child(quiet(a, 11.))),
+                        ),
+                );
+            }
+        }
+        card()
+            .flex_1()
+            .min_h_0()
+            .p(px(16.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(
+                row()
+                    .justify_between()
+                    .child(section_label(text("upNextLabel")))
+                    .child(self.link_action(
+                        "see-queue",
+                        text("widgetSeeQueue"),
+                        Action::Show(Panel::Queue),
+                        true,
+                        cx,
+                    )),
+            )
+            .child(list.flex_1().min_h_0().overflow_hidden())
+            .child(self.wide_action(
+                "up-next-add",
+                "plus",
+                text("widgetAdd"),
+                Action::Show(Panel::Add),
+                true,
+                cx,
+            ))
+    }
+
+    fn header(&self, cx: &Context<Self>) -> Div {
+        let connected = self.connection.is_some();
+        let panel = self.music_ui.panel;
+        let account = &self.native.account;
+        let account_label = if account.logged_in && !account.expired {
+            account.username.clone().unwrap_or_else(|| text("account"))
+        } else {
+            text("signIn")
+        };
+        let room = row()
+            .gap(px(8.))
+            .min_w_0()
+            .flex_shrink()
+            .h(px(30.))
+            .px(px(12.))
+            .rounded_full()
+            .bg(rgb(CARD))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .size(px(7.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(rgb(if self.native.connected { LIVE } else { FAINT })),
+            )
+            .child(div().min_w_0().truncate().text_size(px(12.)).child(
+                if self.room_name.is_empty() {
+                    text("noRoom")
+                } else {
+                    self.room_name.clone()
+                },
+            ))
+            .when_some(self.listener_count(), |s, count| {
+                s.child(quiet(format!("· {count} {}", text("listeners")), 12.))
+            })
+            .when(connected, |s| {
+                s.child(
+                    self.icon_action(
+                        "header-refresh",
+                        "refresh",
+                        text("refreshRoomTip"),
+                        Action::RefreshRoom,
+                        !self.native.http_busy,
+                        false,
+                        cx,
+                    )
+                    .size(px(22.))
+                    .rounded_full(),
+                )
+            });
+        row()
+            .h(px(HEADER_HEIGHT))
+            .flex_shrink_0()
+            .px(px(GUTTER))
+            .gap(px(12.))
+            .justify_between()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(
+                row()
+                    .gap(px(14.))
+                    .min_w_0()
+                    .flex_1()
+                    .child(
+                        row()
+                            .gap(px(8.))
+                            .flex_shrink_0()
+                            .child(icon("brand", 20.).text_color(rgb(AMBER)))
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(text("app")),
+                            ),
+                    )
+                    .when(connected, |s| s.child(room)),
+            )
+            .child(
+                row()
+                    .gap(px(6.))
+                    .flex_shrink_0()
+                    .when(connected, |s| {
+                        s.child(self.pill_action(
+                            "header-add",
+                            "plus",
+                            text("addMusic"),
+                            Action::Panel(Panel::Add),
+                            panel == Some(Panel::Add),
+                            true,
+                            cx,
+                        ))
+                        .child(self.pill_action(
+                            "header-account",
+                            "user",
+                            account_label,
+                            Action::Panel(Panel::Account),
+                            panel == Some(Panel::Account),
+                            false,
+                            cx,
+                        ))
+                        .child(self.icon_action(
+                            "header-settings",
+                            "settings",
+                            text("settings"),
+                            Action::Panel(Panel::Settings),
+                            true,
+                            panel == Some(Panel::Settings),
+                            cx,
+                        ))
+                    })
+                    .child(
+                        self.ui_button(
+                            if self.widget.is_some() {
+                                "closeWidget"
+                            } else {
+                                "openWidget"
+                            },
+                            "compact",
+                            Control::ToggleWidget,
+                            true,
+                            false,
+                            cx,
+                        )
+                        .size(px(32.))
+                        .rounded(px(9.))
+                        .bg(rgb(if self.widget.is_some() {
+                            AMBER_SURFACE
+                        } else {
+                            BACKGROUND
+                        }))
+                        .border_color(rgb(BACKGROUND)),
+                    )
+                    .when(connected, |s| {
+                        s.child(
+                            self.ui_button(
+                                "disconnect",
+                                "disconnect",
+                                Control::Disconnect,
+                                true,
+                                false,
+                                cx,
+                            )
+                            .size(px(32.))
+                            .rounded(px(9.))
+                            .bg(rgb(BACKGROUND))
+                            .border_color(rgb(BACKGROUND)),
+                        )
                     }),
+            )
+    }
+
+    /// Disconnected start screen: one obvious task, joining a room.
+    fn welcome(&self, cx: &Context<Self>) -> Div {
+        let failure = self.status != text("idle");
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(
+                card()
+                    .w(px(500.))
+                    .p(px(32.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(14.))
+                    .child(artwork(64., None))
+                    .child(eyebrow(text("listeningTogether")))
+                    .child(
+                        div()
+                            .text_size(px(28.))
+                            .line_height(px(34.))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .child(text("welcomeTitle")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.))
+                            .text_color(rgb(MUTED))
+                            .child(text("welcomeBody")),
+                    )
+                    .child(
+                        row()
+                            .gap(px(8.))
+                            .mt(px(6.))
+                            .child(div().flex_1().min_w_0().child(self.join_input.clone()))
+                            .child(self.primary_control("join", "link", Control::Join, cx)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
+                            .child(text("joinHint")),
+                    )
+                    .when(!self.notice.is_empty(), |s| {
+                        s.child(banner(Tone::Warn, self.notice.clone()))
+                    })
+                    .when(failure && self.notice.is_empty(), |s| {
+                        s.child(banner(Tone::Error, self.status.clone()))
+                    }),
+            )
+    }
+
+    /// Playback status line plus notices; native errors come from `status_banners`.
+    fn status_area(&self, cx: &Context<Self>) -> Div {
+        let blocked = self.status == text("autoplay-blocked");
+        column()
+            .gap(px(8.))
+            .flex_shrink_0()
+            .when(!self.notice.is_empty(), |s| {
+                s.child(banner(Tone::Warn, self.notice.clone()))
+            })
+            .when_some(self.status_banners(cx), |s, banners| s.child(banners))
+            .child(
+                row()
+                    .gap(px(8.))
+                    .px(px(4.))
+                    .text_size(px(12.))
+                    .text_color(rgb(if blocked { AMBER } else { MUTED }))
+                    .child(icon("headphones", 14.).text_color(rgb(if blocked {
+                        AMBER
+                    } else {
+                        MUTED
+                    })))
+                    .child(div().flex_1().min_w_0().child(self.status.clone())),
             )
     }
 }
 
 impl Render for Player {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        use super::ui_music::Action;
-        self.music_ui.scrolling.begin_frame(window, cx);
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.music_ui.scrolling.begin_frame(_window, cx);
         self.music_ui.rendered_authority = self.native.authority();
-        let provider = self.webview.is_some();
-        let detail = self.music_ui.panel.is_some();
-        let room = row()
-            .h(px(24.))
-            .flex_shrink_0()
-            .justify_between()
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child(if self.room_name.is_empty() {
-                        text("noRoom")
-                    } else {
-                        self.room_name.clone()
-                    }),
-            )
-            .child(self.labeled_button(
-                if self.connection.is_some() {
-                    "disconnect"
-                } else {
-                    "join"
-                },
-                if self.connection.is_some() {
-                    "disconnect"
-                } else {
-                    "link"
-                },
-                if self.connection.is_some() {
-                    Control::Disconnect
-                } else {
-                    Control::Join
-                },
-                cx,
-            ));
-        let controls = column()
-            .gap(px(6.))
-            .min_w_0()
-            .flex_1()
-            .child(self.now_playing())
-            .child(self.progress_bar(window, cx))
-            .child(self.transport(cx))
-            .child(self.volume_control(cx));
-        let provider_slot = || {
-            div()
-                .h(px(224.))
-                .flex_shrink_0()
-                .bg(rgb(CARD))
-                .rounded(px(12.))
-        };
-        let playback = row()
-            .h(px(224.))
-            .flex_shrink_0()
-            .items_start()
-            .gap(px(16.))
-            .child(controls)
-            .when(provider, |s| s.child(provider_slot().w(px(320.))));
-        let mut primary = column()
-            .gap(px(8.))
-            .min_h_0()
-            .flex_1()
-            .child(room)
-            .child(playback);
-        primary = primary.child(
-            div()
-                .h(px(28.))
-                .flex_shrink_0()
-                .text_size(px(11.))
-                .overflow_hidden()
-                .text_color(rgb(if self.notice.is_empty() { MUTED } else { AMBER }))
-                .child(if self.notice.is_empty() {
-                    self.status.clone()
-                } else {
-                    self.notice.clone()
-                }),
-        );
-        if self.connection.is_none() {
-            primary = primary.child(self.join_input.clone());
-        }
-        primary = primary.child(self.panel_navigation(cx));
-        if detail {
-            primary = primary.child(self.detail_panel(cx));
+        let body = if self.connection.is_none() {
+            self.welcome(cx)
         } else {
-            primary = primary.child(
-                div()
-                    .id("player-summary")
-                    .min_h_0()
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(self.native_status())
-                    .when(self.show_up_next, |s| {
-                        s.child(muted_label(text("upNext"))).children(
-                            self.up_next.iter().take(2).map(|t| {
-                                column()
-                                    .child(t.title.clone())
-                                    .when_some(t.artist.clone(), |s, a| s.child(muted_label(a)))
-                            }),
-                        )
-                    })
-                    .child(self.recovery_controls(cx)),
-            );
-        }
-        let body = row()
-            .items_start()
-            .gap(px(12.))
-            .min_h_0()
-            .flex_1()
-            .p(px(16.))
-            .child(primary.h_full());
+            let provider = self.webview.is_some();
+            let left = if self.music_ui.panel.is_some() {
+                column()
+                    .gap(px(12.))
+                    .child(self.now_strip(cx))
+                    .child(self.detail_panel(cx))
+            } else {
+                column()
+                    .gap(px(12.))
+                    .child(self.now_card(cx))
+                    .child(self.mood_strip(cx))
+                    .child(div().flex_1().min_h_0())
+                    .child(self.status_area(cx))
+            };
+            let mut right = column().gap(px(12.)).w(px(SIDE_WIDTH)).flex_shrink_0();
+            if provider {
+                // The WebView child window is positioned over this slot by provider_rect.
+                right = right.child(
+                    div()
+                        .h(px(PROVIDER_HEIGHT))
+                        .flex_shrink_0()
+                        .rounded(px(12.))
+                        .bg(rgb(CARD)),
+                );
+            }
+            right = right.child(self.up_next_card(if provider { 4 } else { 8 }, cx));
+            row()
+                .items_start()
+                .gap(px(GUTTER))
+                .min_h_0()
+                .flex_1()
+                .p(px(GUTTER))
+                .child(left.flex_1().min_w_0().h_full())
+                .child(right.h_full())
+        };
         div()
             .size_full()
             .flex()
@@ -654,43 +1140,7 @@ impl Render for Player {
                     cx.stop_propagation();
                 }
             }))
-            .child(
-                row()
-                    .h(px(40.))
-                    .flex_shrink_0()
-                    .px(px(12.))
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        row()
-                            .gap(px(8.))
-                            .child(icon("brand", 20.).text_color(rgb(AMBER)))
-                            .child(text("app")),
-                    )
-                    .child(
-                        row()
-                            .gap(px(6.))
-                            .child(self.action_button(
-                                "header-upcoming",
-                                text(if self.show_up_next {
-                                    "hideUpcoming"
-                                } else {
-                                    "showUpcoming"
-                                }),
-                                Action::ToggleUpcoming,
-                                true,
-                                false,
-                                cx,
-                            ))
-                            .child(self.labeled_button(
-                                "compact",
-                                "compact",
-                                Control::ToggleWidget,
-                                cx,
-                            )),
-                    ),
-            )
+            .child(self.header(cx))
             .child(body)
     }
 }
@@ -720,13 +1170,16 @@ mod tests {
     }
 
     #[test]
-    fn main_provider_slot_stays_bounded_and_separate_from_artwork() {
+    fn main_provider_slot_is_the_top_of_the_right_column() {
         let rect = provider_rect(PLAYER_SIZE.0);
+        // YouTube's embedded player minimum viewport.
         assert!(rect.width >= 200. && rect.height >= 200.);
-        assert!(rect.x > 16. + 94.);
-        assert_eq!(rect.y, 88.);
-        assert!(rect.x + rect.width <= PLAYER_SIZE.0);
-        assert!(rect.y + rect.height < PLAYER_SIZE.1);
+        assert_eq!(rect.y, HEADER_HEIGHT + GUTTER);
+        assert_eq!(rect.x + rect.width + GUTTER, PLAYER_SIZE.0);
+        // Left column (now playing / panels) never sits under the native child window.
+        assert!(rect.x - GUTTER >= 480.);
+        // Room left in the right column for the upcoming list and its Add button.
+        assert!(PLAYER_SIZE.1 - (rect.y + rect.height) >= 300.);
     }
 
     #[test]
@@ -734,5 +1187,24 @@ mod tests {
         assert_eq!(time(f64::NAN), "0:00");
         assert_eq!(time(-1.), "0:00");
         assert_eq!(time(3661.), "61:01");
+    }
+
+    #[test]
+    fn every_mood_icon_key_has_an_embedded_glyph() {
+        for key in ICON_KEYS {
+            assert_eq!(mood_glyph(key), *key);
+            assert!(glyph(key).is_some(), "{key}");
+        }
+        assert_eq!(mood_glyph("unknown"), "brand");
+    }
+
+    #[test]
+    fn sliders_use_rendered_endpoints_after_border_and_flex_shrink() {
+        let bounds = Bounds::new(gpui::point(px(56.), px(0.)), gpui::size(px(59.), px(28.)));
+        for (x, expected) in [(55., 0.), (56., 0.), (85.5, 0.5), (115., 1.), (116., 1.)] {
+            assert_eq!(slider_fraction(px(x), bounds), Some(expected));
+        }
+        let empty = Bounds::new(bounds.origin, gpui::size(px(0.), px(28.)));
+        assert_eq!(slider_fraction(px(56.), empty), None);
     }
 }

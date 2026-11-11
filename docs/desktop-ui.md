@@ -2,20 +2,57 @@
 
 The native GPUI UI uses warm dark `#100f0e`, card `#1b1917`, amber `#ffbe3d`
 controls, Segoe UI, and blue `#8bc0ff` only for confirmed personal Active tags
-(and native input selection). English UI strings live in desktop-en.json.
+(and native input selection). Soft red `#f0957c` marks exclusions and errors.
+English UI strings live in desktop-en.json. Tokens, glyphs, cards, banners,
+progress/volume tracks and slider hit-testing are shared by both windows (ui.rs).
+
+## Main window composition
+
+The 880 x 680 player is organised around five short journeys: join, listen,
+tag a mood, search and add, and switch to the widget and back.
+
+-   Disconnected: a single centred card (title, one sentence, room-link field with
+    an amber Join button, link/clipboard hint, failure banner). No disabled player.
+-   Top bar (52 px): Undertone mark, a room pill (live dot, room name, authoritative
+    listener count, quiet Refresh room icon), then Add music (amber pill), the
+    account pill (username or Sign in), Settings, Widget toggle and Leave room.
+-   Left column, no panel open: the current-track card (128 px artwork, NOW PLAYING
+    eyebrow, two-line title, artist, Added by contributor, measured seek bar,
+    volume icon + measured slider, centred previous/play/next), the
+    "My moods on this track" one-click chip strip (your moods first, then the
+    contributor's suggestions, with All moods), and the status line with banners
+    that appear only when something needs attention.
+-   Left column, panel open: a compact track strip (artwork, title, transport) stays
+    above one panel card. Moods has two tabs, This track and Room preferences.
+-   Right column (320 px): the lazily created YouTube provider at the top, then the
+    upcoming list (See queue) and a full-width Add a track button.
+
+Panels: Account (avatar, state, sign-in form or sign out), Moods (contributor
+suggestions, your moods and favorites, search, create with all nine icons),
+Room preferences (Include / Any / Exclude per mood, Save / Save & renew /
+Discard bar outside the scroll area), Add music (search field + Search, results
+with provider and duration when the server supplies them, Add to mix / Play next
+with explanatory tooltips, highlighted confirmation card, pending requests only
+when there are any), Queue (numbered rows, pagination only when needed) and
+Settings (this device: upcoming visibility, widget, leave room).
+Page states for moods appear only when a page failed, is not loaded or has more
+entries. Mood chips: the body toggles your tag, the heart toggles the favorite.
+Search results reuse the embedded artwork glyph: result thumbnails are not fetched.
 
 ## Separate windows and provider ownership
 
 The full player stays 880 x 680 logical pixels. **Widget** toggles one separate
 410 x 661 native GPUI top-level window. Its 20 px rounded card follows the supplied
-widget reference: 52 px draggable header, 20 px content padding, 94 px current
-artwork, title/artist, progress, local volume, compact transport, mood chips,
-two upcoming rows, Add track and a quiet footer. There is no video block in the
-widget. Missing artists, contributor names, durations and images are never invented.
+widget reference: 52 px draggable header (Add, pin, Settings, minimize, close),
+20 px content padding, 94 px current artwork, title/artist, progress, local volume,
+centred transport, mood chips, two upcoming rows, one Add a track button and a quiet
+status footer with a Quit icon. Outside a room it shows only "Not in a room" and an
+Open Undertone action. There is no video block in the widget. Missing artists, contributor names, durations and images are never invented.
 Current contributor names are shown only when authoritative participant metadata
 is available. Queue DTOs supply no provider video ID/art URL or duration, so queue
-rows use the embedded Undertone artwork and omit duration. Open room, Add track,
-See queue, Settings and the mood picker restore the existing main window/panels.
+rows use the embedded Undertone artwork and omit duration. Open room, Add a track,
+See queue, Settings and All moods restore the main window and open (never toggle
+shut) the matching panel.
 Quick tags remain in the widget and capture account/session/track authority; only
 confirmed own Active tags appear blue. Unknown tags stay disabled.
 
@@ -32,7 +69,7 @@ windows, exclusive fullscreen and the secure desktop are subject to Windows rule
 
 Closing the widget leaves the player and playback alone. Closing the main window
 while a widget exists minimizes the main window, preserving its owner and provider;
-its taskbar button remains available. Restore player and Quit Undertone are explicit
+its taskbar button remains available. Open room and Quit Undertone are explicit
 widget actions. With no widget, closing the main window exits as before. Minimizing
 either window never disposes playback. No hidden owner or tray-only orphan is created.
 
@@ -42,8 +79,8 @@ notifications, and defers captured commands back to that owner. It never renders
 Player in a second window, clones forms/focus handles or allocates a browser.
 Opening is deferred outside Player's mutable entity lease because GPUI draws a
 new window synchronously; a pending-open guard prevents duplicate windows.
-The main provider stays at (width - 336, 88, 320, 224), separate from the native
-artwork slot and panels. Widget lifecycle and pin changes neither reconnect the
+The main provider sits at the top of the right column, (width - 336, 68, 320, 224)
+(YouTube's 200 x 200 minimum is respected), never over the left column or panels. Widget lifecycle and pin changes neither reconnect the
 room nor recreate/reparent the iframe or duplicate sound. YouTube's activation
 button remains accessible in the main player, with its status hint in the widget.
 
@@ -92,7 +129,8 @@ raw-window-handle and windows); the lockfile adds no package versions.
     refresh or Load more establishes their state. Tags require the current stable
     catalogue UUID and captured track generation. Guests can inspect public moods
     and see why personal writes need an account. No ID is inferred or imported.
--   First tags, favorites and vocabulary pages load sequentially when needed.
+-   First tags, favorites and vocabulary pages load sequentially, once, while a mood
+    surface is visible (main mood strip, Moods/Room preferences, or the widget).
     Search filters loaded vocabulary locally. Load more never drains subsequent
     pages automatically. Failed pages need explicit refresh; failed writes do not
     automatically retry. Successful tag/favorite writes reload their stale first
@@ -117,7 +155,7 @@ raw-window-handle and windows); the lockfile adds no package versions.
     pending count, explicit pending-page refresh and page navigation support recovery.
     Missing conflict metadata disables confirmation. Other requests remain cancellable.
 -   Upcoming uses actual public queue entries and optional supplied artists. The
-    expanded Queue panel navigates real native pages. Show/Hide upcoming affects the main player summary. The widget retains its two-row peek. Local Settings stays separate from
+    expanded Queue panel navigates real native pages. Settings can hide upcoming tracks. The widget retains its two-row peek. Local Settings stays separate from
     room preferences. Unavailable metadata is omitted; embedded artwork is used when needed. Legacy/non-Music rooms retain playback and explain collective-control
     restrictions; no room mode or content is changed automatically.
 
