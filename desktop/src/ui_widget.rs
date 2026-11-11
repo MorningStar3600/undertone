@@ -119,13 +119,11 @@ impl Player {
                             && authority.matches_session(&state)
                     })
                 {
-                    player.artwork = image.map(|image| {
-                        let mut pixels = (*image).clone();
-                        // GPUI RenderImage expects BGRA, not image's RGBA. Thumbnail is opaque.
-                        for pixel in pixels.chunks_exact_mut(4) {
-                            pixel.swap(0, 2);
-                        }
-                        std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(pixels)]))
+                    // The band is already BGRA (GPUI RenderImage order) and free of letterbox bars.
+                    player.artwork = image.map(|art| {
+                        std::sync::Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                            art.band_bgra.clone(),
+                        )]))
                     });
                     cx.notify();
                 }

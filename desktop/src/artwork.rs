@@ -9,7 +9,44 @@ use std::{
 use tokio::{runtime::Handle, sync::oneshot, task::AbortHandle};
 
 const MAX_BYTES: usize = 512 * 1024;
-const CACHE_ENTRIES: usize = 4;
+/// Covers plus search-result thumbnails; each entry is about 0.6 MB.
+const CACHE_ENTRIES: usize = 12;
+/// Row thumbnails (search results) are reduced to this 16:9 size off the UI thread.
+pub const THUMB_SIZE: (u32, u32) = (160, 90);
+
+/// A decoded cover, prepared off the UI thread.
+pub struct Artwork {
+    /// Central 16:9 band of the cover (letterbox bars removed), channels in BGRA order as
+    /// GPUI's `RenderImage` expects.
+    pub band_bgra: RgbaImage,
+    /// [`THUMB_SIZE`] version of the band, BGRA.
+    pub thumb_bgra: RgbaImage,
+    /// Index into [`crate::ambience::AMBIENCES`] picked from the band.
+    pub ambience: usize,
+}
+impl Artwork {
+    pub fn prepare(image: &RgbaImage) -> Self {
+        let band = crate::ambience::cover_band(image);
+        let ambience = crate::ambience::pick_from_cover(&band);
+        let mut thumb = image::imageops::resize(
+            &band,
+            THUMB_SIZE.0,
+            THUMB_SIZE.1,
+            image::imageops::FilterType::Triangle,
+        );
+        let mut band = band;
+        for pixels in [&mut band, &mut thumb] {
+            for pixel in pixels.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+        }
+        Self {
+            band_bgra: band,
+            thumb_bgra: thumb,
+            ambience,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct YoutubeId(String);
@@ -52,14 +89,14 @@ pub fn decode(bytes: &[u8]) -> Option<RgbaImage> {
     )
 }
 
-type Cache = VecDeque<(YoutubeId, Option<Arc<RgbaImage>>)>;
+type Cache = VecDeque<(YoutubeId, Option<Arc<Artwork>>)>;
 pub struct Loader {
     client: reqwest::Client,
     runtime: Handle,
     cache: Arc<Mutex<Cache>>,
 }
 pub struct Request {
-    pub result: oneshot::Receiver<Option<Arc<RgbaImage>>>,
+    pub result: oneshot::Receiver<Option<Arc<Artwork>>>,
     abort: AbortHandle,
 }
 impl Drop for Request {
@@ -96,7 +133,9 @@ impl Loader {
             let image = if let Some((_, image)) = cached {
                 image
             } else {
-                let image = fetch(&client, &id).await.map(Arc::new);
+                let image = fetch(&client, &id)
+                    .await
+                    .map(|image| Arc::new(Artwork::prepare(&image)));
                 let mut cache = cache.lock().unwrap();
                 if cache.len() == CACHE_ENTRIES {
                     cache.pop_front();
@@ -233,7 +272,7 @@ mod tests {
     async fn cached_images_and_misses_do_not_need_network_and_dropping_request_aborts() {
         let loader = Loader::new(Handle::current()).unwrap();
         let id = YoutubeId::parse("abcdefghijk").unwrap();
-        let image = Arc::new(decode(&png()).unwrap());
+        let image = Arc::new(Artwork::prepare(&decode(&png()).unwrap()));
         loader
             .cache
             .lock()
@@ -296,6 +335,20 @@ mod tests {
         let decoded = decode(jpeg.get_ref()).unwrap();
         assert_eq!(decoded.dimensions(), (480, 360));
         assert_eq!(decoded.get_pixel(0, 0)[3], 255);
+    }
+    #[test]
+    fn prepared_artwork_drops_letterbox_bars_and_swaps_channels() {
+        let mut cover = RgbaImage::from_pixel(480, 360, image::Rgba([0, 0, 0, 255]));
+        for y in 45..315 {
+            for x in 0..480 {
+                cover.put_pixel(x, y, image::Rgba([0xd6, 0x28, 0x28, 255]));
+            }
+        }
+        let art = Artwork::prepare(&cover);
+        assert_eq!(art.band_bgra.dimensions(), (480, 270));
+        assert_eq!(art.thumb_bgra.dimensions(), THUMB_SIZE);
+        assert_eq!(art.band_bgra.get_pixel(0, 0).0, [0x28, 0x28, 0xd6, 255]);
+        assert_eq!(crate::ambience::AMBIENCES[art.ambience].id, "grenat");
     }
     #[test]
     fn old_track_and_identity_completions_cannot_restore_art() {

@@ -1,3 +1,4 @@
+pub mod ambience;
 pub mod artwork;
 pub mod bridge;
 pub mod connection;
