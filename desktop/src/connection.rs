@@ -406,9 +406,10 @@ async fn run(
                             }
                             command => {
                                 let identity = matches!(command,NativeCommand::Login{..}|NativeCommand::Logout);
-                                // The user is waiting for a search; a mood page reloads afterwards.
-                                if matches!(command, NativeCommand::SearchMusic { .. })
-                                    && rest.as_ref().is_some_and(|r| r.kind.activity() == HttpActivity::Page) {
+                                // A user action (search, sign-in, tag...) goes before a background
+                                // mood page, which loads again afterwards.
+                                let page = matches!(command, NativeCommand::LoadMoods { .. } | NativeCommand::LoadFavorites { .. } | NativeCommand::LoadTrackMoods { .. });
+                                if !page && rest.as_ref().is_some_and(|r| r.kind.activity() == HttpActivity::Page) {
                                     cancel_rest(&mut rest, &mut state);
                                 }
                                 if rest.as_ref().is_some_and(|r| !identity || r.kind.identity()) { state.error=Some(NativeError::new(ErrorCode::Busy)); }

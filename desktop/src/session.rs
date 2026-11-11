@@ -184,8 +184,10 @@ impl NativeState {
     }
     pub fn can(&self) -> Can {
         let mut can = self.room.can();
-        can.account_write =
-            self.connected && self.account.logged_in && !self.account.expired && !self.http_busy;
+        can.account_write = self.connected
+            && self.account.logged_in
+            && !self.account.expired
+            && !self.foreground_busy();
         if !self.connected || self.account.expired {
             return Can {
                 account_write: can.account_write,
@@ -198,6 +200,11 @@ impl NativeState {
     /// rejected, completed, cancelled or superseded. Never inferred from unchanged state.
     pub fn settled(&self, ticket: u64) -> bool {
         self.dequeued_ticket >= ticket && self.inflight_ticket != Some(ticket)
+    }
+    /// Busy with something the user asked for; a background page load does not count, since
+    /// any user action preempts it.
+    pub fn foreground_busy(&self) -> bool {
+        self.http_busy && self.http_activity != Some(HttpActivity::Page)
     }
     /// A search must wait only for account or write requests; it preempts page loads and
     /// supersedes an older search.
