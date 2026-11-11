@@ -1,39 +1,45 @@
 //! Native presentation only. Transport, timeline projection and provider activation stay in
 //! their existing owners. Optional metadata must be populated from validated room data.
 //!
-//! Layout of the main window (880 x 680): a 52 px top bar, then a left column with the
-//! current track (or one open panel under a compact track strip) and a fixed right column with
-//! the lazily created YouTube provider and the upcoming queue. The widget reuses the same tokens,
-//! glyphs and track/progress vocabulary.
+//! Layout of the main window (880 x 680): the ambience sky fills the window; over it, a 52 px
+//! top bar, then a left column with the current track (or one open panel under a compact track
+//! strip) and a fixed right column with the lazily created YouTube provider and the upcoming
+//! queue. Cards are translucent so the room's mood shows through. The widget shares the same
+//! tokens, glyphs, typography and track/progress vocabulary.
 use super::{
     Control, Player,
     ui_music::{Action, Panel},
 };
+use crate::{sky, theme};
 use gpui::{
-    AssetSource, Bounds, Context, Div, IntoElement, Pixels, Render, SharedString, Stateful, Window,
-    canvas, div, prelude::*, px, relative, rgb, svg,
+    AnyElement, AssetSource, Bounds, Context, Div, FontWeight, IntoElement, Pixels, Render,
+    SharedString, Stateful, Window, canvas, div, prelude::*, px, relative, svg,
 };
 use std::{borrow::Cow, cell::Cell, rc::Rc};
-use undertone_desktop::{music::ICON_KEYS, text};
+use undertone_desktop::{ambience::AMBIENCES, music::ICON_KEYS, text};
 
-pub(super) const BACKGROUND: u32 = 0x100f0e;
-pub(super) const TEXT: u32 = 0xf7f0e6;
-pub(super) const CARD: u32 = 0x1b1917;
-pub(super) const POPOVER: u32 = 0x24211e;
-pub(super) const SECONDARY: u32 = 0x302b24;
-pub(super) const MUTED: u32 = 0xaaa296;
-pub(super) const FAINT: u32 = 0x6f675d;
-pub(super) const BORDER: u32 = 0x39342e;
-pub(super) const AMBER: u32 = 0xffbe3d;
-pub(super) const AMBER_HOVER: u32 = 0xffcf70;
-pub(super) const AMBER_TEXT: u32 = 0x271b07;
-pub(super) const AMBER_SURFACE: u32 = 0x33270f;
-pub(super) const PERSONAL: u32 = 0x8bc0ff;
-pub(super) const PERSONAL_SURFACE: u32 = 0x20354c;
-pub(super) const PERSONAL_BORDER: u32 = 0x35587d;
-pub(super) const DANGER: u32 = 0xf0957c;
-pub(super) const DANGER_SURFACE: u32 = 0x3a1f19;
-pub(super) const LIVE: u32 = 0xa9c6a1;
+pub(super) use crate::theme::{Tok, rgb};
+pub(super) const BACKGROUND: Tok = Tok::Background;
+pub(super) const TEXT: Tok = Tok::Text;
+pub(super) const TEXT_SOFT: Tok = Tok::TextSoft;
+pub(super) const CARD: Tok = Tok::Card;
+pub(super) const POPOVER: Tok = Tok::Popover;
+pub(super) const TOOLTIP: Tok = Tok::Tooltip;
+pub(super) const SECONDARY: Tok = Tok::Secondary;
+pub(super) const MUTED: Tok = Tok::Muted;
+pub(super) const FAINT: Tok = Tok::Faint;
+pub(super) const BORDER: Tok = Tok::Border;
+pub(super) const AMBER: Tok = Tok::Accent;
+pub(super) const AMBER_HOVER: Tok = Tok::AccentHover;
+pub(super) const AMBER_TEXT: Tok = Tok::OnAccent;
+pub(super) const AMBER_SURFACE: Tok = Tok::AccentSurface;
+pub(super) const PERSONAL: Tok = Tok::Personal;
+pub(super) const PERSONAL_SURFACE: Tok = Tok::PersonalSurface;
+pub(super) const PERSONAL_BORDER: Tok = Tok::PersonalBorder;
+pub(super) const DANGER: Tok = Tok::Danger;
+pub(super) const DANGER_SURFACE: Tok = Tok::DangerSurface;
+pub(super) const LIVE: Tok = Tok::Live;
+pub(super) const GLASS_STRONG: Tok = Tok::GlassStrong;
 
 pub const PLAYER_SIZE: (f32, f32) = (880., 680.);
 pub const HEADER_HEIGHT: f32 = 52.;
@@ -49,7 +55,7 @@ pub struct ProviderRect {
     pub width: f32,
     pub height: f32,
 }
-/// Top of the right column. Must match `Render for Player` (header + gutter, right gutter).
+/// Top of the right column. Must match `Player::body` (header + gutter, right gutter).
 pub fn provider_rect(width: f32) -> ProviderRect {
     ProviderRect {
         x: width - GUTTER - SIDE_WIDTH,
@@ -103,17 +109,20 @@ pub(super) fn slider_fraction(x: Pixels, bounds: Bounds<Pixels>) -> Option<f32> 
 }
 
 // Small, original monochrome glyphs, embedded in the binary; no font or asset fetches.
-// Mood glyphs use the server's icon keys verbatim.
+// Mood glyphs use the server's icon keys verbatim. Transport and window glyphs follow the
+// "twelve moods" design (24 x 24 grid, round caps).
 pub struct Assets;
 
 fn glyph(path: &str) -> Option<&'static str> {
     Some(match path {
-        "play" => "<path d='M8 5L20 12L8 19Z' fill='black' stroke='none'/>",
-        "pause" => "<path d='M8 5V19M16 5V19' stroke-width='3.4'/>",
-        "previous" => "<path d='M6 5V19M18 5L8 12L18 19Z'/>",
-        "next" => "<path d='M18 5V19M6 5L16 12L6 19Z'/>",
-        "volume" => "<path d='M3 9H7L12 5V19L7 15H3ZM16 8Q20 12 16 16M19 5Q26 12 19 19'/>",
-        "mute" => "<path d='M3 9H7L12 5V19L7 15H3ZM17 9L23 15M23 9L17 15'/>",
+        "play" => "<path d='M8.5 5.5v13l10.5-6.5z' fill='black'/>",
+        "pause" => "<path d='M8.5 5.5v13M15.5 5.5v13' stroke-width='2.6'/>",
+        "previous" => "<path d='M18 6v12L8 12zM5.5 5.5v13'/>",
+        "next" => "<path d='M6 6v12l10-6zM18.5 5.5v13'/>",
+        "volume" => {
+            "<path d='M4 9.5v5h3.5L12 18.5v-13L7.5 9.5zM15.5 9a4.2 4.2 0 0 1 0 6M18 6.5a8 8 0 0 1 0 11'/>"
+        }
+        "mute" => "<path d='M4 9.5v5h3.5L12 18.5v-13L7.5 9.5zM16 9.5l5 5M21 9.5l-5 5'/>",
         "minus" => "<path d='M6 12H18'/>",
         "plus" => "<path d='M6 12H18M12 6V18'/>",
         "compact" => {
@@ -128,7 +137,9 @@ fn glyph(path: &str) -> Option<&'static str> {
         }
         "disconnect" => "<path d='M9 5H4V19H9M12 12H22M18 8L22 12L18 16'/>",
         "power" => "<path d='M12 3V11M7 6A8 8 0 1 0 17 6'/>",
-        "pin" => "<path d='M12 17V22M8 3H16L15 7V11L19 15V17H5V15L9 11V7Z'/>",
+        "pin" => "<path d='M9 3.5h6l-1 6 3 3.5H7l3-3.5zM12 13v7.5'/>",
+        "fold" => "<path d='M6.5 9.5 12 15l5.5-5.5'/>",
+        "unfold" => "<path d='M6.5 14.5 12 9l5.5 5.5'/>",
         "settings" => {
             "<path d='M3 7H7M13 7H21M3 17H13M19 17H21'/><circle cx='10' cy='7' r='3'/><circle cx='16' cy='17' r='3'/>"
         }
@@ -139,7 +150,7 @@ fn glyph(path: &str) -> Option<&'static str> {
         "refresh" => "<path d='M20 12A8 8 0 1 1 17.7 6.3M20 4V9H15'/>",
         "search" => "<circle cx='11' cy='11' r='6.5'/><path d='M16 16L21 21'/>",
         "chevron" => "<path d='M9 6L15 12L9 18'/>",
-        "check" => "<path d='M5 12.5L10 17L19 7'/>",
+        "check" => "<path d='M5.5 12.5l4.2 4.2L18.5 8' stroke-width='2.2'/>",
         "info" => "<circle cx='12' cy='12' r='9'/><path d='M12 11V16M12 8V8.2'/>",
         "heart-fill" => {
             "<path d='M12 20L4.5 12.5C1 9 3 4 7.5 4C9.5 4 11 5.2 12 7C13 5.2 14.5 4 16.5 4C21 4 23 9 19.5 12.5Z' fill='black'/>"
@@ -172,8 +183,21 @@ fn glyph(path: &str) -> Option<&'static str> {
     })
 }
 
+/// One of the twelve logos ("logo-01" ... "logo-12"), from the shared ambience data.
+fn logo_markup(path: &str) -> Option<&'static str> {
+    let number: usize = path.strip_prefix("logo-")?.parse().ok()?;
+    AMBIENCES
+        .get(number.checked_sub(1)?)
+        .map(|ambience| ambience.logo)
+}
+
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        if let Some(logo) = logo_markup(path) {
+            return Ok(Some(Cow::Owned(format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' color='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>{logo}</svg>"
+            ).into_bytes())));
+        }
         Ok(glyph(path).map(|shape| {
             Cow::Owned(format!(
                 "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'>{shape}</svg>"
@@ -204,6 +228,92 @@ pub(super) fn icon(name: &'static str, size: f32) -> gpui::Svg {
         .text_color(rgb(TEXT))
 }
 
+/// The logo of the current ambience, in the accent color.
+pub(super) fn logo(size: f32) -> gpui::Svg {
+    icon(theme::logo(), size).text_color(rgb(AMBER))
+}
+
+/// Logo plus the "undertone" wordmark (display face, light).
+pub(super) fn lockup(size: f32) -> Div {
+    row()
+        .gap(px(size * 0.45))
+        .flex_shrink_0()
+        .child(logo(size * 1.42))
+        .child(
+            div()
+                .font_family(theme::display())
+                .font_weight(FontWeight(350.))
+                .text_size(px(size))
+                .text_color(rgb(TEXT))
+                .child(text("wordmark")),
+        )
+}
+
+/// The ambience's italic name and number ("heure bleue  ambiance 01").
+pub(super) fn mood_line(ambience: usize, size: f32) -> Div {
+    let ambience = &AMBIENCES[ambience.min(AMBIENCES.len() - 1)];
+    div()
+        .flex()
+        .items_end()
+        .gap(px(8.))
+        .min_w_0()
+        .child(
+            div()
+                .font_family(theme::voice())
+                .italic()
+                .text_size(px(size))
+                .line_height(px(size * 1.15))
+                .text_color(rgb(TEXT_SOFT))
+                .truncate()
+                .child(ambience.name),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .pb(px(2.))
+                .text_size(px(11.5))
+                .text_color(rgb(MUTED))
+                .child(format!("{} {:02}", text("ambienceNumber"), ambience.number)),
+        )
+}
+
+/// "brought by <name>" in the italic voice.
+pub(super) fn dedication(name: String, size: f32) -> Div {
+    row()
+        .gap(px(7.))
+        .min_w_0()
+        .font_family(theme::voice())
+        .italic()
+        .text_size(px(size))
+        .text_color(rgb(TEXT_SOFT))
+        .child(avatar(&name))
+        .child(div().flex_shrink_0().child(text("broughtBy")))
+        .child(div().min_w_0().truncate().text_color(rgb(TEXT)).child(name))
+}
+
+/// Initial in a small round badge.
+pub(super) fn avatar(name: &str) -> Div {
+    div()
+        .size(px(18.))
+        .flex_shrink_0()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(TEXT_SOFT))
+        .text_color(rgb(BACKGROUND))
+        .font_family(theme::text())
+        .font_weight(FontWeight::SEMIBOLD)
+        .not_italic()
+        .text_size(px(9.5))
+        .child(
+            name.chars()
+                .find(|c| c.is_alphanumeric())
+                .map(|c| c.to_uppercase().to_string())
+                .unwrap_or_default(),
+        )
+}
+
 pub(super) fn row() -> Div {
     div().flex().items_center().gap(px(12.))
 }
@@ -217,28 +327,19 @@ pub(super) fn quiet(value: impl Into<SharedString>, size: f32) -> Div {
         .truncate()
         .child(value.into())
 }
-/// Small amber label above the current title, as in the widget reference.
-pub(super) fn eyebrow(label: String) -> Div {
-    row()
-        .gap(px(6.))
-        .text_size(px(10.))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(rgb(AMBER))
-        .child(icon("brand", 12.).text_color(rgb(AMBER)))
-        .child(label)
-}
-/// Uppercase-styled section label ("UP NEXT").
+/// Section label ("UP NEXT").
 pub(super) fn section_label(label: String) -> Div {
     div()
-        .text_size(px(10.))
-        .font_weight(gpui::FontWeight::BOLD)
-        .text_color(rgb(MUTED))
+        .text_size(px(12.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(rgb(TEXT))
         .child(label)
 }
+/// Translucent surface over the sky.
 pub(super) fn card() -> Div {
     div()
         .bg(rgb(CARD))
-        .rounded(px(16.))
+        .rounded(px(18.))
         .border_1()
         .border_color(rgb(BORDER))
 }
@@ -272,7 +373,7 @@ pub(super) fn banner(tone: Tone, message: String) -> Div {
 }
 
 pub(super) fn artwork(edge: f32, image: Option<std::sync::Arc<gpui::RenderImage>>) -> Div {
-    let radius = (edge * 0.12).clamp(6., 14.);
+    let radius = (edge * 0.16).clamp(6., 14.);
     if let Some(image) = image {
         return div()
             .size(px(edge))
@@ -297,17 +398,17 @@ pub(super) fn artwork(edge: f32, image: Option<std::sync::Arc<gpui::RenderImage>
         .flex()
         .items_center()
         .justify_center()
-        .child(icon("brand", (edge * 0.38).max(12.)).text_color(rgb(AMBER)))
+        .child(logo((edge * 0.42).max(12.)))
 }
 
 /// Visual track for progress and volume. `fraction` is already clamped.
-pub(super) fn track_bar(fraction: f32, fill: u32, thumb: f32) -> Div {
+pub(super) fn track_bar(fraction: f32, fill: Tok, thumb: f32) -> Div {
     div()
         .relative()
         .w_full()
         .h(px(4.))
         .rounded_full()
-        .bg(rgb(SECONDARY))
+        .bg(rgb(BORDER))
         .child(
             div()
                 .h_full()
@@ -337,13 +438,27 @@ impl Render for Tip {
             .px(px(12.))
             .py(px(8.))
             .rounded(px(8.))
-            .bg(rgb(POPOVER))
+            .bg(rgb(TOOLTIP))
             .border_1()
             .border_color(rgb(BORDER))
             .text_color(rgb(TEXT))
             .text_size(px(12.))
             .child(self.0.clone())
     }
+}
+
+/// Tab and Shift+Tab move focus inside a window.
+pub(super) fn tab_navigation(event: &gpui::KeyDownEvent, window: &mut Window) -> bool {
+    let modifiers = &event.keystroke.modifiers;
+    if event.keystroke.key == "tab" && !modifiers.control && !modifiers.alt && !modifiers.platform {
+        if modifiers.shift {
+            window.focus_prev();
+        } else {
+            window.focus_next();
+        }
+        return true;
+    }
+    false
 }
 
 impl Player {
@@ -385,36 +500,32 @@ impl Player {
         } else if primary {
             AMBER_TEXT
         } else {
-            TEXT
+            TEXT_SOFT
         };
         div()
             .id(id)
-            .size(px(if primary { 52. } else { 34. }))
+            .size(px(if primary { 52. } else { 36. }))
             .flex_shrink_0()
             .rounded_full()
             .flex()
             .items_center()
             .justify_center()
-            .bg(rgb(if primary && enabled {
-                AMBER
-            } else if primary {
-                SECONDARY
-            } else {
-                CARD
-            }))
+            .when(primary, |s| {
+                s.bg(rgb(if enabled { AMBER } else { SECONDARY }))
+            })
             .text_color(rgb(foreground))
             .border_1()
-            .border_color(rgb(if primary && enabled { AMBER } else { CARD }))
+            .border_color(gpui::transparent_black())
             .when(enabled, |button| {
                 button
                     .cursor_pointer()
                     .focusable()
                     .tab_stop(true)
                     .hover(move |s| s.bg(rgb(if primary { AMBER_HOVER } else { SECONDARY })))
-                    .focus(move |s| s.border_color(rgb(if primary { TEXT } else { AMBER })))
+                    .focus(|s| s.border_color(rgb(TEXT)))
             })
             .tooltip(move |_, cx| cx.new(|_| Tip(label.clone())).into())
-            .child(icon(glyph, if primary { 24. } else { 18. }).text_color(rgb(foreground)))
+            .child(icon(glyph, if primary { 23. } else { 21. }).text_color(rgb(foreground)))
             .on_click(cx.listener(move |player, _, window, cx| {
                 if enabled {
                     player.control(control, authority, window, cx);
@@ -422,7 +533,7 @@ impl Player {
             }))
     }
 
-    /// Amber, labelled primary control (Join).
+    /// Accent, labelled primary control (Join).
     fn primary_control(
         &self,
         id: &'static str,
@@ -437,7 +548,7 @@ impl Player {
             .gap(px(8.))
             .rounded(px(12.))
             .text_size(px(14.))
-            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .font_weight(FontWeight::SEMIBOLD)
             .child(text(id))
     }
 
@@ -458,6 +569,7 @@ impl Player {
             .bg(rgb(POPOVER))
             .border_color(rgb(BORDER))
             .text_size(px(12.))
+            .text_color(rgb(TEXT))
             .child(text(id))
     }
 
@@ -471,83 +583,78 @@ impl Player {
         .is_some();
         let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
         let measured = bounds.clone();
-        column()
-            .gap(px(6.))
+        div()
+            .id("seek")
+            .relative()
+            .h(px(20.))
+            .w_full()
             .flex_shrink_0()
+            .flex()
+            .items_center()
+            .rounded(px(4.))
             .child(
-                div()
-                    .id("seek")
-                    .relative()
-                    .h(px(16.))
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .rounded(px(4.))
-                    .child(
-                        canvas(move |b, _, _| measured.set(Some(b)), |_, _, _, _| {})
-                            .absolute()
-                            .size_full(),
-                    )
-                    .when(enabled, |s| {
-                        s.cursor_pointer()
-                            .focusable()
-                            .tab_stop(true)
-                            .focus(|s| s.bg(rgb(SECONDARY)))
-                    })
-                    .tooltip(|_, cx| cx.new(|_| Tip(text("seekHint"))).into())
-                    .child(track_bar(
-                        progress(self.position, self.duration),
-                        if enabled { AMBER } else { FAINT },
-                        if enabled { 10. } else { 0. },
-                    ))
-                    .on_click(
-                        cx.listener(move |player, event: &gpui::ClickEvent, window, cx| {
-                            if enabled
-                                && let Some(point) = event.mouse_position()
-                                && let Some(b) = bounds.get()
-                                && let Some(fraction) = slider_fraction(point.x, b)
-                            {
-                                player.control(
-                                    Control::Seek(f64::from(fraction) * player.duration),
-                                    authority,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        }),
-                    )
-                    .on_key_down(cx.listener(
-                        move |player, event: &gpui::KeyDownEvent, window, cx| {
-                            if enabled {
-                                let delta = match event.keystroke.key.as_str() {
-                                    "left" => -10.,
-                                    "right" => 10.,
-                                    _ => return,
-                                };
-                                cx.stop_propagation();
-                                player.control(
-                                    Control::Seek(player.position + delta),
-                                    authority,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        },
-                    )),
+                canvas(move |b, _, _| measured.set(Some(b)), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
             )
-            .child(
-                row()
-                    .justify_between()
-                    .child(quiet(time(self.position), 11.))
-                    .child(quiet(
-                        if self.duration > 0. {
-                            time(self.duration)
-                        } else {
-                            text("unknownTime")
-                        },
-                        11.,
-                    )),
+            .when(enabled, |s| {
+                s.cursor_pointer()
+                    .focusable()
+                    .tab_stop(true)
+                    .focus(|s| s.bg(rgb(SECONDARY)))
+            })
+            .tooltip(|_, cx| cx.new(|_| Tip(text("seekHint"))).into())
+            .child(track_bar(
+                progress(self.position, self.duration),
+                if enabled { AMBER } else { FAINT },
+                if enabled { 10. } else { 0. },
+            ))
+            .on_click(
+                cx.listener(move |player, event: &gpui::ClickEvent, window, cx| {
+                    if enabled
+                        && let Some(point) = event.mouse_position()
+                        && let Some(b) = bounds.get()
+                        && let Some(fraction) = slider_fraction(point.x, b)
+                    {
+                        player.control(
+                            Control::Seek(f64::from(fraction) * player.duration),
+                            authority,
+                            window,
+                            cx,
+                        );
+                    }
+                }),
             )
+            .on_key_down(
+                cx.listener(move |player, event: &gpui::KeyDownEvent, window, cx| {
+                    if enabled {
+                        let delta = match event.keystroke.key.as_str() {
+                            "left" => -10.,
+                            "right" => 10.,
+                            _ => return,
+                        };
+                        cx.stop_propagation();
+                        player.control(
+                            Control::Seek(player.position + delta),
+                            authority,
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            )
+    }
+
+    fn time_label(&self) -> String {
+        format!(
+            "{} / {}",
+            time(self.position),
+            if self.duration > 0. {
+                time(self.duration)
+            } else {
+                text("unknownTime")
+            }
+        )
     }
 
     fn volume_control(&self, cx: &Context<Self>) -> Div {
@@ -556,15 +663,18 @@ impl Player {
         let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
         let measured = bounds.clone();
         row()
-            .gap(px(6.))
-            .child(self.ui_button(
-                if self.muted { "unmute" } else { "mute" },
-                if audible == 0 { "mute" } else { "volume" },
-                Control::Mute,
-                true,
-                false,
-                cx,
-            ))
+            .gap(px(4.))
+            .child(
+                self.ui_button(
+                    if self.muted { "unmute" } else { "mute" },
+                    if audible == 0 { "mute" } else { "volume" },
+                    Control::Mute,
+                    true,
+                    false,
+                    cx,
+                )
+                .size(px(30.)),
+            )
             .child(
                 div()
                     .id("volume-slider")
@@ -587,7 +697,7 @@ impl Player {
                             .absolute()
                             .size_full(),
                     )
-                    .child(track_bar(f32::from(audible) / 100., MUTED, 8.))
+                    .child(track_bar(f32::from(audible) / 100., TEXT_SOFT, 10.))
                     .on_click(
                         cx.listener(move |player, event: &gpui::ClickEvent, window, cx| {
                             if let Some(point) = event.mouse_position()
@@ -616,7 +726,7 @@ impl Player {
     fn transport(&self, cx: &Context<Self>) -> Div {
         let enabled = self.available && self.host_ready;
         row()
-            .gap(px(14.))
+            .gap(px(8.))
             .child(self.ui_button(
                 "previous",
                 "previous",
@@ -636,7 +746,7 @@ impl Player {
             .child(self.ui_button("next", "next", Control::Next, enabled, false, cx))
     }
 
-    fn display_title(&self) -> String {
+    pub(super) fn display_title(&self) -> String {
         if self.title.is_empty() {
             text(if self.native.connected {
                 "waitingTitle"
@@ -648,57 +758,51 @@ impl Player {
         }
     }
 
-    /// The main "now playing" card. Mirrors the widget composition at a larger size.
+    /// The main "now playing" card: the widget's composition at a larger size.
     fn now_card(&self, cx: &Context<Self>) -> Div {
         let contributor = self.contributor_name();
+        let title = self.display_title();
+        let long = title.chars().count() > 22;
         card()
             .flex_shrink_0()
-            .p(px(20.))
+            .px(px(22.))
+            .pt(px(14.))
+            .pb(px(16.))
             .flex()
             .flex_col()
-            .gap(px(16.))
+            .gap(px(14.))
+            .child(mood_line(theme::current(cx), 21.))
             .child(
                 row()
                     .gap(px(18.))
-                    .items_start()
+                    .items_end()
                     .child(artwork(128., self.artwork.clone()))
                     .child(
                         column()
-                            .gap(px(6.))
-                            .pt(px(6.))
+                            .gap(px(4.))
                             .min_w_0()
                             .flex_1()
-                            .child(eyebrow(text(if self.title.is_empty() {
-                                "listeningTogether"
-                            } else {
-                                "nowPlaying"
-                            })))
                             .child(
                                 div()
-                                    .text_size(px(26.))
-                                    .line_height(px(32.))
-                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .font_family(theme::display())
+                                    .font_weight(FontWeight(if long { 350. } else { 300. }))
+                                    .text_size(px(if long { 26. } else { 34. }))
+                                    .line_height(px(if long { 30. } else { 37. }))
                                     .line_clamp(2)
-                                    .child(self.display_title()),
+                                    .child(title),
                             )
                             .when_some(self.details.artist.clone(), |s, artist| {
-                                s.child(quiet(artist, 15.))
+                                s.child(
+                                    div()
+                                        .font_family(theme::display())
+                                        .text_size(px(16.))
+                                        .text_color(rgb(TEXT_SOFT))
+                                        .truncate()
+                                        .child(artist),
+                                )
                             })
                             .when_some(contributor, |s, name| {
-                                s.child(
-                                    row()
-                                        .gap(px(4.))
-                                        .text_size(px(12.))
-                                        .text_color(rgb(MUTED))
-                                        .child(text("widgetAddedBy"))
-                                        .child(
-                                            div()
-                                                .text_color(rgb(TEXT))
-                                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                                .truncate()
-                                                .child(name),
-                                        ),
-                                )
+                                s.child(dedication(name, 15.).mt(px(4.)))
                             }),
                     ),
             )
@@ -706,10 +810,18 @@ impl Player {
             .child(
                 row()
                     .justify_between()
+                    .mt(px(-6.))
                     .child(self.volume_control(cx).w(px(140.)))
                     .child(self.transport(cx))
-                    // Balances the volume block so play/pause stays centred.
-                    .child(div().w(px(140.))),
+                    .child(
+                        div()
+                            .w(px(140.))
+                            .flex()
+                            .justify_end()
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
+                            .child(self.time_label()),
+                    ),
             )
     }
 
@@ -731,8 +843,8 @@ impl Player {
                     .flex_1()
                     .child(
                         div()
-                            .text_size(px(14.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_family(theme::display())
+                            .text_size(px(16.))
                             .truncate()
                             .child(self.display_title()),
                     )
@@ -773,7 +885,7 @@ impl Player {
     /// Right column list of the public upcoming preview, with the add entry point.
     fn up_next_card(&self, rows: usize, cx: &Context<Self>) -> Div {
         let music = self.native.room.active();
-        let mut list = column().gap(px(4.));
+        let mut list = column().gap(px(0.));
         if !self.show_up_next {
             list = list.child(quiet(text("upcomingHidden"), 12.));
         } else if self.up_next.is_empty() {
@@ -789,26 +901,27 @@ impl Player {
                     })),
             );
         } else {
-            for track in self.up_next.iter().take(rows) {
+            for (index, track) in self.up_next.iter().take(rows).enumerate() {
                 list = list.child(
                     row()
-                        .h(px(44.))
+                        .h(px(48.))
                         .gap(px(10.))
+                        .when(index > 0, |s| s.border_t_1().border_color(rgb(BORDER)))
                         // Queue DTO has no validated provider ID/art URL or duration.
-                        .child(artwork(36., None))
+                        .child(artwork(34., None))
                         .child(
                             column()
-                                .gap(px(2.))
+                                .gap(px(1.))
                                 .min_w_0()
                                 .flex_1()
                                 .child(
                                     div()
-                                        .text_size(px(13.))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_size(px(13.5))
+                                        .font_weight(FontWeight::MEDIUM)
                                         .truncate()
                                         .child(track.title.clone()),
                                 )
-                                .when_some(track.artist.clone(), |s, a| s.child(quiet(a, 11.))),
+                                .when_some(track.artist.clone(), |s, a| s.child(quiet(a, 12.))),
                         ),
                 );
             }
@@ -819,11 +932,11 @@ impl Player {
             .p(px(16.))
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(8.))
             .child(
                 row()
                     .justify_between()
-                    .child(section_label(text("upNextLabel")))
+                    .child(section_label(text("upNext")))
                     .child(self.link_action(
                         "see-queue",
                         text("widgetSeeQueue"),
@@ -859,7 +972,7 @@ impl Player {
             .h(px(30.))
             .px(px(12.))
             .rounded_full()
-            .bg(rgb(CARD))
+            .bg(rgb(POPOVER))
             .border_1()
             .border_color(rgb(BORDER))
             .child(
@@ -886,7 +999,7 @@ impl Player {
                         "refresh",
                         text("refreshRoomTip"),
                         Action::RefreshRoom,
-                        !self.native.http_busy,
+                        !self.native.search_blocked(),
                         false,
                         cx,
                     )
@@ -894,6 +1007,13 @@ impl Player {
                     .rounded_full(),
                 )
             });
+        let chrome = |button: Stateful<Div>, active: bool| {
+            button
+                .size(px(32.))
+                .rounded_full()
+                .bg(rgb(if active { TEXT } else { GLASS_STRONG }))
+                .border_color(rgb(BORDER))
+        };
         row()
             .h(px(HEADER_HEIGHT))
             .flex_shrink_0()
@@ -907,18 +1027,7 @@ impl Player {
                     .gap(px(14.))
                     .min_w_0()
                     .flex_1()
-                    .child(
-                        row()
-                            .gap(px(8.))
-                            .flex_shrink_0()
-                            .child(icon("brand", 20.).text_color(rgb(AMBER)))
-                            .child(
-                                div()
-                                    .text_size(px(15.))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .child(text("app")),
-                            ),
-                    )
+                    .child(lockup(16.))
                     .when(connected, |s| s.child(room)),
             )
             .child(
@@ -944,40 +1053,30 @@ impl Player {
                             false,
                             cx,
                         ))
-                        .child(self.icon_action(
-                            "header-settings",
-                            "settings",
-                            text("settings"),
-                            Action::Panel(Panel::Settings),
-                            true,
-                            panel == Some(Panel::Settings),
-                            cx,
-                        ))
                     })
-                    .child(
-                        self.ui_button(
-                            if self.widget.is_some() {
-                                "closeWidget"
-                            } else {
-                                "openWidget"
-                            },
+                    .child(self.icon_action(
+                        "header-settings",
+                        "settings",
+                        text("settings"),
+                        Action::Panel(Panel::Settings),
+                        true,
+                        panel == Some(Panel::Settings),
+                        cx,
+                    ))
+                    .child({
+                        let open = self.widget.is_some();
+                        let button = self.ui_button(
+                            if open { "closeWidget" } else { "openWidget" },
                             "compact",
                             Control::ToggleWidget,
                             true,
                             false,
                             cx,
-                        )
-                        .size(px(32.))
-                        .rounded(px(9.))
-                        .bg(rgb(if self.widget.is_some() {
-                            AMBER_SURFACE
-                        } else {
-                            BACKGROUND
-                        }))
-                        .border_color(rgb(BACKGROUND)),
-                    )
+                        );
+                        chrome(button, open).when(open, |s| s.text_color(rgb(BACKGROUND)))
+                    })
                     .when(connected, |s| {
-                        s.child(
+                        s.child(chrome(
                             self.ui_button(
                                 "disconnect",
                                 "disconnect",
@@ -985,12 +1084,9 @@ impl Player {
                                 true,
                                 false,
                                 cx,
-                            )
-                            .size(px(32.))
-                            .rounded(px(9.))
-                            .bg(rgb(BACKGROUND))
-                            .border_color(rgb(BACKGROUND)),
-                        )
+                            ),
+                            false,
+                        ))
                     }),
             )
     }
@@ -1011,19 +1107,19 @@ impl Player {
                     .flex()
                     .flex_col()
                     .gap(px(14.))
-                    .child(artwork(64., None))
-                    .child(eyebrow(text("listeningTogether")))
+                    .child(mood_line(theme::current(cx), 21.))
                     .child(
                         div()
-                            .text_size(px(28.))
-                            .line_height(px(34.))
-                            .font_weight(gpui::FontWeight::BOLD)
+                            .font_family(theme::display())
+                            .font_weight(FontWeight(300.))
+                            .text_size(px(34.))
+                            .line_height(px(38.))
                             .child(text("welcomeTitle")),
                     )
                     .child(
                         div()
                             .text_size(px(14.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(TEXT_SOFT))
                             .child(text("welcomeBody")),
                     )
                     .child(
@@ -1054,9 +1150,6 @@ impl Player {
         column()
             .gap(px(8.))
             .flex_shrink_0()
-            .when(!self.notice.is_empty(), |s| {
-                s.child(banner(Tone::Warn, self.notice.clone()))
-            })
             .when_some(self.status_banners(cx), |s, banners| s.child(banners))
             .child(
                 row()
@@ -1072,11 +1165,10 @@ impl Player {
                     .child(div().flex_1().min_w_0().child(self.status.clone())),
             )
     }
-}
 
-impl Render for Player {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.music_ui.scrolling.begin_frame(_window, cx);
+    /// The window's content, rendered as a cached view over the sky (see `sky::Body`).
+    pub(super) fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.music_ui.scrolling.begin_frame(window, cx);
         self.music_ui.rendered_authority = self.native.authority();
         let body = if self.connection.is_none() {
             self.welcome(cx)
@@ -1103,7 +1195,7 @@ impl Render for Player {
                         .h(px(PROVIDER_HEIGHT))
                         .flex_shrink_0()
                         .rounded(px(12.))
-                        .bg(rgb(CARD)),
+                        .bg(rgb(BACKGROUND)),
                 );
             }
             right = right.child(self.up_next_card(if provider { 4 } else { 8 }, cx));
@@ -1121,26 +1213,34 @@ impl Render for Player {
             .flex()
             .flex_col()
             .overflow_hidden()
+            .child(self.header(cx))
+            .child(body)
+            .into_any_element()
+    }
+}
+
+impl Render for Player {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        theme::frame(cx);
+        let layers = self
+            .layers
+            .get_or_insert_with(|| sky::Layers::new(0., Player::body, window, cx));
+        let (sky, body) = (layers.sky.clone(), layers.body());
+        div()
+            .size_full()
+            .relative()
+            .overflow_hidden()
             .bg(rgb(BACKGROUND))
-            .font_family("Segoe UI")
+            .font_family(theme::text())
             .text_color(rgb(TEXT))
             .text_size(px(13.))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|_, event: &gpui::KeyDownEvent, window, cx| {
-                if event.keystroke.key == "tab"
-                    && !event.keystroke.modifiers.control
-                    && !event.keystroke.modifiers.alt
-                    && !event.keystroke.modifiers.platform
-                {
-                    if event.keystroke.modifiers.shift {
-                        window.focus_prev();
-                    } else {
-                        window.focus_next();
-                    }
+                if tab_navigation(event, window) {
                     cx.stop_propagation();
                 }
             }))
-            .child(self.header(cx))
+            .child(sky)
             .child(body)
     }
 }
@@ -1196,6 +1296,23 @@ mod tests {
             assert!(glyph(key).is_some(), "{key}");
         }
         assert_eq!(mood_glyph("unknown"), "brand");
+    }
+
+    #[test]
+    fn every_logo_is_an_embedded_asset() {
+        for (index, path) in theme::LOGOS.iter().enumerate() {
+            assert_eq!(logo_markup(path), Some(AMBIENCES[index].logo));
+            let svg = Assets.load(path).unwrap().unwrap();
+            assert!(
+                std::str::from_utf8(&svg)
+                    .unwrap()
+                    .contains(AMBIENCES[index].logo)
+            );
+        }
+        assert!(logo_markup("logo-00").is_none() && logo_markup("logo-13").is_none());
+        for name in ["fold", "unfold", "pin", "play", "pause"] {
+            assert!(glyph(name).is_some());
+        }
     }
 
     #[test]

@@ -20,6 +20,8 @@ use undertone_desktop::{
 use wry::{WebView, WebViewBuilder, WebViewBuilderExtWindows};
 
 mod native_window;
+mod sky;
+mod theme;
 mod ui;
 mod ui_input;
 mod ui_music;
@@ -77,10 +79,18 @@ struct Player {
     authority: ui_music::Authority,
     observer_sequence: u64,
     account_refresh_requested: bool,
+    /// The sky and cached body of the main window, created on first render.
+    layers: Option<sky::Layers<Player>>,
+    prefs: undertone_desktop::prefs::Prefs,
 }
 
 impl Player {
-    fn new(window: &mut Window, cx: &mut Context<Self>, muted: bool) -> Self {
+    fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        muted: bool,
+        prefs: undertone_desktop::prefs::Prefs,
+    ) -> Self {
         let (events, receiver) = async_channel::bounded(64);
         cx.spawn_in(window, async move |this, cx| {
             while let Ok(event) = receiver.recv().await {
@@ -126,6 +136,9 @@ impl Player {
                 window.minimize_window();
                 false
             } else {
+                if let Some(owner) = owner.upgrade() {
+                    owner.read(cx).save_prefs();
+                }
                 true
             }
         });
@@ -170,6 +183,15 @@ impl Player {
             authority: ui_music::Authority::default(),
             observer_sequence: 0,
             account_refresh_requested: false,
+            layers: None,
+            prefs,
+        }
+    }
+
+    /// Widget place and animation setting; best effort, never blocks or reports.
+    fn save_prefs(&self) {
+        if let Some(path) = undertone_desktop::prefs::default_path() {
+            let _ = undertone_desktop::prefs::save(&path, &self.prefs);
         }
     }
 
@@ -230,6 +252,7 @@ impl Player {
         self.account_refresh_requested = false;
         self.music_ui.panel = None;
         self.clear_native_forms(cx);
+        theme::set_ambience(undertone_desktop::ambience::DEFAULT, cx);
     }
 
     fn join(&mut self, input: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -649,7 +672,16 @@ fn main() -> anyhow::Result<()> {
         _ => anyhow::bail!("{}", text("help")),
     };
     // Smoke mode is always offline, even when other CLI parameters were supplied.
+    // Smoke mode never reads or writes local preferences.
+    let prefs = if smoke {
+        undertone_desktop::prefs::Prefs::default()
+    } else {
+        undertone_desktop::prefs::default_path()
+            .map(|path| undertone_desktop::prefs::load(&path))
+            .unwrap_or_default()
+    };
     Application::new().with_assets(ui::Assets).run(move |cx: &mut App| {
+        theme::init(cx, prefs.motion);
         cx.on_window_closed(|cx| { if cx.windows().is_empty() { cx.quit(); } }).detach();
         let (width, height) = ui::PLAYER_SIZE;
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
@@ -660,7 +692,7 @@ fn main() -> anyhow::Result<()> {
             is_resizable: false,
             ..Default::default()
         }, move |window, cx| cx.new(|cx| {
-            let mut player = Player::new(window, cx, muted);
+            let mut player = Player::new(window, cx, muted, prefs);
             if !smoke && let Some(initial) = initial { player.join(&initial, window, cx); }
             player.sync_layout(window);
             if smoke {

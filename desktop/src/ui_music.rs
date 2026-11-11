@@ -1,16 +1,22 @@
 //! Native form orchestration and bounded detail panels. No playback IPC or raw REST data.
+use super::ui::rgb;
 use super::{
     Control, Player, ui,
     ui_input::{InputEvent, NativeInput},
 };
-use gpui::{Context, Div, Entity, Focusable, Stateful, Window, div, prelude::*, px, rgb};
-use std::collections::BTreeMap;
+use gpui::{Context, Div, Entity, Focusable, Stateful, Task, Window, div, prelude::*, px};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    sync::Arc,
+};
 use undertone_desktop::{
+    ambience::MotionPreference,
+    artwork::YoutubeId,
     music::{
         ActiveTag, ConfirmationOffer, Content, ICON_KEYS, Intent, Mood, MoodChip, MusicCommand,
         MusicStatus, Page, Reference,
     },
-    session::{CommandAuthority, ErrorCode, NativeCommand, NativeState},
+    session::{CommandAuthority, ErrorCode, HttpActivity, NativeCommand, NativeError, NativeState},
     text,
 };
 
@@ -111,6 +117,7 @@ pub enum Action {
     Queue(usize),
     Requests(usize),
     ToggleUpcoming,
+    Motion(MotionPreference),
 }
 
 #[derive(Default)]
@@ -156,7 +163,7 @@ impl PreferenceDraft {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HttpWork {
     Tags,
     Favorites,
@@ -167,19 +174,91 @@ enum HttpWork {
     Preview(u64),
     Identity,
 }
+impl HttpWork {
+    /// Background page loads, which a search preempts.
+    fn page(self) -> Option<usize> {
+        match self {
+            Self::Tags => Some(0),
+            Self::Favorites => Some(1),
+            Self::Moods => Some(2),
+            _ => None,
+        }
+    }
+}
+/// The admission latch of one native HTTP command, released by its ticket only.
 struct PendingHttp {
     work: HttpWork,
-    saw_busy: bool,
-    before: String,
+    ticket: u64,
 }
 impl PendingHttp {
-    fn completed(&mut self, state: &NativeState) -> bool {
-        if let HttpWork::Preview(request_id) = self.work {
-            return state.preview_completed_id == Some(request_id);
-        }
-        self.saw_busy |= state.http_busy;
-        !state.http_busy && (self.saw_busy || marker(self.work, state) != self.before)
+    fn completed(&self, state: &NativeState) -> bool {
+        state.settled(self.ticket)
     }
+}
+/// The search whose results the Add panel may show.
+#[derive(Clone, Copy)]
+struct Search {
+    request_id: u64,
+    version: u64,
+}
+
+/// Bounded thumbnail loading for search results: at most this many fetches at once.
+const THUMB_CONCURRENCY: usize = 3;
+#[derive(Default)]
+pub struct Thumbs {
+    generation: u64,
+    images: HashMap<String, Option<Arc<gpui::RenderImage>>>,
+    queue: VecDeque<YoutubeId>,
+    inflight: HashMap<String, Task<()>>,
+}
+impl Thumbs {
+    pub fn get(&self, reference: &Reference) -> Option<Arc<gpui::RenderImage>> {
+        (reference.service == "youtube")
+            .then(|| self.images.get(&reference.id).cloned().flatten())
+            .flatten()
+    }
+}
+
+/// Plain-language reason for a failed or refused search.
+pub(super) fn search_error_message(error: &NativeError) -> String {
+    match error.code {
+        ErrorCode::RateLimit => match error.retry_after_seconds {
+            Some(seconds) => format!(
+                "{} {} {seconds} {}",
+                text("searchRateLimited"),
+                text("retryAfter"),
+                text("seconds")
+            ),
+            None => format!(
+                "{} {}",
+                text("searchRateLimited"),
+                text("searchRateLimitedLater")
+            ),
+        },
+        ErrorCode::Rejected if error.status == Some(400) => text("searchRefused"),
+        ErrorCode::Rejected => match error.status {
+            Some(status) => format!(
+                "{} (HTTP {status}). {}",
+                text("searchRejected"),
+                text("searchRetry")
+            ),
+            None => format!("{}. {}", text("searchRejected"), text("searchRetry")),
+        },
+        ErrorCode::Network => text("nativeNetwork"),
+        ErrorCode::InvalidResponse => text("nativeInvalidResponse"),
+        ErrorCode::InvalidInput => text("nativeInvalidInput"),
+        ErrorCode::Busy => text("searchWait"),
+        ErrorCode::Stale => text("searchStale"),
+        ErrorCode::Unavailable => text("searchUnavailable"),
+        ErrorCode::Auth => text("nativeAuth"),
+        ErrorCode::InsecureCredentials => text("nativeTls"),
+        ErrorCode::Credentials => text("nativeCredentials"),
+    }
+}
+
+/// A pasted address rather than words to search for.
+fn looks_like_link(input: &str) -> bool {
+    input.contains("://") || input.starts_with("www.") || input.contains("youtu.be/")
 }
 fn room_marker(s: &NativeState) -> String {
     format!(
@@ -206,26 +285,6 @@ fn page_mark<T>(page: &Page<T>) -> String {
         page.total
     )
 }
-fn marker(work: HttpWork, s: &NativeState) -> String {
-    let value = match work {
-        HttpWork::Tags | HttpWork::Tag => page_mark(&s.tags),
-        HttpWork::Favorites | HttpWork::Favorite => page_mark(&s.favorites),
-        HttpWork::Moods => page_mark(&s.moods),
-        HttpWork::Create => s
-            .created_mood
-            .as_ref()
-            .map(|m| m.id.clone())
-            .unwrap_or_default(),
-        HttpWork::Preview(_) => format!(
-            "{}:{:?}",
-            s.preview_generation,
-            s.preview.as_ref().map(|p| p.items.len())
-        ),
-        HttpWork::Identity => format!("{:?}:{}", pair(s), s.account.known),
-    };
-    format!("{value}:{:?}", s.error)
-}
-
 pub struct MusicUi {
     pub scrolling: super::ui_scroll::PanelScroll,
     pub panel: Option<Panel>,
@@ -238,6 +297,10 @@ pub struct MusicUi {
     pub icon: usize,
     pub draft: PreferenceDraft,
     pending_http: Option<PendingHttp>,
+    last_search: Option<Search>,
+    /// Why the last Search or Enter did nothing, shown under the search field.
+    pub search_feedback: Option<String>,
+    pub thumbs: Thumbs,
     attempted: [bool; 3],
     reload: [bool; 3],
     context: Option<(u64, u64, Option<String>, u64)>,
@@ -271,6 +334,7 @@ impl MusicUi {
                 InputEvent::Changed => {
                     p.music_ui.preview_valid = false;
                     p.music_ui.url_version += 1;
+                    p.music_ui.search_feedback = None;
                     if p.native.preview.is_some()
                         || p.music_ui
                             .pending_http
@@ -312,6 +376,9 @@ impl MusicUi {
             icon: 0,
             draft: PreferenceDraft::default(),
             pending_http: None,
+            last_search: None,
+            search_feedback: None,
+            thumbs: Thumbs::default(),
             attempted: [false; 3],
             reload: [false; 3],
             context: None,
@@ -325,8 +392,23 @@ impl MusicUi {
             timeout_sequence: 0,
         }
     }
+    /// Any native HTTP work, background page loads included (gates page loads).
     pub(super) fn busy(&self, s: &NativeState) -> bool {
         s.http_busy || self.pending_http.is_some()
+    }
+    /// Work the user asked for; user actions preempt background page loads.
+    pub(super) fn blocked(&self, s: &NativeState) -> bool {
+        s.foreground_busy()
+            || self
+                .pending_http
+                .as_ref()
+                .is_some_and(|pending| pending.work.page().is_none())
+    }
+    /// A search is waiting for its results.
+    pub(super) fn searching(&self) -> bool {
+        self.pending_http
+            .as_ref()
+            .is_some_and(|pending| matches!(pending.work, HttpWork::Preview(_)))
     }
 }
 
@@ -349,8 +431,11 @@ impl Player {
                     && p.music_ui.command_sequence == sequence
                     && (p.music_ui.pending_http.is_some() || p.music_ui.pending_room.is_some())
                 {
-                    // A coalesced identical response may omit the intermediate busy snapshot.
+                    // Tickets settle every request, so this only covers a stalled server.
                     // Release only our admission latch; never replay or assert server success.
+                    if p.music_ui.searching() {
+                        p.music_ui.search_feedback = Some(text("searchTimedOut"));
+                    }
                     p.music_ui.pending_http = None;
                     p.music_ui.pending_room = None;
                     p.music_ui.draft_submitted = false;
@@ -379,6 +464,9 @@ impl Player {
             input.update(cx, |i, cx| i.clear(cx));
         }
         self.music_ui.pending_http = None;
+        self.music_ui.last_search = None;
+        self.music_ui.search_feedback = None;
+        self.music_ui.thumbs = Thumbs::default();
         self.music_ui.pending_room = None;
         self.music_ui.attempted = [false; 3];
         self.music_ui.reload = [false; 3];
@@ -428,14 +516,15 @@ impl Player {
             }
             self.music_ui.context = Some(context);
         }
-        if let Some(pending) = &mut self.music_ui.pending_http
+        if let Some(pending) = &self.music_ui.pending_http
             && pending.completed(&state)
         {
-            if let HttpWork::Preview(request_id) = pending.work {
-                self.music_ui.preview_valid = state.preview.is_some()
-                    && state.preview_request_id == Some(request_id)
-                    && state.error.is_none()
-                    && self.music_ui.preview_version == self.music_ui.url_version;
+            // A page dropped for a search is neither loaded nor failed: load it again later.
+            if let Some(index) = pending.work.page() {
+                let page = [&state.tags, &state.favorites, &state.moods][index];
+                if !page.loaded && !page.failed && !page.loading {
+                    self.music_ui.attempted[index] = false;
+                }
             }
             if matches!(pending.work, HttpWork::Tag) && state.tags.stale {
                 self.music_ui.reload[0] = true;
@@ -448,6 +537,14 @@ impl Player {
             }
             self.music_ui.pending_http = None;
         }
+        // Derived from the state every time, so results that arrive after the admission
+        // latch timed out are still shown.
+        self.music_ui.preview_valid = self.music_ui.last_search.is_some_and(|search| {
+            state.preview.is_some()
+                && state.preview_request_id == Some(search.request_id)
+                && state.preview_completed_id == Some(search.request_id)
+                && search.version == self.music_ui.url_version
+        });
         if let Some((before, saw_busy)) = &mut self.music_ui.pending_room {
             *saw_busy |= state.room.busy;
             if !state.room.busy && (*saw_busy || *before != room_marker(&state)) {
@@ -514,9 +611,72 @@ impl Player {
         } else {
             self.drive_pages();
         }
+        self.sync_thumbs(window, cx);
         self.arm_native_timeout(window, cx);
         self.sync_layout(window);
         cx.notify();
+    }
+    /// Starts thumbnail fetches for the displayed results, a few at a time. New results,
+    /// edits and teardown drop the previous fetches (which aborts their HTTP).
+    fn sync_thumbs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let generation = self.native.preview_generation;
+        let shown = self.music_ui.preview_valid && self.native.preview.is_some();
+        let thumbs = &mut self.music_ui.thumbs;
+        if !shown || thumbs.generation != generation {
+            *thumbs = Thumbs {
+                generation,
+                ..Thumbs::default()
+            };
+        }
+        if shown
+            && thumbs.images.is_empty()
+            && thumbs.queue.is_empty()
+            && thumbs.inflight.is_empty()
+            && let Some(preview) = &self.native.preview
+        {
+            for item in &preview.items {
+                if item.reference.service == "youtube"
+                    && let Some(id) = YoutubeId::parse(&item.reference.id)
+                    && !thumbs.queue.contains(&id)
+                {
+                    thumbs.queue.push_back(id);
+                }
+            }
+        }
+        self.pump_thumbs(window, cx);
+    }
+    fn pump_thumbs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while self.music_ui.thumbs.inflight.len() < THUMB_CONCURRENCY
+            && let Some(id) = self.music_ui.thumbs.queue.pop_front()
+        {
+            let generation = self.music_ui.thumbs.generation;
+            let key = id.as_str().to_owned();
+            let mut request = self.artwork_loader.load(id);
+            let task_key = key.clone();
+            let task = cx.spawn_in(window, async move |this, cx| {
+                let art = (&mut request.result).await.ok().flatten();
+                let _ = this.update_in(cx, |player, window, cx| {
+                    let thumbs = &mut player.music_ui.thumbs;
+                    if thumbs.generation != generation {
+                        return;
+                    }
+                    if let Some(task) = thumbs.inflight.remove(&task_key) {
+                        task.detach();
+                    }
+                    thumbs.images.insert(
+                        task_key,
+                        art.map(|art| {
+                            Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                                art.thumb_bgra.clone(),
+                            )]))
+                        }),
+                    );
+                    player.pump_thumbs(window, cx);
+                    cx.notify();
+                });
+            });
+            self.music_ui.thumbs.inflight.insert(key, task);
+        }
     }
     fn native_submit(
         &mut self,
@@ -524,6 +684,15 @@ impl Player {
         command: NativeCommand,
         work: Option<HttpWork>,
     ) -> bool {
+        self.native_submit_ticket(authority, command, work)
+            .is_some()
+    }
+    fn native_submit_ticket(
+        &mut self,
+        authority: CommandAuthority,
+        command: NativeCommand,
+        work: Option<HttpWork>,
+    ) -> Option<u64> {
         if !authority.matches_session(&self.native)
             || !self
                 .connection
@@ -531,7 +700,7 @@ impl Player {
                 .is_some_and(|c| authority.matches_session(&c.native_state()))
         {
             self.notice = text("nativeStale");
-            return false;
+            return None;
         }
         let room_command = matches!(command, NativeCommand::Music(_));
         let identity = matches!(
@@ -545,10 +714,10 @@ impl Player {
             self.authority.fence(&self.native);
             self.reset_playback_authority();
         }
-        if self
+        if let Some(ticket) = self
             .connection
             .as_ref()
-            .is_some_and(|c| c.send_native(authority, command))
+            .and_then(|c| c.send_native_ticket(authority, command))
         {
             self.notice.clear();
             self.music_ui.command_sequence = self.music_ui.command_sequence.wrapping_add(1);
@@ -556,17 +725,68 @@ impl Player {
                 self.music_ui.pending_room = Some((room_marker(&self.native), false));
             }
             if let Some(work) = work {
-                self.music_ui.pending_http = Some(PendingHttp {
-                    work,
-                    saw_busy: false,
-                    before: marker(work, &self.native),
-                });
+                // The connection drops a background page load for a user action: it loads
+                // again once the slot is free.
+                if work.page().is_none()
+                    && let Some(index) = self
+                        .music_ui
+                        .pending_http
+                        .as_ref()
+                        .and_then(|pending| pending.work.page())
+                {
+                    self.music_ui.attempted[index] = false;
+                }
+                self.music_ui.pending_http = Some(PendingHttp { work, ticket });
             }
-            true
+            Some(ticket)
         } else {
             self.notice = text("nativeQueueBusy");
-            false
+            None
         }
+    }
+    /// Why searching is impossible right now, in the user's terms. The gate itself is the
+    /// server's: a live Music room membership with the add grant.
+    pub(super) fn search_gate(&self) -> Option<String> {
+        let state = &self.native;
+        if self.connection.is_none() {
+            return Some(text("noRoom"));
+        }
+        if state.account.expired && !state.http_busy {
+            return Some(text("searchGateSession"));
+        }
+        if !state.connected || state.room.queue_mode.is_none() {
+            return Some(text("searchGateConnecting"));
+        }
+        if state.room.queue_mode.as_deref() != Some("music") {
+            return Some(text("searchGateNotMusic"));
+        }
+        if state.room.own().is_none() {
+            return Some(text("searchGateNotMember"));
+        }
+        if !state.can().add_mix {
+            return Some(text("addPermissionNeeded"));
+        }
+        None
+    }
+    /// The checks shared by the Search button and Enter.
+    pub(super) fn search_check(&self, input: &str) -> Result<(), String> {
+        if let Some(gate) = self.search_gate() {
+            return Err(gate);
+        }
+        if input.is_empty() {
+            return Err(text("searchEmpty"));
+        }
+        if !looks_like_link(input) && input.chars().count() < 3 {
+            return Err(text("searchTooShort"));
+        }
+        let waiting =
+            self.music_ui.pending_http.as_ref().is_some_and(|p| {
+                p.work.page().is_none() && !matches!(p.work, HttpWork::Preview(_))
+            });
+        if self.native.search_blocked() || waiting {
+            return Err(text("searchWait"));
+        }
+        Ok(())
     }
     pub(super) fn drive_pages(&mut self) {
         let authority = self.native.authority();
@@ -613,8 +833,10 @@ impl Player {
             cx.notify();
             return;
         }
-        let free = !self.music_ui.busy(&self.native);
-        let room_free = self.native.connected && !self.room_busy() && !self.native.http_busy;
+        let free = !self.music_ui.blocked(&self.native);
+        let pages_free = !self.music_ui.busy(&self.native);
+        let room_free =
+            self.native.connected && !self.room_busy() && !self.native.foreground_busy();
         let can = self.native.can();
         match action {
             Action::Panel(panel) => {
@@ -667,7 +889,7 @@ impl Player {
                 self.music_ui.pending_http = None;
                 self.native_submit(authority, NativeCommand::RefreshRoom, None);
             }
-            Action::Tags(offset) if free && can.account_write => {
+            Action::Tags(offset) if pages_free && can.account_write => {
                 if let Some(id) = self.native.room.track_id() {
                     self.music_ui.attempted[0] = true;
                     self.native_submit(
@@ -680,7 +902,7 @@ impl Player {
                     );
                 }
             }
-            Action::Favorites(offset) if free && can.account_write => {
+            Action::Favorites(offset) if pages_free && can.account_write => {
                 self.music_ui.attempted[1] = true;
                 self.native_submit(
                     authority,
@@ -688,7 +910,7 @@ impl Player {
                     Some(HttpWork::Favorites),
                 );
             }
-            Action::Moods(offset) if free && can.account_write => {
+            Action::Moods(offset) if pages_free && can.account_write => {
                 self.music_ui.attempted[2] = true;
                 self.native_submit(
                     authority,
@@ -755,16 +977,32 @@ impl Player {
                 );
             }
             Action::ResetDraft => self.music_ui.draft.read(&self.native, true),
-            Action::Preview if free && can.add_mix => {
+            Action::Preview => {
                 let input = self.music_ui.url.read(cx).value().trim().to_owned();
-                let request_id = self.music_ui.command_sequence.wrapping_add(1);
-                self.music_ui.preview_valid = false;
-                self.music_ui.preview_version = self.music_ui.url_version;
-                self.native_submit(
-                    authority,
-                    NativeCommand::SearchMusic { input, request_id },
-                    Some(HttpWork::Preview(request_id)),
-                );
+                match self.search_check(&input) {
+                    Err(reason) => self.music_ui.search_feedback = Some(reason),
+                    Ok(()) => {
+                        let request_id = self.music_ui.command_sequence.wrapping_add(1);
+                        self.music_ui.preview_valid = false;
+                        self.music_ui.preview_version = self.music_ui.url_version;
+                        self.music_ui.search_feedback = None;
+                        if self
+                            .native_submit_ticket(
+                                authority,
+                                NativeCommand::SearchMusic { input, request_id },
+                                Some(HttpWork::Preview(request_id)),
+                            )
+                            .is_some()
+                        {
+                            self.music_ui.last_search = Some(Search {
+                                request_id,
+                                version: self.music_ui.url_version,
+                            });
+                        } else {
+                            self.music_ui.search_feedback = Some(self.notice.clone());
+                        }
+                    }
+                }
             }
             Action::Request(intent, reference, version)
                 if room_free
@@ -832,6 +1070,11 @@ impl Player {
                 );
             }
             Action::ToggleUpcoming => self.show_up_next = !self.show_up_next,
+            Action::Motion(preference) => {
+                crate::theme::set_preference(preference, cx);
+                self.prefs.motion = preference;
+                self.save_prefs();
+            }
             _ => (),
         }
         self.arm_native_timeout(window, cx);
@@ -910,6 +1153,30 @@ fn provider_name(service: &str) -> String {
         "pluto" => "Pluto TV".into(),
         "direct" | "hls" | "dash" => text("directSource"),
         other => other.to_owned(),
+    }
+}
+/// 16:9 thumbnail of a search result, or the current logo while it loads (or has none).
+fn result_thumbnail(image: Option<Arc<gpui::RenderImage>>) -> Div {
+    let frame = div()
+        .w(px(64.))
+        .h(px(36.))
+        .flex_shrink_0()
+        .rounded(px(6.))
+        .overflow_hidden()
+        .border_1()
+        .border_color(rgb(ui::BORDER));
+    match image {
+        Some(image) => frame.child(
+            gpui::img(image)
+                .size_full()
+                .object_fit(gpui::ObjectFit::Cover),
+        ),
+        None => frame
+            .bg(rgb(ui::SECONDARY))
+            .flex()
+            .items_center()
+            .justify_center()
+            .child(ui::logo(16.)),
     }
 }
 pub(super) fn result_meta(service: &str, length: Option<f64>) -> String {
@@ -1101,7 +1368,7 @@ impl Player {
             .border_color(rgb(if selected {
                 ui::AMBER
             } else if accent {
-                0x5a4520
+                ui::AMBER_SURFACE
             } else {
                 ui::BORDER
             }))
@@ -1193,7 +1460,7 @@ impl Player {
     /// favorite shortcut. Only confirmed own Active tags are blue; Unknown cannot be toggled.
     fn mood_chip(&self, mood: &Mood, scope: &str, with_favorite: bool, cx: &Context<Self>) -> Div {
         let can_write = self.native.can().account_write;
-        let own = can_write && !self.music_ui.busy(&self.native);
+        let own = can_write && !self.music_ui.blocked(&self.native);
         let state = self.tag_state(&mood.id);
         let confirmed = state == ActiveTag::Active;
         let blue = confirmed && self.native.account.logged_in && !self.native.account.expired;
@@ -1237,7 +1504,7 @@ impl Player {
             .items_center()
             .flex_shrink_0()
             .h(px(32.))
-            .rounded(px(10.))
+            .rounded_full()
             .border_1()
             .border_color(rgb(if blue {
                 ui::PERSONAL_BORDER
@@ -1264,18 +1531,25 @@ impl Player {
                 )
                 .h_full()
                 .pl(px(10.))
-                .pr(px(if with_favorite { 8. } else { 12. }))
+                .pr(px(if with_favorite { 8. } else { 11. }))
                 .gap(px(6.))
-                .text_size(px(12.))
+                .text_size(px(13.))
                 .text_color(rgb(foreground))
+                .when(blue, |s| s.font_weight(gpui::FontWeight::SEMIBOLD))
                 .when(tag_enabled, |s| {
-                    s.hover(move |s| s.bg(rgb(if blue { 0x29425e } else { ui::SECONDARY })))
+                    s.hover(move |s| {
+                        s.bg(rgb(if blue {
+                            ui::PERSONAL_BORDER
+                        } else {
+                            ui::SECONDARY
+                        }))
+                    })
                 })
                 .tooltip(move |_, cx| cx.new(|_| ui::Tip(tag_tip.clone())).into())
-                .child(ui::icon(ui::mood_glyph(&mood.icon_key), 14.).text_color(rgb(foreground)))
+                .child(ui::icon(ui::mood_glyph(&mood.icon_key), 16.).text_color(rgb(foreground)))
                 .child(div().max_w(px(150.)).truncate().child(mood.name.clone()))
                 .when(blue, |s| {
-                    s.child(ui::icon("check", 12.).text_color(rgb(ui::PERSONAL)))
+                    s.child(ui::icon("check", 14.).text_color(rgb(ui::PERSONAL)))
                 }),
             )
             .when(with_favorite, |s| {
@@ -1461,7 +1735,7 @@ impl Player {
 
     fn account_panel(&self, cx: &Context<Self>) -> Div {
         let account = &self.native.account;
-        let free = !self.music_ui.busy(&self.native) && self.connection.is_some();
+        let free = !self.music_ui.blocked(&self.native) && self.connection.is_some();
         let signed_in = account.logged_in && !account.expired;
         let check = self.button(
             "refreshAccount",
@@ -1575,7 +1849,7 @@ impl Player {
             Some(name) => format!("{} {name}", text("suggestedBy")),
             None => text("contributorMoods"),
         };
-        let free = can.account_write && !self.music_ui.busy(&self.native);
+        let free = can.account_write && !self.music_ui.blocked(&self.native);
         column()
             .gap(px(20.))
             .when(!can.account_write, |s| {
@@ -1966,24 +2240,54 @@ impl Player {
 
     fn add_panel(&self, cx: &Context<Self>) -> Div {
         let can = self.native.can();
-        let ready = self.native.connected && !self.room_busy() && !self.music_ui.busy(&self.native);
-        let searching = self
-            .music_ui
-            .pending_http
-            .as_ref()
-            .is_some_and(|pending| matches!(pending.work, HttpWork::Preview(_)));
-        let query_empty = self.music_ui.url.read(cx).value().trim().is_empty();
-        let mut panel = column()
-            .gap(px(14.))
-            .when(!self.native.room.active(), |s| {
-                s.child(ui::banner(ui::Tone::Warn, text("musicModeNeeded")))
-            })
-            .when(self.native.room.active() && !can.add_mix, |s| {
-                s.child(ui::banner(ui::Tone::Warn, text("addPermissionNeeded")))
-            });
+        let ready =
+            self.native.connected && !self.room_busy() && !self.music_ui.blocked(&self.native);
+        let searching = self.music_ui.searching();
+        let query = self.music_ui.url.read(cx).value().trim().to_owned();
+        let check = self.search_check(&query);
+        let gate = self.search_gate();
+        let mut panel = column().gap(px(14.));
+        if let Some(gate) = &gate {
+            // The explicit way out when the session or the membership needs a resync.
+            let recover = self.native.account.expired
+                || (self.native.room.queue_mode.as_deref() == Some("music")
+                    && self.native.room.own().is_none());
+            panel = panel.child(ui::banner(ui::Tone::Warn, gate.clone()).when(
+                recover && self.connection.is_some(),
+                |s| {
+                    s.child(self.button(
+                        "refreshRoom",
+                        Action::RefreshRoom,
+                        !self.native.search_blocked(),
+                        cx,
+                    ))
+                },
+            ));
+        }
         if let Some(offer) = &self.native.room.confirmation {
             panel = panel.child(self.confirmation_card(offer, ready, cx));
         }
+        // Why the last search failed, with its status (429, 400...), right under the field.
+        let failure = self
+            .music_ui
+            .last_search
+            .filter(|search| {
+                !searching
+                    && search.version == self.music_ui.url_version
+                    && self.native.preview_completed_id == Some(search.request_id)
+            })
+            .and(self.native.preview_error.as_ref())
+            .map(search_error_message);
+        // A disabled Search button always says why, once something is typed.
+        let waiting = gate.is_none()
+            && !query.is_empty()
+            && check.as_ref().err() == Some(&text("searchWait"));
+        let feedback = self
+            .music_ui
+            .search_feedback
+            .clone()
+            .or_else(|| waiting.then(|| text("searchWait")))
+            .filter(|message| gate.as_ref() != Some(message));
         panel = panel.child(
             column()
                 .gap(px(6.))
@@ -2000,11 +2304,21 @@ impl Player {
                             Some("search"),
                             text("previewUrl"),
                             Action::Preview,
-                            ready && can.add_mix && !query_empty,
+                            check.is_ok(),
                             cx,
                         )),
                 )
-                .child(label("addHelp")),
+                .child(match (&failure, &feedback) {
+                    (Some(message), _) => div()
+                        .text_size(px(12.))
+                        .text_color(rgb(ui::DANGER))
+                        .child(message.clone()),
+                    (None, Some(message)) => div()
+                        .text_size(px(12.))
+                        .text_color(rgb(ui::AMBER))
+                        .child(message.clone()),
+                    (None, None) => label("addHelp"),
+                }),
         );
         if searching {
             panel = panel.child(ui::banner(ui::Tone::Info, text("searching")));
@@ -2022,6 +2336,7 @@ impl Player {
                 }));
             for (index, item) in value.items.iter().enumerate() {
                 let (mix_tip, next_tip) = (mix_tip.clone(), next_tip.clone());
+                let thumb = self.music_ui.thumbs.get(&item.reference);
                 results = results.child(
                     line()
                         .gap(px(10.))
@@ -2030,7 +2345,7 @@ impl Player {
                         .bg(rgb(ui::POPOVER))
                         .border_1()
                         .border_color(rgb(ui::BORDER))
-                        .child(ui::artwork(40., None))
+                        .child(result_thumbnail(thumb))
                         .child(
                             column()
                                 .gap(px(2.))
@@ -2099,7 +2414,7 @@ impl Player {
         let ready = self.native.connected
             && self.native.room.active()
             && !self.room_busy()
-            && !self.native.http_busy;
+            && !self.native.foreground_busy();
         let paged = page.loaded && !page.stale;
         let entries = if paged {
             page.items.as_slice()
@@ -2209,6 +2524,32 @@ impl Player {
                 .child(div().text_size(px(13.)).child(text(title)))
                 .child(label(help))
         };
+        let mood = crate::theme::mood(cx);
+        let preference = mood.preference;
+        let system = if mood.system_animations {
+            "animationSystemOn"
+        } else {
+            "animationSystemOff"
+        };
+        let motion = wrap().gap(px(4.)).children(
+            [
+                (MotionPreference::System, system),
+                (MotionPreference::On, "on"),
+                (MotionPreference::Off, "off"),
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, (choice, key))| {
+                self.action_button(
+                    ("motion", index),
+                    text(key),
+                    Action::Motion(choice),
+                    true,
+                    preference == choice,
+                    cx,
+                )
+            }),
+        );
         column()
             .gap(px(18.))
             .child(label("volumeHelp"))
@@ -2225,6 +2566,15 @@ impl Player {
                         cx,
                     )),
             )
+            .child(
+                line()
+                    .gap(px(12.))
+                    .child(setting("animationSetting", "animationSettingHelp"))
+                    .child(motion),
+            )
+            .when_some(self.animation_frames(cx), |s, frames| {
+                s.child(label("animationFrames").child(frames))
+            })
             .child(
                 line()
                     .gap(px(12.))
@@ -2251,6 +2601,29 @@ impl Player {
                         cx,
                     )),
             )
+    }
+
+    /// Debug builds: frames drawn by each window's sky, to check that hidden, minimized or
+    /// cloaked windows draw none.
+    #[cfg(debug_assertions)]
+    fn animation_frames(&self, cx: &Context<Self>) -> Option<String> {
+        let main = self
+            .layers
+            .as_ref()
+            .map(|layers| crate::sky::frames(&layers.sky, cx))
+            .unwrap_or_default();
+        let widget = self
+            .widget
+            .and_then(|widget| widget.read(cx).ok())
+            .and_then(|widget| widget.sky_frames(cx));
+        Some(match widget {
+            Some(widget) => format!(" · main {main} · widget {widget}"),
+            None => format!(" · main {main}"),
+        })
+    }
+    #[cfg(not(debug_assertions))]
+    fn animation_frames(&self, _: &Context<Self>) -> Option<String> {
+        None
     }
 
     pub fn detail_panel(&self, cx: &Context<Self>) -> Div {
@@ -2362,10 +2735,25 @@ impl Player {
     pub fn status_banners(&self, cx: &Context<Self>) -> Option<Div> {
         let mut items: Vec<Div> = Vec::new();
         let mut refresh = false;
-        if self.native.http_busy || self.native.room.busy || self.music_ui.pending_http.is_some() {
+        let add_panel = self.music_ui.panel == Some(Panel::Add);
+        // Notices (rejected, stale, queue busy, outcome unknown...) are visible with any panel.
+        if !self.notice.is_empty() {
+            items.push(ui::banner(ui::Tone::Warn, self.notice.clone()));
+        }
+        // Background page loads and the search (shown in its panel) are not worth a banner.
+        let foreground = self.music_ui.pending_http.as_ref().is_some_and(|p| {
+            p.work.page().is_none() && !(add_panel && matches!(p.work, HttpWork::Preview(_)))
+        }) || (self.native.http_busy
+            && !matches!(
+                self.native.http_activity,
+                Some(HttpActivity::Page | HttpActivity::Search)
+            ));
+        if foreground || self.native.room.busy {
             items.push(ui::banner(ui::Tone::Info, text("nativePending")));
         }
-        if let Some(error) = &self.native.error {
+        // The Add panel explains a search failure next to the field.
+        let shown_inline = add_panel && self.native.error == self.native.preview_error;
+        if let Some(error) = self.native.error.as_ref().filter(|_| !shown_inline) {
             let key = match error.code {
                 ErrorCode::Network => "nativeNetwork",
                 ErrorCode::Auth => "nativeAuth",
@@ -2445,7 +2833,7 @@ impl Player {
                         s.child(self.button(
                             "refreshRoom",
                             Action::RefreshRoom,
-                            !self.native.http_busy,
+                            !self.native.search_blocked(),
                             cx,
                         ))
                     }),
@@ -2482,42 +2870,74 @@ mod tests {
     }
 
     #[test]
-    fn edit_snapshot_cannot_complete_a_newer_search() {
-        let mut state = NativeState {
-            preview_request_id: Some(10),
-            preview_completed_id: Some(10),
-            ..NativeState::default()
-        };
-        let mut pending = PendingHttp {
+    fn latches_release_by_ticket_even_when_nothing_else_changes() {
+        let mut state = NativeState::default();
+        let search = PendingHttp {
             work: HttpWork::Preview(11),
-            saw_busy: false,
-            before: marker(HttpWork::Preview(11), &state),
+            ticket: 4,
         };
-        // The queued input edit arrives after submission but before search 11 starts.
-        state.preview_generation += 1;
-        state.preview_request_id = None;
-        assert!(!pending.completed(&state));
-        // Neither another operation's error nor the search's busy snapshot completes it.
-        state.error = Some(undertone_desktop::session::NativeError {
-            code: undertone_desktop::session::ErrorCode::Busy,
-            retry_after_seconds: None,
-            status: None,
-        });
-        assert!(!pending.completed(&state));
-        state.preview_request_id = Some(11);
-        state.http_busy = true;
-        assert!(!pending.completed(&state));
-        state.http_busy = false;
-        state.error = None;
-        state.preview_completed_id = Some(11);
-        assert!(pending.completed(&state));
-        // Coalesced success, empty result, or failure also completes without observing busy.
-        let mut coalesced = PendingHttp {
-            work: HttpWork::Preview(11),
-            saw_busy: false,
-            before: String::new(),
+        assert!(!search.completed(&state));
+        state.dequeued_ticket = 4;
+        state.inflight_ticket = Some(4);
+        assert!(!search.completed(&state));
+        // An identical (coalesced) answer changes no marker, yet the ticket settles.
+        state.inflight_ticket = None;
+        assert!(search.completed(&state));
+        // A later command rejected while an earlier one is in flight settles only itself.
+        state.dequeued_ticket = 6;
+        state.inflight_ticket = Some(5);
+        let page = PendingHttp {
+            work: HttpWork::Moods,
+            ticket: 5,
         };
-        assert!(coalesced.completed(&state));
+        assert!(!page.completed(&state));
+        assert!(
+            PendingHttp {
+                work: HttpWork::Tag,
+                ticket: 6
+            }
+            .completed(&state)
+        );
+        assert_eq!(HttpWork::Moods.page(), Some(2));
+        assert_eq!(HttpWork::Tags.page(), Some(0));
+        assert_eq!(HttpWork::Preview(1).page(), None);
+    }
+
+    #[test]
+    fn search_errors_say_what_happened() {
+        let error = |code, status, retry| NativeError {
+            code,
+            status,
+            retry_after_seconds: retry,
+        };
+        let limited = search_error_message(&error(ErrorCode::RateLimit, Some(429), Some(7)));
+        assert!(limited.starts_with(&text("searchRateLimited")) && limited.contains(" 7 "));
+        assert!(
+            search_error_message(&error(ErrorCode::RateLimit, Some(429), None))
+                .contains(&text("searchRateLimitedLater"))
+        );
+        assert_eq!(
+            search_error_message(&error(ErrorCode::Rejected, Some(400), None)),
+            text("searchRefused")
+        );
+        assert!(
+            search_error_message(&error(ErrorCode::Rejected, Some(500), None)).contains("HTTP 500")
+        );
+        assert_eq!(
+            search_error_message(&error(ErrorCode::Busy, None, None)),
+            text("searchWait")
+        );
+        for message in [
+            text("searchRefused"),
+            text("searchWait"),
+            text("searchGateNotMusic"),
+            text("searchTooShort"),
+        ] {
+            assert!(!message.starts_with("search"), "missing string: {message}");
+        }
+        assert!(looks_like_link("https://youtu.be/abcdefghijk"));
+        assert!(looks_like_link("www.youtube.com/watch?v=x"));
+        assert!(!looks_like_link("ab"));
     }
     #[test]
     fn partial_tags_are_unknown_and_stale_active_tags_are_not_blue() {

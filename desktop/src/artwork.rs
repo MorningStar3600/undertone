@@ -58,6 +58,9 @@ impl YoutubeId {
                 .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
         .then(|| Self(id.into()))
     }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
     pub fn thumbnail_url(&self) -> String {
         format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", self.0)
     }

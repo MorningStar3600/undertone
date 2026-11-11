@@ -1,10 +1,10 @@
 //! Single-line native input built on GPUI's EntityInputHandler (including Windows IME).
 //! No browser, persistence, logging, or clipboard export. Masked fields also reject paste.
+use super::ui::{self, rgb};
 use gpui::{
     App, Bounds, Context, CursorStyle, ElementInputHandler, EntityInputHandler, EventEmitter,
     FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, Pixels, Point, Render,
-    ShapedLine, TextRun, UTF16Selection, Window, canvas, div, fill, point, prelude::*, px, rgb,
-    size,
+    ShapedLine, TextRun, UTF16Selection, Window, canvas, div, fill, point, prelude::*, px, size,
 };
 use std::ops::Range;
 
@@ -371,13 +371,13 @@ impl Render for NativeInput {
             .track_focus(&self.focus)
             .tab_stop(true)
             .cursor(CursorStyle::IBeam)
-            .bg(rgb(0x24211e))
+            .bg(rgb(ui::POPOVER))
             .border_1()
-            .border_color(rgb(0x39342e))
+            .border_color(rgb(ui::BORDER))
             .rounded(px(12.))
-            .focus(|s| s.border_color(rgb(0xffbe3d)))
+            .focus(|s| s.border_color(rgb(ui::AMBER)))
             .overflow_hidden()
-            .font_family("Segoe UI")
+            .font_family(crate::theme::text())
             .text_size(px(14.))
             .line_height(px(24.))
             .on_key_down(cx.listener(Self::key))
@@ -420,7 +420,7 @@ impl Render for NativeInput {
                             let run = TextRun {
                                 len: display.len(),
                                 font: style.font(),
-                                color: rgb(if empty { 0xaaa296 } else { 0xf7f0e6 }).into(),
+                                color: rgb(if empty { ui::MUTED } else { ui::TEXT }),
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
@@ -475,7 +475,7 @@ impl Render for NativeInput {
                                     point(origin.x + line.x_for_index(start), bounds.top()),
                                     point(origin.x + line.x_for_index(end), bounds.bottom()),
                                 ),
-                                rgb(0x20354c),
+                                rgb(ui::AMBER_SURFACE),
                             ));
                         }
                         let _ = line.paint(origin, px(24.), window, cx);
@@ -485,7 +485,7 @@ impl Render for NativeInput {
                                     point(origin.x + cursor, bounds.top()),
                                     size(px(1.), bounds.size.height),
                                 ),
-                                rgb(0xffbe3d),
+                                rgb(ui::AMBER),
                             ));
                         }
                         if let Some(marked) = marked {
@@ -497,7 +497,7 @@ impl Render for NativeInput {
                                     ),
                                     point(origin.x + line.x_for_index(marked.end), bounds.bottom()),
                                 ),
-                                rgb(0x8bc0ff),
+                                rgb(ui::TEXT_SOFT),
                             ));
                         }
                     },
