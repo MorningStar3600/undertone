@@ -1,10 +1,51 @@
 # Undertone native player and Windows widget
 
-The native GPUI UI uses warm dark `#100f0e`, card `#1b1917`, amber `#ffbe3d`
-controls, Segoe UI, and blue `#8bc0ff` only for confirmed personal Active tags
-(and native input selection). Soft red `#f0957c` marks exclusions and errors.
-English UI strings live in desktop-en.json. Tokens, glyphs, cards, banners,
+Both windows take the colors of the room's current **ambience** (see below): the
+background, ink, soft ink, muted text, accent and on-accent colors come from one of
+the twelve dark palettes of `common/ambience.ts`, cards are translucent over an
+animated sky, and the accent marks play, progress and the logo. Confirmed personal
+Active tags use an ink tint with a check; soft red `#f0957c` marks exclusions and
+errors. Typography follows the design: Segoe UI Variable Display (light) for titles
+and the wordmark, Segoe UI Variable Text for body text, and Sitka in italics for the
+ambience name and "brought by"; each falls back to the first installed family
+(Segoe UI, then Palatino Linotype/Georgia for the voice). English UI strings live in
+desktop-en.json; desktop-only additions wait in `desktop/src/strings-en.json` (the
+shared file wins). Tokens (`theme.rs`), glyphs and logos, cards, banners,
 progress/volume tracks and slider hit-testing are shared by both windows (ui.rs).
+
+## Ambiences and the animated sky
+
+`desktop/src/ambience.rs` is the Rust copy of `common/ambience.ts` (palettes, motion
+families, logos, OKLab matching rules); a unit test checks it against
+`common/tests/fixtures/ambience.json`, including every pixel vector. When the cover
+of the current YouTube track is fetched, the loader crops its central 16:9 band
+(hqdefault stills are 4:3 with letterbox bars), reduces it to 32 x 32 (Triangle)
+and picks the ambience off the UI thread; the result is cached with the image. No
+cover, a failed fetch or no room gives *heure bleue*. The logo follows the ambience
+(logo N with ambience N); `ambience::PINNED_LOGO` pins a single logo later.
+
+Each window owns one sky (`sky.rs`): the 170 degree background gradient plus the
+ambience's motion family (drift, rise, sway, ripple, orbit, breathe, curtain,
+pendulum, aurora, halo, call, sweep), painted as soft Gaussian-blurred glows of the
+three palette colors. Rotations become arcs, beams and rings become chains of
+overlapping glows; cycles of 5 to 26 s move visibly within 2-3 s, without flashes,
+particles or neon. Changing ambience crossfades the two scenes in 0.9 s and the
+palette tokens are interpolated, so cards, text and accent follow. The widget's
+transparent corners never receive glow (the sky is clipped to the rounded card).
+
+Performance: the window content is a cached view (`sky::Body`), so an animation
+frame repaints the sky and replays the content's previous layout instead of
+rebuilding it. Frames are scheduled per window by a small pure pacer
+(`ambience::Pacer`): about 30 per second while that window is visible and
+animations are on; **none** while it is minimized, hidden or DWM-cloaked (another
+virtual desktop): a 1 s visibility probe draws nothing and the animation clock is
+frozen. With the main window minimized and the widget open, only the widget
+animates. When Windows "Show animations" (`SPI_GETCLIENTAREAANIMATION`) is off, a
+static frame is shown and no timer runs; Settings > Animated background offers
+System / On / Off, saved locally. Activation, minimize/restore and setting changes
+wake the sky at once. Debug builds show both windows' frame counters in Settings,
+and `paused_windows_schedule_no_frames` asserts that the paused states schedule no
+frames.
 
 ## Main window composition
 
@@ -13,15 +54,17 @@ tag a mood, search and add, and switch to the widget and back.
 
 -   Disconnected: a single centred card (title, one sentence, room-link field with
     an amber Join button, link/clipboard hint, failure banner). No disabled player.
--   Top bar (52 px): Undertone mark, a room pill (live dot, room name, authoritative
-    listener count, quiet Refresh room icon), then Add music (amber pill), the
-    account pill (username or Sign in), Settings, Widget toggle and Leave room.
--   Left column, no panel open: the current-track card (128 px artwork, NOW PLAYING
-    eyebrow, two-line title, artist, Added by contributor, measured seek bar,
-    volume icon + measured slider, centred previous/play/next), the
-    "My moods on this track" one-click chip strip (your moods first, then the
-    contributor's suggestions, with All moods), and the status line with banners
-    that appear only when something needs attention.
+-   Top bar (52 px): the ambience logo and "undertone" wordmark, a room pill (live
+    dot, room name, authoritative listener count, quiet Refresh room icon), then Add
+    music (accent pill), the account pill (username or Sign in), Settings, Widget
+    toggle and Leave room.
+-   Left column, no panel open: the current-track card (the ambience name in the
+    italic voice with "ambiance NN", 128 px artwork, a light two-line title, artist,
+    "brought by" contributor, measured seek bar, volume icon + measured slider,
+    centred previous/play/next, elapsed / total time), the "My moods on this track"
+    one-click pill strip (your moods first, then the contributor's suggestions, with
+    All moods), and the status line with banners that appear only when something
+    needs attention (notices included).
 -   Left column, panel open: a compact track strip (artwork, title, transport) stays
     above one panel card. Moods has two tabs, This track and Room preferences.
 -   Right column (320 px): the lazily created YouTube provider at the top, then the
@@ -37,17 +80,32 @@ when there are any), Queue (numbered rows, pagination only when needed) and
 Settings (this device: upcoming visibility, widget, leave room).
 Page states for moods appear only when a page failed, is not loaded or has more
 entries. Mood chips: the body toggles your tag, the heart toggles the favorite.
-Search results reuse the embedded artwork glyph: result thumbnails are not fetched.
+YouTube search results show their thumbnail (16:9), fetched through the same
+bounded artwork loader and cache, at most three at a time, cancelled when the
+results change; other providers keep the logo placeholder.
 
 ## Separate windows and provider ownership
 
 The full player stays 880 x 680 logical pixels. **Widget** toggles one separate
-410 x 661 native GPUI top-level window. Its 20 px rounded card follows the supplied
-widget reference: 52 px draggable header (Add, pin, Settings, minimize, close),
-20 px content padding, 94 px current artwork, title/artist, progress, local volume,
-centred transport, mood chips, two upcoming rows, one Add a track button and a quiet
-status footer with a Quit icon. Outside a room it shows only "Not in a room" and an
-Open Undertone action. There is no video block in the widget. Missing artists, contributor names, durations and images are never invented.
+410 x 628 native GPUI top-level window whose whole 22 px rounded card is the
+animated ambience surface, per the "twelve moods" design: header lockup (ambience
+logo + wordmark) with pin, fold, minimize and close on the right; room line (live
+dot, name, listeners, initials, Open room); the ambience name in the italic voice
+with "ambiance NN"; an 88 px cover hero with a light display title, artist and
+"brought by <contributor>"; progress; transport row (mute + local volume |
+previous / play / next | elapsed / total); my moods pills (with All moods); up next
+(two rows, See queue, Add a track); and a status footer between Settings and Quit.
+Fold turns it into a 410 x 68 bar (logo, cover, title, artist · contributor, play,
+unfold, hairline progress). Outside a room it shows only "Not in a room" and an
+Open Undertone action. There is no video block in the widget.
+
+The widget can be dragged from anywhere that is not a control: a full-size
+`WindowControlArea::Drag` underlay (native HTCAPTION) sits under the card and every
+control occludes it. The underlay lives in the uncached root because GPUI does not
+replay window-control hitboxes of a reused view. Its last place and folded state are
+kept for the session and in `%APPDATA%\Undertone\desktop.json` (with the animation
+setting; nothing about rooms or accounts), and reopening clamps it fully onto the
+display it overlaps most, or the nearest one. Missing artists, contributor names, durations and images are never invented.
 Current contributor names are shown only when authoritative participant metadata
 is available. Queue DTOs supply no provider video ID/art URL or duration, so queue
 rows use the embedded Undertone artwork and omit duration. Open room, Add a track,
@@ -62,8 +120,8 @@ native_window.rs wrapper instead borrows this window's raw-window-handle on the
 UI thread and calls SetWindowPos(HWND_TOPMOST/HWND_NOTOPMOST) with SWP_NOACTIVATE,
 SWP_NOMOVE, SWP_NOSIZE and SWP_NOOWNERZORDER. It never retains an HWND or changes
 another process's windows. Failure is localized in the widget footer. Pin and
-ordinary state/art/progress updates never activate a window. The custom header's
-GPUI WindowControlArea::Drag maps to native Windows HTCAPTION for moving it.
+ordinary state/art/progress updates never activate a window. Moving it uses the
+drag underlay described above (GPUI WindowControlArea::Drag, native HTCAPTION).
 This is a floating desktop window, not the Windows 11 Widgets feed. Other topmost
 windows, exclusive fullscreen and the secure desktop are subject to Windows rules.
 
@@ -93,10 +151,12 @@ the existing Tokio runtime, HTTPS only, no proxies/redirects, a 3 s connect time
 and 5 s total request timeout. Bodies are capped at 512 KiB even with chunked HTTP.
 Decoding accepts JPEG/PNG still images only, at most 1024 x 1024 with an 8 MiB
 best-effort decoder allocation budget, then bounds the displayed image to 480 x 480.
-The four-entry in-memory cache includes misses. There is no disk cache, remote
-GPUI img URL, new HTTP client inside GPUI, animation, SVG decode or browser fetch.
-One decoded GPUI RenderImage is shared by the main and widget artwork slots.
-Absent, loading, rejected and unavailable artwork use the embedded Undertone glyph.
+The displayed image is the central 16:9 band (no letterbox bars); a 160 x 90 row
+thumbnail and the ambience are computed with it, off the UI thread. The twelve-entry
+in-memory cache includes misses. There is no disk cache, remote GPUI img URL, new
+HTTP client inside GPUI, animation, SVG decode or browser fetch. One decoded GPUI
+RenderImage is shared by the main and widget artwork slots. Absent, loading,
+rejected and unavailable artwork use the current ambience logo.
 A replacement request aborts HTTP. Monotonic atomic playback-source selection fences
 track completions, including A -> B -> A; fresh native account/socket/room authority
 is checked again on delivery. Clear, disconnect, authority fencing and atomic
@@ -144,10 +204,21 @@ raw-window-handle and windows); the lockfile adds no package versions.
     and Save Renew are distinct operations with an explanation of Renew. Live
     membership, Music mode and `can.preferences` gate writes. Conflicts/uncertainty
     expose Retry saved intent and Refresh room; no mutation is automatically replayed.
--   Add music previews one URL and displays the real title. Mix and Next are explicit,
+-   Add music searches a title, an artist or a link and displays the real titles.
+    Search and Enter apply the same checks (gate, empty query, fewer than 3
+    characters for words, another account/write request running) and say why when
+    they do nothing. The gate stays the server's (Music room, live membership, add
+    grant) but the reason is explicit: connecting, not a Music room, not a live
+    member yet (with Refresh room), session needing a refresh, or no add permission.
+    A search preempts background mood page loads, supersedes an older search, and
+    its failure stays next to the field with its status: 429 "too many searches"
+    with Retry-After, 400 "refused: quota used up or query too short", other HTTP
+    errors, network, stale or busy. Unreadable result items are skipped instead of
+    failing the whole answer; search bodies may reach 2 MiB. Results that arrive
+    after the local latch timed out are still shown. Mix and Next are explicit,
     permission-gated actions using the native stored reference; no whole preview
     payload or library checkbox is submitted. Displayed previews have a local
-    version, so editing the URL invalidates their actions. New requests receive a
+    version, so editing the query invalidates their actions. New requests receive a
     new ID; native Retry preserves the original request ID and reference.
 -   Confirmation renders the authoritative participant names and moods from the
     offer. Its action captures the opaque `ConfirmationOffer` shown at render and
@@ -193,12 +264,21 @@ track changes fence track actions and reset tag-page loading without changing ro
 preferences. The typed native server API remains authoritative for permissions.
 
 Local admission latches disable repeated actions before a busy snapshot arrives.
-State watch delivery is coalesced; an identical refresh result can omit both its
-intermediate busy state and a distinguishable completion. A 25-second GUI timeout
-releases only the local admission latch and shows an outcome-unknown refresh hint.
-It neither marks success nor replays anything; native busy state still gates actions.
-Failed identity requests may leave playback fenced until explicit Check account or
-Refresh room recovery establishes a fresh socket.
+Every native command gets a ticket; the state publishes the last dequeued ticket and
+the one in flight, so a latch is released exactly when its command settled, even if
+a coalesced watch delivery shows no other change. A 25-second GUI timeout remains as
+a last resort for a stalled server: it releases only the local latch, shows an
+outcome-unknown hint and never marks success or replays anything. User actions
+(search, sign-in, account check, tag, favorite, new mood) preempt a background mood
+page load, which loads again afterwards.
+
+A failed account check, sign-in or sign-out (network, 429, 5xx, wrong password)
+no longer leaves the room fenced: the previous account is restored and the room is
+resynchronized on a fresh socket, so music features and search keep working. A 401
+on sign-in means wrong credentials, not an expired session. A 401 elsewhere means
+the bearer was rejected: the account shows as expired and **Refresh room** obtains
+a fresh guest grant, then resynchronizes. Refresh room also drops a background page
+load instead of answering busy.
 
 The widget pin uses the narrowly scoped native Windows wrapper described above.
 Opacity customization is omitted. Native input memory is not a cryptographic zeroization facility.

@@ -56,12 +56,22 @@ is included.
 
 ## Windows and artwork
 
-**Widget** toggles one separate 410 x 661 native window, pinned above ordinary
+**Widget** toggles one separate 410 x 628 native window, pinned above ordinary
 applications by default. Its pin toggles Windows topmost status without activating
-the window. The compact reference layout shows real current-track YouTube artwork,
-mood chips and an actual upcoming preview; unsupported or missing artwork has an
-embedded fallback. Add, Queue, Settings and mood management restore the existing
-main panels. The main player also has a native artwork slot beside its provider.
+the window; fold shrinks it to a single bar. It can be dragged from anywhere that is
+not a control, and it reopens where it was left (clamped onto a display). The
+layout follows the "twelve moods" design with real current-track YouTube artwork,
+mood pills and an actual upcoming preview; unsupported or missing artwork shows the
+ambience logo. Add, Queue, Settings and mood management restore the existing main
+panels. The main player also has a native artwork slot beside its provider.
+
+Both windows take the **ambience** picked from the current cover (twelve dark
+palettes with their own animated sky, shared with the web client through
+`common/ambience.ts`). The sky animates at about 30 fps only while its window is
+visible, stops entirely when the window is minimized, hidden or on another virtual
+desktop, and shows a static frame when Windows animations are off (Settings has an
+override). Local preferences (widget place, folded state, animation setting) are
+stored in `%APPDATA%\Undertone\desktop.json`; nothing else is written to disk.
 
 Closing the widget leaves playback alone. Closing the main player while the widget
 exists minimizes the main player to its taskbar button. Restore player and Quit
@@ -117,7 +127,9 @@ late events after reconnect or host replacement.
 
 ## Resource bounds and limits
 
-Native UI updates on events; no application 60 fps timer is installed. The app
+Native UI updates on events. The only timer is the ambience sky's: about 30
+frames per second per visible animated window, a 1 s probe (no drawing) while it is
+minimized, hidden or cloaked, and nothing when animations are off. The app
 owns one current-thread Tokio network runtime. GPUI and WebView2 can create their
 own platform threads/processes. Queues hold at most 64 UI events and 32 outbound
 socket messages; WebSocket frames/messages are capped at 256 KiB, IPC at 16 KiB,
@@ -145,7 +157,7 @@ JavaScript bundle. Measurement artifacts are in ignored `test-results/desktop-*-
 Non-YouTube playback, OAuth/Discord login, private-room password admission,
 audio-only mode, captions controls and arbitrary seek text input are out of scope.
 Music panels require a Music-mode room and the relevant server permissions;
-joining never changes room mode. Personal tagging requires an account and a real
+joining never changes room mode. Search explains which of these is missing. Personal tagging requires an account and a real
 catalogue track ID. Mood search filters loaded pages, with explicit Load more.
 Previous/Next are available for an active YouTube session; there are no playback
 controls for empty or unsupported sources. Sources can still change from another
