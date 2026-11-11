@@ -9,8 +9,7 @@ errors. Typography follows the design: Segoe UI Variable Display (light) for tit
 and the wordmark, Segoe UI Variable Text for body text, and Sitka in italics for the
 ambience name and "brought by"; each falls back to the first installed family
 (Segoe UI, then Palatino Linotype/Georgia for the voice). English UI strings live in
-desktop-en.json; desktop-only additions wait in `desktop/src/strings-en.json` (the
-shared file wins). Tokens (`theme.rs`), glyphs and logos, cards, banners,
+`client/src/locales/desktop-en.json`. Tokens (`theme.rs`), glyphs and logos, cards, banners,
 progress/volume tracks and slider hit-testing are shared by both windows (ui.rs).
 
 ## Ambiences and the animated sky
@@ -21,8 +20,9 @@ families, logos, OKLab matching rules); a unit test checks it against
 of the current YouTube track is fetched, the loader crops its central 16:9 band
 (hqdefault stills are 4:3 with letterbox bars), reduces it to 32 x 32 (Triangle)
 and picks the ambience off the UI thread; the result is cached with the image. No
-cover, a failed fetch or no room gives *heure bleue*. The logo follows the ambience
-(logo N with ambience N); `ambience::PINNED_LOGO` pins a single logo later.
+cover, a failed fetch or no room gives *heure bleue*. The mark is logo 01,
+"Horizon", in every ambience (`ambience::PINNED_LOGO`); `None` would let it follow the
+ambience again.
 
 Each window owns one sky (`sky.rs`): the 170 degree background gradient plus the
 ambience's motion family (drift, rise, sway, ripple, orbit, breathe, curtain,

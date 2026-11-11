@@ -16,9 +16,9 @@ use std::{
 pub const SAMPLE_SIZE: u32 = 32;
 /// `heure-bleue`: used with no cover, a failed fetch, or no room.
 pub const DEFAULT: usize = 0;
-/// `None`: the logo follows the ambience (logo N with ambience N, the gallery default).
-/// `Some(index)` pins the logo of that ambience everywhere, whatever the cover.
-pub const PINNED_LOGO: Option<usize> = None;
+/// Undertone's mark is logo 01, "Horizon" (a sun just under the line), whatever the cover.
+/// `None` would let the logo follow the ambience again (logo N with ambience N).
+pub const PINNED_LOGO: Option<usize> = Some(DEFAULT);
 
 /// The logo shown with an ambience, honouring [`PINNED_LOGO`].
 pub fn logo_for(ambience: usize) -> usize {
@@ -1347,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn palettes_parse_and_logo_follows_the_ambience() {
+    fn palettes_parse_and_logo_honours_the_pin() {
         for (index, ambience) in AMBIENCES.iter().enumerate() {
             assert_eq!(usize::from(ambience.number), index + 1);
             assert_eq!(index_of(ambience.id), Some(index));
@@ -1355,6 +1355,7 @@ mod tests {
             assert!(c.glows.iter().all(|g| g.a > 0. && g.a <= 0.55));
             assert_eq!(c.background[0].a, 1.);
             assert_eq!(logo_for(index), PINNED_LOGO.unwrap_or(index));
+            assert_eq!(logo_for(index), DEFAULT, "Horizon is the mark everywhere");
         }
         assert_eq!(
             parse_color("rgba(124,98,206,0.5)"),
