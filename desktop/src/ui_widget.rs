@@ -27,7 +27,7 @@ use undertone_desktop::{
     text,
 };
 
-pub const WIDGET_SIZE: (f32, f32) = (410., 628.);
+pub const WIDGET_SIZE: (f32, f32) = (410., 640.);
 /// Folded: one bar with the cover, title, play and unfold.
 pub const MINI_SIZE: (f32, f32) = (410., 68.);
 const RADIUS: f32 = 22.;
@@ -557,7 +557,7 @@ impl Widget {
         root.child(self.room(player, authority, cx))
             .child(
                 div()
-                    .min_h(px(64.))
+                    .min_h(px(56.))
                     .flex()
                     .items_end()
                     .px(px(20.))

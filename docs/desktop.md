@@ -56,7 +56,7 @@ is included.
 
 ## Windows and artwork
 
-**Widget** toggles one separate 410 x 628 native window, pinned above ordinary
+**Widget** toggles one separate 410 x 640 native window, pinned above ordinary
 applications by default. Its pin toggles Windows topmost status without activating
 the window; fold shrinks it to a single bar. It can be dragged from anywhere that is
 not a control, and it reopens where it was left (clamped onto a display). The

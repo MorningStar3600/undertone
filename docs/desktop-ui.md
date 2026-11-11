@@ -87,7 +87,7 @@ results change; other providers keep the logo placeholder.
 ## Separate windows and provider ownership
 
 The full player stays 880 x 680 logical pixels. **Widget** toggles one separate
-410 x 628 native GPUI top-level window whose whole 22 px rounded card is the
+410 x 640 native GPUI top-level window whose whole 22 px rounded card is the
 animated ambience surface, per the "twelve moods" design: header lockup (ambience
 logo + wordmark) with pin, fold, minimize and close on the right; room line (live
 dot, name, listeners, initials, Open room); the ambience name in the italic voice
