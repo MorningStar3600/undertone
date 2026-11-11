@@ -374,6 +374,7 @@ describe("Music Room protocol and durable transactions", () => {
 		const page = await execute({ action: "requests" });
 		expect(page.page!.items[0].title).toBe("Untitled track");
 		expect(JSON.stringify(page)).not.toContain("synthetic");
+		expect(JSON.stringify(room.music)).not.toContain("media.example");
 	});
 	it("keeps numeric OTT requests, bounded public state, real two-person Q and manual excess", async () => {
 		expect(RoomRequestType.UpdateQueueItemRequest).toBe(19);
@@ -436,6 +437,10 @@ describe("Music Room protocol and durable transactions", () => {
 		expect(confirmed.status).toBe("applied");
 		expect(room.currentSource).toEqual(current);
 		expect(room.music!.queue[0].trackId).toBe(track.id);
+		// Public YouTube covers travel with queue entries so every client can show them.
+		expect(room.music!.queue[0].artworkUrl).toBe(
+			"https://i.ytimg.com/vi/outside-library/mqdefault.jpg",
+		);
 		expect(room.musicState!.candidates.some(c => c.trackId === track.id)).toBe(false);
 		await fixture.catalogue.setTrackMood(2, track.id, DEFAULT_MOODS[2].id, true);
 		await execute(

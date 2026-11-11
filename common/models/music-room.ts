@@ -105,6 +105,8 @@ export interface MusicRoomEntry {
 	origin: "automatic" | "manual" | "recommendation";
 	requestId?: string;
 	title?: string;
+	/** Public cover art, when the source has one (YouTube thumbnails only). */
+	artworkUrl?: string;
 }
 export interface MusicRoomPublic {
 	revision: number;

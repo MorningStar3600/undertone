@@ -52,6 +52,17 @@ export const musicIdentity = (user: { user_id?: number; token: string }): string
 		: `guest:${createHash("sha256").update(user.token).digest("hex")}`;
 const accountId = (id: string): number | undefined =>
 	id.startsWith("account:") ? Number(id.slice(8)) : undefined;
+const YOUTUBE_VIDEO_ID = /^[\w-]{6,20}$/;
+/** Public cover for a queue entry. Only well-formed YouTube references; local sources stay private. */
+const entryArtwork = (mediaRef: MusicQueueEntry["mediaRef"]): { artworkUrl?: string } => {
+	if (typeof mediaRef !== "object" || !mediaRef || Array.isArray(mediaRef)) {
+		return {};
+	}
+	const { service, id } = mediaRef;
+	return service === "youtube" && typeof id === "string" && YOUTUBE_VIDEO_ID.test(id)
+		? { artworkUrl: `https://i.ytimg.com/vi/${id}/mqdefault.jpg` }
+		: {};
+};
 const entryDto = (entry: MusicQueueEntry): MusicRoomEntry => ({
 	entryId: entry.entryId,
 	trackId: entry.trackId,
@@ -67,6 +78,7 @@ const entryDto = (entry: MusicQueueEntry): MusicRoomEntry => ({
 		typeof entry.mediaRef.title === "string"
 			? entry.mediaRef.title
 			: undefined,
+	...entryArtwork(entry.mediaRef),
 });
 const requestDto = (request: MusicSchedulerState["requests"][number]): MusicRoomRequestSummary => ({
 	requestId: request.requestId,
