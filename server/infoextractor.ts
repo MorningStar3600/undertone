@@ -158,6 +158,18 @@ export default {
 		}
 	},
 
+	/**
+	 * Whether a search would be answered from the cache, without reaching the provider (and
+	 * spending its API quota). Errors count as a miss.
+	 */
+	async isSearchCached(service: string, query: string): Promise<boolean> {
+		try {
+			return (await this.getCachedSearchResults(service, query)).length > 0;
+		} catch {
+			return false;
+		}
+	},
+
 	async cacheSearchResults(service: string, query: string, results: Video[]): Promise<void> {
 		await redisClient.setEx(
 			`search:${service}:${query}`,

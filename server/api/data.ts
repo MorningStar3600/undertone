@@ -29,7 +29,15 @@ const addPreview: RequestHandler<
 	}
 
 	let points = 5;
-	if (!InfoExtract.isURL(req.query.input)) {
+	// Searches that reach the provider spend its API quota and cost more. A repeated search is
+	// answered from the cache: it costs like a link, so retrying or refining is not punished.
+	if (
+		!InfoExtract.isURL(req.query.input) &&
+		!(await InfoExtract.isSearchCached(
+			conf.get("add_preview.search.provider"),
+			req.query.input.trim(),
+		))
+	) {
 		points *= 15;
 	}
 	if (!(await consumeRateLimitPoints(res, req.ip, points))) {

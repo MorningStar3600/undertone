@@ -4,6 +4,12 @@ import { main } from "../../../app.js";
 import InfoExtract, { AddPreview } from "../../../infoextractor.js";
 import tokens from "../../../auth/tokens.js";
 import { OttException } from "ott-common/exceptions.js";
+import { consumeRateLimitPoints } from "../../../rate-limit.js";
+
+vi.mock("../../../rate-limit.js", async importOriginal => ({
+	...(await importOriginal<typeof import("../../../rate-limit.js")>()),
+	consumeRateLimitPoints: vi.fn(async () => true),
+}));
 
 const JSON_CONTENT_TYPE_REGEX = /json/;
 
@@ -24,6 +30,38 @@ describe("Data API", () => {
 	afterAll(() => {
 		getSessionInfoSpy.mockRestore();
 		validateSpy.mockRestore();
+	});
+
+	it("charges the provider's search cost only when a search misses the cache", async () => {
+		const resolveQuerySpy = vi
+			.spyOn(InfoExtract, "resolveVideoQuery")
+			.mockResolvedValue(new AddPreview([], 0));
+		const cachedSpy = vi.spyOn(InfoExtract, "isSearchCached");
+		const consume = vi.mocked(consumeRateLimitPoints);
+		const preview = (input: string) =>
+			request(app)
+				.get("/api/data/previewAdd")
+				.set({ Authorization: "Bearer foobar" })
+				.query({ input })
+				.expect(200);
+
+		consume.mockClear();
+		cachedSpy.mockResolvedValueOnce(false);
+		await preview("  fresh search  ");
+		expect(cachedSpy).toHaveBeenLastCalledWith("youtube", "fresh search");
+		expect(consume).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), 75);
+
+		cachedSpy.mockResolvedValueOnce(true);
+		await preview("fresh search");
+		expect(consume).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), 5);
+
+		cachedSpy.mockClear();
+		await preview("https://youtube.com/watch?v=dQw4w9WgXcQ");
+		expect(cachedSpy).not.toHaveBeenCalled();
+		expect(consume).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), 5);
+
+		resolveQuerySpy.mockRestore();
+		cachedSpy.mockRestore();
 	});
 
 	it("GET /data/previewAdd", async () => {
