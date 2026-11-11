@@ -394,9 +394,9 @@ export default {
 		},
 		intro: {
 			title: "Remote Watch Parties Just Got a Lot Easier",
-			name: "OpenTogetherTube",
+			name: "Undertone",
 			text1: "is a real-time video synchronization platform.\nIt's easy to use and has no sign up required. Just create a room, add videos and\ninvite your friends. BOOM! You're ready to binge videos with your friends until 3AM.",
-			text2: "The original TogetherTube was loved for it's simple interface,\nand how easy it was to start watching videos right away.\nOpenTogetherTube aims to be just as easy, and then improve on\ntop of that to make it even better.",
+			text2: "The original TogetherTube was loved for it's simple interface,\nand how easy it was to start watching videos right away.\nUndertone aims to be just as easy, and then improve on\ntop of that to make it even better.",
 			text3: "Currently, you can watch online videos with your friends from Youtube, Vimeo, direct links to .mp4 videos, and",
 			link: "more are on the way",
 		},
@@ -412,7 +412,7 @@ export default {
 			},
 			"dark-theme": {
 				title: "Dark Theme",
-				text: "Watching Vine compilations late at night?\nOpenTogetherTube has a dark theme by default so\nyour eyes won't suffer.",
+				text: "Watching Vine compilations late at night?\nUndertone has a dark theme by default so\nyour eyes won't suffer.",
 			},
 			"room-permissions": {
 				title: "Room Permissions",
@@ -450,7 +450,7 @@ export default {
 	},
 	footer: {
 		disclaimer:
-			"Disclaimer: The OpenTogetherTube project is not associated with TogetherTube nor Watch2Gether.",
+			"Disclaimer: The Undertone project is not associated with TogetherTube nor Watch2Gether.",
 		"made-in": "Made in America",
 		"thanks-to": "Special Thanks to",
 		"privacy-policy": "Privacy Policy",
@@ -813,7 +813,7 @@ export default {
 		"enable-adapter-selector": "Show adapter selector (advanced)",
 		"native-youtube-controls": "Use YouTube's native control bar",
 		"native-youtube-controls-hint":
-			"Playback is still controlled by OpenTogetherTube. Use YouTube's control bar only to change quality, audio track, or subtitles.",
+			"Playback is still controlled by Undertone. Use YouTube's control bar only to change quality, audio track, or subtitles.",
 	},
 	"connect-overlay": {
 		title: "Disconnected",

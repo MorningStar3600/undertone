@@ -878,8 +878,8 @@ async function sendPasswordResetEmail(email: string): Promise<Result<void, Maile
 
 	const mail: Email = {
 		to: email,
-		subject: "OpenTogetherTube - Password Reset",
-		body: `Click this link to reset your password for OpenTogetherTube: <a href="${resetLink}">${resetLink}</a>`,
+		subject: "Undertone - Password Reset",
+		body: `Click this link to reset your password for Undertone: <a href="${resetLink}">${resetLink}</a>`,
 	};
 
 	if (conf.get("mail.mailjet_sandbox")) {

@@ -67,9 +67,9 @@ export default {
 		},
 		intro: {
 			title: "Regarder des vidéos ensemble à distance est devenue beaucoup plus facile.",
-			name: "OpenTogetherTube",
+			name: "Undertone",
 			text1: "Plateforme de synchronisation de vidéo en temps réel. Facile d'utilisation et sans connexion. Créer simplement une salle, ajoute une vidéo et invite t'es amis. BOOM! Tu es prêt pour regarder des vidéos avec t'es potes jusqu'à 3h du mat.",
-			text2: "Le TogetherTube original est aimé pour son interface très simpliste, et sa rapidité pour lancer des vidéos. OpenTogetherTube vise à être tout aussi simple et à s'améliorer pour qu'il devienne encore meilleur au fil du temps.",
+			text2: "Le TogetherTube original est aimé pour son interface très simpliste, et sa rapidité pour lancer des vidéos. Undertone vise à être tout aussi simple et à s'améliorer pour qu'il devienne encore meilleur au fil du temps.",
 			text3: "Actuellement, vous pouvez regarder des vidéos depuis : Youtube, Vimeo, liens directs vers des vidéos .mp4, ...",
 			link: "d'autres sources arrivent bientôt",
 		},
@@ -113,7 +113,7 @@ export default {
 	},
 	footer: {
 		disclaimer:
-			"Information importante: OpenTogetherTube n'est pas associé à TogetherTube ou Watch2Gether.",
+			"Information importante: Undertone n'est pas associé à TogetherTube ou Watch2Gether.",
 		"made-in": "Made in America",
 		"thanks-to": "Remerciments spécial à",
 		"privacy-policy": "Politique de Confidentialité",

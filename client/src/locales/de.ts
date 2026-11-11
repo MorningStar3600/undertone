@@ -55,9 +55,9 @@ export default {
 		},
 		intro: {
 			title: "Watch-Partys aus der Ferne sind jetzt viel einfacher",
-			name: "OpenTogetherTube",
+			name: "Undertone",
 			text1: "ist eine Plattform zur Echtzeit-Videosynchronisation. Es ist einfach zu bedienen und erfordert keine Anmeldung. Erstelle einfach einen Raum, füge Videos hinzu und lade deine Freunde ein. Zack, fertig! Du bist nun startklar um mit deinen Freunden bis 3 Uhr nachts Videos zu gucken.",
-			text2: "Das ursprüngliche TogetherTube wurde für seine einfache Benutzeroberfläche geliebt und dafür, wie einfach es war, sofort mit dem Ansehen von Videos zu beginnen. OpenTogetherTube hat sich zum Ziel gesetzt, genauso einfach zu sein und es darüber hinaus noch besser zu machen.",
+			text2: "Das ursprüngliche TogetherTube wurde für seine einfache Benutzeroberfläche geliebt und dafür, wie einfach es war, sofort mit dem Ansehen von Videos zu beginnen. Undertone hat sich zum Ziel gesetzt, genauso einfach zu sein und es darüber hinaus noch besser zu machen.",
 			text3: "Derzeit können Sie mit Ihren Freunden Online-Videos von Youtube, Vimeo, und direkte Links zu .mp4-Videos ansehen.",
 			link: "Unterstützung für weitere Plattformen ist geplant",
 		},
@@ -73,7 +73,7 @@ export default {
 			},
 			"dark-theme": {
 				title: "Dunkles Theme",
-				text: "Schauen Sie sich Vine-Compilations spät in der Nacht an? OpenTogetherTube hat standardmäßig ein dunkles Theme, so dass Ihre Augen nicht leiden werden.",
+				text: "Schauen Sie sich Vine-Compilations spät in der Nacht an? Undertone hat standardmäßig ein dunkles Theme, so dass Ihre Augen nicht leiden werden.",
 			},
 			"room-permissions": {
 				title: "Raum-Berechtigungen",
@@ -101,7 +101,7 @@ export default {
 	},
 	footer: {
 		disclaimer:
-			"Disclaimer: Das OpenTogetherTube-Projekt ist weder mit TogetherTube noch mit Watch2Gether verbunden.",
+			"Disclaimer: Das Undertone-Projekt ist weder mit TogetherTube noch mit Watch2Gether verbunden.",
 		"made-in": "Made in Amerika",
 		"thanks-to": "Besonderen Dank an",
 		"privacy-policy": "Datenschutzbestimmungen",

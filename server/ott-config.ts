@@ -432,7 +432,7 @@ export const conf = convict({
 		sender_name: {
 			doc: "Display name to send emails as.",
 			format: String,
-			default: "OpenTogetherTube",
+			default: "Undertone",
 		},
 		mailjet_sandbox: {
 			doc: "Whether to use Mailjet's sandbox mode. This will prevent emails from being sent, but will still validate the request.",

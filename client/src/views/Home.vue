@@ -86,36 +86,6 @@
 				</div>
 			</section>
 
-			<!-- support -->
-			<section class="mb-20 grid gap-10 md:grid-cols-2 md:items-center">
-				<div>
-					<h2 class="section-title">{{ $t("landing.support.title") }}</h2>
-					<p class="mt-6 text-muted-foreground">
-						<strong class="text-foreground">{{
-							$t("landing.support.description1")
-						}}</strong>
-						{{ $t("landing.support.description2") }}
-					</p>
-				</div>
-				<div class="flex flex-col gap-3">
-					<h3 class="text-xl tracking-wide text-muted-foreground">
-						{{ $t("landing.support.how") }}
-					</h3>
-					<Button variant="default" size="lg" class="w-full" as-child>
-						<a href="https://github.com/sponsors/dyc3" target="_blank">
-							<Icon :icon="mdiHeart" class="size-5" />
-							{{ $t("landing.support.sponsor") }}
-						</a>
-					</Button>
-					<Button variant="signal" size="lg" class="w-full" as-child>
-						<a href="https://github.com/dyc3/opentogethertube" target="_blank">
-							<Icon :icon="mdiXml" class="size-5" />
-							{{ $t("landing.support.contribute") }}
-						</a>
-					</Button>
-				</div>
-			</section>
-
 			<p class="mb-10 text-sm italic text-dim">{{ $t("footer.disclaimer") }}</p>
 		</div>
 	</div>
@@ -125,8 +95,6 @@
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 import {
-	mdiHeart,
-	mdiXml,
 	mdiPlay,
 	mdiGithub,
 	mdiSync,

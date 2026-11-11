@@ -19,13 +19,8 @@
 					</Button>
 
 					<router-link to="/" class="group flex items-center gap-3">
-						<img :src="logoUrl" alt="" class="size-8" />
-						<span
-							class="ott-text-scanlines inline-block font-display text-2xl leading-none tracking-wide text-primary text-shadow-glow-primary light:text-shadow-none marquee-flicker md:text-3xl"
-							data-text="OpenTogetherTube"
-						>
-							OpenTogetherTube
-						</span>
+						<UndertoneLogo ambience="heure-bleue" :size="26" class="app-logo" />
+						<span class="app-wordmark" data-cy="app-wordmark">undertone</span>
 					</router-link>
 
 					<nav v-if="display.lgAndUp.value" class="ml-6 flex items-center gap-1">
@@ -36,25 +31,9 @@
 							<router-link to="/my-rooms">{{ $t("nav.my-rooms") }}</router-link>
 						</Button>
 						<Button variant="ghost" size="sm" as-child>
-							<a
-								href="https://github.com/dyc3/opentogethertube/discussions/830"
-								target="_blank"
-								>{{ $t("nav.faq") }}</a
-							>
-						</Button>
-						<Button variant="ghost" size="sm" as-child>
-							<a
-								href="https://github.com/dyc3/opentogethertube/issues/new/choose"
-								target="_blank"
-							>
+							<a :href="issuesUrl" target="_blank">
 								<Icon :icon="mdiBug" />
 								{{ $t("nav.bug") }}
-							</a>
-						</Button>
-						<Button variant="ghost" size="sm" as-child>
-							<a href="https://github.com/sponsors/dyc3" target="_blank">
-								<Icon :icon="mdiHeart" class="text-primary" />
-								{{ $t("nav.support") }}
 							</a>
 						</Button>
 					</nav>
@@ -108,26 +87,8 @@
 						>
 							{{ $t("nav.my-rooms") }}
 						</router-link>
-						<a
-							class="ott-drawer-link"
-							href="https://github.com/dyc3/opentogethertube/discussions/830"
-							target="_blank"
-							>{{ $t("nav.faq") }}</a
-						>
-						<a
-							class="ott-drawer-link"
-							href="https://github.com/dyc3/opentogethertube/issues/new/choose"
-							target="_blank"
-						>
+						<a class="ott-drawer-link" :href="issuesUrl" target="_blank">
 							<Icon :icon="mdiBug" class="size-4" /> {{ $t("nav.bug") }}
-						</a>
-						<a
-							class="ott-drawer-link"
-							href="https://github.com/sponsors/dyc3"
-							target="_blank"
-						>
-							<Icon :icon="mdiHeart" class="size-4 text-primary" />
-							{{ $t("nav.support") }}
 						</a>
 						<Separator class="my-2" />
 						<NavCreateRoom
@@ -213,7 +174,7 @@ import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/com
 import { Spinner } from "@/components/ui/spinner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useDisplay } from "@/components/ui/useDisplay";
-import { mdiBug, mdiHeart, mdiPlusBox, mdiMenu } from "@mdi/js";
+import { mdiBug, mdiPlusBox, mdiMenu } from "@mdi/js";
 import { defineComponent, onMounted, ref, computed } from "vue";
 import { API } from "@/common-http";
 import CreateRoomForm from "@/components/CreateRoomForm.vue";
@@ -224,7 +185,8 @@ import Notifier from "@/components/Notifier.vue";
 import { loadLanguageAsync } from "@/i18n";
 import { createRoomHelper } from "@/util/roomcreator";
 import { useRouter } from "vue-router";
-import logoUrl from "@/assets/logo.svg";
+import UndertoneLogo from "@/components/ambience/UndertoneLogo.vue";
+import { issuesUrl } from "@/util/source-code";
 import { useStore } from "@/store";
 import LocaleSelector from "@/components/navbar/LocaleSelector.vue";
 
@@ -233,6 +195,7 @@ const App = defineComponent({
 	name: "app",
 	components: {
 		AppFooter,
+		UndertoneLogo,
 		CreateRoomForm,
 		LogInForm,
 		NavUser,
@@ -334,10 +297,9 @@ const App = defineComponent({
 			setLocale,
 			cancelRoom,
 			createTempRoom,
-			logoUrl,
+			issuesUrl,
 			store,
 			mdiBug,
-			mdiHeart,
 			mdiPlusBox,
 			mdiMenu,
 		};
@@ -349,6 +311,18 @@ export default App;
 </script>
 
 <style scoped>
+/* Undertone lockup: the Horizon mark in the accent, a quiet lowercase wordmark. */
+.app-logo {
+	color: var(--primary);
+}
+.app-wordmark {
+	font-family: "Segoe UI Variable Display", "Hanken Grotesk", system-ui, sans-serif;
+	font-size: 1.45rem;
+	font-weight: 350;
+	line-height: 1;
+	letter-spacing: 0.01em;
+	color: var(--foreground);
+}
 .ott-drawer-link {
 	display: flex;
 	align-items: center;

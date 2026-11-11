@@ -9,7 +9,7 @@
 			<p>This site uses cookies. They are required strictly for functionality only.</p>
 
 			<p>
-				Your IP is logged in OpenTogetherTube\'s logs when you create a room to help combat
+				Your IP is logged in Undertone\'s logs when you create a room to help combat
 				abuse. It is also recorded for a short period of time for rate limiting. Chats are
 				not recorded or logged at all. What you search for in the "add video" search box is
 				logged, but never associated with your OTT account or session.
@@ -22,7 +22,7 @@
 			</p>
 
 			<p>
-				Metrics are collected from the server to monitor OpenTogetherTube's status. User
+				Metrics are collected from the server to monitor Undertone's status. User
 				session data and accounts is never collected as a part of these metrics.
 			</p>
 
@@ -35,7 +35,7 @@
 			</p>
 
 			<p>
-				OpenTogetherTube is GDPR compliant because of how little information is collected.
+				Undertone is GDPR compliant because of how little information is collected.
 				If you want your account data, please contact me at
 				<a href="mailto:carson.mcmanus1+ott-support@gmail.com">
 					carson.mcmanus1+ott-support@gmail.com
@@ -50,8 +50,8 @@
 				videos requires you to agree to the
 				<a href="https://www.youtube.com/t/terms">Youtube Terms of Service</a>, and
 				<a href="https://policies.google.com/privacy">Google's privacy policy</a>. Your
-				YouTube account is not accessed by OpenTogetherTube, unless you request a video that
-				you uploaded. The only data that is used by OpenTogetherTube is publicly available
+				YouTube account is not accessed by Undertone, unless you request a video that
+				you uploaded. The only data that is used by Undertone is publicly available
 				information, which includes: video id, video title, video description, video
 				thumbnail, and video duration. This information is cached for up to 30 days.
 			</p>

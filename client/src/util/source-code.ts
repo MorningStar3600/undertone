@@ -9,3 +9,4 @@ const sourceRef = /^[a-f0-9]{7,40}$/i.test(__COMMIT_HASH__) ? __COMMIT_HASH__ : 
 export const sourceCodeUrl =
 	import.meta.env.VITE_SOURCE_CODE_URL || `${repositoryUrl}/tree/${sourceRef}`;
 export const licenseUrl = `${repositoryUrl}/blob/${sourceRef}/LICENSE`;
+export const issuesUrl = `${repositoryUrl}/issues/new`;

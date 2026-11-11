@@ -52,9 +52,9 @@ export default {
 		},
 		intro: {
 			title: "Las fiestas de visualización remota ahora son mucho más fáciles",
-			name: "OpenTogetherTube",
+			name: "Undertone",
 			text1: "Es una plataforma de sincronizacion de videos en tiempo real.\nEs fácil para usar y no tienes que inscribirte. Simplemente crea un sala, agrega videos y\ninvita a tus amigos. BOOM! Estás listo para disfrutar de videos con tus amigos hasta las 3 de la mañana",
-			text2: "El TogetherTube original fue amado por su interfaz simple,\ny lo fácil que fue empezar a ver vídeos de inmediato.\nOpenTogetherTube pretende ser igual de fácil de usar y luego mejoralo\npara hacerlo aún mejor.",
+			text2: "El TogetherTube original fue amado por su interfaz simple,\ny lo fácil que fue empezar a ver vídeos de inmediato.\nUndertone pretende ser igual de fácil de usar y luego mejoralo\npara hacerlo aún mejor.",
 			text3: "Actualmente, puedes ver videos en línea con tus amigos de Youtube, Vimeo, enlaces directos a videos .mp4 y",
 			link: "hay más en camino",
 		},
@@ -70,7 +70,7 @@ export default {
 			},
 			"dark-theme": {
 				title: "Modo Oscuro",
-				text: "¿Estás viendo recopilaciones de Vine a altas horas de la noche?\nOpenTogetherTube tiene un modo oscuro automáticamente\npara que tus ojos no sufran.",
+				text: "¿Estás viendo recopilaciones de Vine a altas horas de la noche?\nUndertone tiene un modo oscuro automáticamente\npara que tus ojos no sufran.",
 			},
 			"room-permissions": {
 				title: "Permisos de sala",
@@ -98,7 +98,7 @@ export default {
 	},
 	footer: {
 		disclaimer:
-			"Descargo de responsabilidad: El proyecto OpenTogetherTube no está asociado con TogetherTube ni con Watch2Gether.",
+			"Descargo de responsabilidad: El proyecto Undertone no está asociado con TogetherTube ni con Watch2Gether.",
 		"made-in": "Hecho en America",
 		"thanks-to": "Agradecimientos especiales a",
 		"privacy-policy": "Política de privacidad",
