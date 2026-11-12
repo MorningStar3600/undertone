@@ -68,7 +68,9 @@ tag a mood, search and add, and switch to the widget and back.
 -   Left column, panel open: a compact track strip (artwork, title, transport) stays
     above one panel card. Moods has two tabs, This track and Room preferences.
 -   Right column (320 px): the lazily created YouTube provider at the top, then the
-    upcoming list (See queue) and a full-width Add a track button.
+    queue card (See queue) and a full-width Add a track button. The card shows the
+    last played track (three without the provider), the current track and as many
+    upcoming tracks as fit.
 
 Panels: Account (avatar, state, sign-in form or sign out), Moods (contributor
 suggestions, your moods and favorites, search, create with all nine icons),
@@ -76,25 +78,63 @@ Room preferences (Include / Any / Exclude per mood, Save / Save & renew /
 Discard bar outside the scroll area), Add music (search field + Search, results
 with provider and duration when the server supplies them, Add to mix / Play next
 with explanatory tooltips, highlighted confirmation card, pending requests only
-when there are any), Queue (numbered rows, pagination only when needed) and
-Settings (this device: upcoming visibility, widget, leave room).
+when there are any), Queue (every published played track, the current track,
+then numbered upcoming rows, pagination only when needed) and Settings (this
+device: upcoming visibility, widget, leave room).
 Page states for moods appear only when a page failed, is not loaded or has more
 entries. Mood chips: the body toggles your tag, the heart toggles the favorite.
 YouTube search results show their thumbnail (16:9), fetched through the same
 bounded artwork loader and cache, at most three at a time, cancelled when the
 results change; other providers keep the logo placeholder.
 
+### Played tracks and Previous
+
+Every queue view (queue card, Queue panel, widget) reads like the web queue: the
+played tracks the server publishes (oldest first, at most ten: `music.played` in
+Music rooms, `playedTracks` in regular queues; older servers send neither), the
+current track as a "now playing" card, then what comes next. Played rows are quiet
+(36 px covers in the panel, a replay mark on hover) and focusable; a click or Enter
+goes back to that track for the whole room. They are disabled, with a tooltip saying
+why, without the skip grant or while vote-skip is on (and, in a Music room, without
+a live membership). The now-playing card has a 64 px cover (52 px in the queue
+card, 40 px in the widget), "Now playing" or "Paused" in the italic voice after
+three accent bars, the title in the display face (two lines, one in the widget) and
+a muted detail line (artists and who brought it, or the provider).
+
+Going back is the same authoritative `previous` command as the Previous button:
+the host page builds it with its guards (requestId, epoch, occurrenceId, sequence),
+and Rust adds `steps = played.len() - index` to that host's next `previous` only
+(`bridge::PreviousSteps`; cleared by a refusal, a plain Previous or a new host, and
+dropped after 3 s). The host page can never send `steps` itself; the bridge accepts
+1 to 100. A plain Previous never carries steps: past five seconds into a track
+(`music::PREVIOUS_RESTARTS_AFTER_SECONDS`, mirroring `common/playback/transport.ts`)
+the server restarts it. So Previous is enabled when the server reports history
+(`previousAvailable`) or the position is more than five seconds past the track's
+`startAt`, with the skip grant and without vote-skip.
+
+Row covers are the public YouTube thumbnails named by `artworkUrl` (Music entries)
+or by a regular item's YouTube ID; only an exact `https://i.ytimg.com/vi/<id>/`
+thumbnail URL is accepted, and the image is fetched by video ID through the same
+bounded loader (three at a time, dropped and aborted when a track leaves the view).
+Regular queue items keep only a bounded title, a known provider name and the
+YouTube ID; never a source URL. The bars breathe only on frames the window's sky
+already draws (visible, animations on) and only while the room plays: the cached
+body records where they are and an overlay above it paints them, so neither a timer
+nor a body rebuild exists for them.
+
 ## Separate windows and provider ownership
 
 The full player stays 880 x 680 logical pixels. **Widget** toggles one separate
-410 x 640 native GPUI top-level window whose whole 22 px rounded card is the
+410 x 720 native GPUI top-level window whose whole 22 px rounded card is the
 animated ambience surface, per the "twelve moods" design: header lockup (ambience
 logo + wordmark) with pin, fold, minimize and close on the right; room line (live
 dot, name, listeners, initials, Open room); the ambience name in the italic voice
 with "ambiance NN"; an 88 px cover hero with a light display title, artist and
 "brought by <contributor>"; progress; transport row (mute + local volume |
-previous / play / next | elapsed / total); my moods pills (with All moods); up next
-(two rows, See queue, Add a track); and a status footer between Settings and Quit.
+previous / play / next | elapsed / total); my moods pills (with All moods); the queue
+(at most two played tracks, the current track and up to two upcoming, three rows
+besides the current one; See queue, Add a track); and a status footer between
+Settings and Quit.
 Fold turns it into a 410 x 68 bar (logo, cover, title, artist · contributor, play,
 unfold, hairline progress). Outside a room it shows only "Not in a room" and an
 Open Undertone action. There is no video block in the widget.
@@ -107,8 +147,9 @@ kept for the session and in `%APPDATA%\Undertone\desktop.json` (with the animati
 setting; nothing about rooms or accounts), and reopening clamps it fully onto the
 display it overlaps most, or the nearest one. Missing artists, contributor names, durations and images are never invented.
 Current contributor names are shown only when authoritative participant metadata
-is available. Queue DTOs supply no provider video ID/art URL or duration, so queue
-rows use the embedded Undertone artwork and omit duration. Open room, Add a track,
+is available. Queue rows show public YouTube covers when the room supplies a video
+(see Played tracks and Previous) and the embedded Undertone artwork otherwise;
+durations are omitted. Open room, Add a track,
 See queue, Settings and All moods restore the main window and open (never toggle
 shut) the matching panel.
 Quick tags remain in the widget and capture account/session/track authority; only
@@ -225,15 +266,16 @@ raw-window-handle and windows); the lockfile adds no package versions.
     requires `can.confirm`. Native code rejects replaced offers/revisions. Cancel,
     pending count, explicit pending-page refresh and page navigation support recovery.
     Missing conflict metadata disables confirmation. Other requests remain cancellable.
--   Upcoming uses actual public queue entries and optional supplied artists. The
-    expanded Queue panel navigates real native pages. Settings can hide upcoming tracks. The widget retains its two-row peek. Local Settings stays separate from
+-   Upcoming uses actual public queue entries (Music) or the regular queue's sync,
+    and optional supplied artists. The expanded Queue panel navigates real native
+    pages in Music rooms. Settings can hide upcoming tracks; history stays visible. Local Settings stays separate from
     room preferences. Unavailable metadata is omitted; embedded artwork is used when needed. Legacy/non-Music rooms retain playback and explain collective-control
     restrictions; no room mode or content is changed automatically.
 
 ## Native session and authority wiring
 
 `main.rs` owns the one Network/Connection, observer and lazy host. `ui.rs` owns
-main presentation and bounded geometry. ui_widget.rs owns the independent widget and routed controls. artwork.rs owns bounded public thumbnails. `ui_music.rs` owns forms, localized status,
+main presentation and bounded geometry. ui_widget.rs owns the independent widget and routed controls. `ui_queue.rs` owns the shared queue rows, row covers and now-playing bars. artwork.rs owns bounded public thumbnails. `ui_music.rs` owns forms, localized status,
 small projection/action helpers, page admission and preference drafts.
 `ui_input.rs` remains the parent's independently reviewed native input.
 
