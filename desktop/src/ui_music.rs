@@ -3,6 +3,7 @@ use super::ui::rgb;
 use super::{
     Control, Player, ui,
     ui_input::{InputEvent, NativeInput},
+    ui_queue::{self, QueueTrack},
 };
 use gpui::{Context, Div, Entity, Focusable, Stateful, Task, Window, div, prelude::*, px};
 use std::{
@@ -116,6 +117,8 @@ pub enum Action {
     Retry,
     Queue(usize),
     Requests(usize),
+    /// Back to a played track (`previous` steps).
+    GoBack(u8),
     ToggleUpcoming,
     Motion(MotionPreference),
 }
@@ -584,20 +587,7 @@ impl Player {
             && !state.tags.stale
             && !state.tags.failed)
             .then(|| state.tags.items.iter().map(|m| m.name.clone()).collect());
-        self.up_next = state
-            .room
-            .music
-            .as_ref()
-            .map(|m| {
-                m.queue
-                    .iter()
-                    .map(|e| ui::UpcomingTrack {
-                        title: e.title.clone().unwrap_or_else(|| text("untitledTrack")),
-                        artist: (!e.artists.is_empty()).then(|| e.artists.join(", ")),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        self.queue = super::ui_queue::QueueView::from_room(&state.room);
         let authority = state.authority();
         self.native = state;
         // Exactly once per explicit outer Join, including a cached native account.
@@ -612,6 +602,7 @@ impl Player {
             self.drive_pages();
         }
         self.sync_thumbs(window, cx);
+        self.sync_covers(window, cx);
         self.arm_native_timeout(window, cx);
         self.sync_layout(window);
         cx.notify();
@@ -1069,6 +1060,7 @@ impl Player {
                     None,
                 );
             }
+            Action::GoBack(steps) => self.control(Control::GoBack(steps), authority, window, cx),
             Action::ToggleUpcoming => self.show_up_next = !self.show_up_next,
             Action::Motion(preference) => {
                 crate::theme::set_preference(preference, cx);
@@ -1143,7 +1135,7 @@ fn label(key: &str) -> Div {
 fn heading(key: &str) -> Div {
     ui::section_label(text(key))
 }
-fn provider_name(service: &str) -> String {
+pub(super) fn provider_name(service: &str) -> String {
     match service {
         "youtube" => "YouTube".into(),
         "vimeo" => "Vimeo".into(),
@@ -1195,7 +1187,7 @@ impl Player {
     }
 
     /// Shared behaviour of every native action control: focus, keyboard and captured authority.
-    fn action_base(
+    pub(super) fn action_base(
         &self,
         id: impl Into<gpui::ElementId>,
         action: Action,
@@ -2411,23 +2403,28 @@ impl Player {
 
     fn queue_panel(&self, cx: &Context<Self>) -> Div {
         let page = &self.native.room.queue_page;
+        let music = self.native.room.music_mode();
         let ready = self.native.connected
             && self.native.room.active()
             && !self.room_busy()
             && !self.native.foreground_busy();
-        let paged = page.loaded && !page.stale;
-        let entries = if paged {
-            page.items.as_slice()
-        } else {
-            self.native
-                .room
-                .music
-                .as_ref()
-                .map(|m| m.queue.as_slice())
-                .unwrap_or_default()
+        let paged = music && page.loaded && !page.stale;
+        // Music rooms page through the server's queue; regular rooms show their sync.
+        let entries: Vec<QueueTrack> = match self.native.room.music.as_ref().filter(|_| paged) {
+            Some(room) => page
+                .items
+                .iter()
+                .map(|entry| ui_queue::entry_track(room, entry))
+                .collect(),
+            None => self.queue.upcoming.clone(),
         };
-        let total = self.native.room.music.as_ref().map(|m| m.queue_total);
+        let total = if music {
+            self.native.room.music.as_ref().map(|m| m.queue_total)
+        } else {
+            Some(self.native.room.upcoming_total)
+        };
         let first = if paged { page.offset } else { 0 };
+        let history = first == 0 && self.queue.history();
         column()
             .gap(px(10.))
             .child(
@@ -2441,59 +2438,67 @@ impl Player {
                                 s.child(format!("{total} {}", text("queueCount")))
                             }),
                     )
-                    .child(self.icon_action(
-                        "refreshQueue",
-                        "refresh",
-                        text("refreshQueue"),
-                        Action::Queue(0),
-                        ready,
-                        false,
-                        cx,
-                    )),
+                    .when(music, |s| {
+                        s.child(self.icon_action(
+                            "refreshQueue",
+                            "refresh",
+                            text("refreshQueue"),
+                            Action::Queue(0),
+                            ready,
+                            false,
+                            cx,
+                        ))
+                    }),
             )
-            .when(!self.native.room.active(), |s| {
+            .when(music && !self.native.room.active(), |s| {
                 s.child(ui::banner(ui::Tone::Warn, text("musicModeNeeded")))
+            })
+            // The room's past and present lead the first page: every published played track
+            // (oldest first, each one a click away), then the current track.
+            .when(history, |s| {
+                s.child(
+                    column()
+                        .gap(px(2.))
+                        .children(self.queue.played.iter().enumerate().map(|(index, track)| {
+                            self.played_button(("panel-played", index), index, track, 36., cx)
+                        }))
+                        .when_some(self.queue.current.as_ref(), |s, current| {
+                            s.child(self.now_playing_card(current, 64., false))
+                        })
+                        .child(ui_queue::up_next_heading()),
+                )
             })
             .when(!self.show_up_next, |s| s.child(label("upcomingHidden")))
             .when(self.show_up_next, |s| {
-                s.children(entries.iter().enumerate().map(|(i, e)| {
+                s.children(entries.iter().enumerate().map(|(i, track)| {
                     line()
-                        .h(px(48.))
-                        .gap(px(10.))
+                        .gap(px(4.))
                         .child(
                             div()
                                 .w(px(22.))
+                                .flex_shrink_0()
                                 .text_size(px(11.))
                                 .text_color(rgb(ui::FAINT))
                                 .child((first + i + 1).to_string()),
                         )
-                        .child(ui::artwork(36., None))
-                        .child(
-                            column()
-                                .gap(px(2.))
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .text_size(px(13.))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .truncate()
-                                        .child(
-                                            e.title
-                                                .clone()
-                                                .unwrap_or_else(|| text("untitledTrack")),
-                                        ),
-                                )
-                                .when(!e.artists.is_empty(), |s| {
-                                    s.child(ui::quiet(e.artists.join(", "), 11.))
-                                }),
-                        )
+                        .child(ui_queue::upcoming_row(
+                            track,
+                            self.covers.get(track.cover.as_ref()),
+                            36.,
+                        ))
                 }))
             })
-            .when(entries.is_empty() && self.native.room.active(), |s| {
-                s.child(label("queueEmptyHint"))
-            })
-            .when(page.offset > 0 || page.has_more(), |s| {
+            .when(
+                entries.is_empty() && (!music || self.native.room.active()),
+                |s| {
+                    s.child(label(if music {
+                        "queueEmptyHint"
+                    } else {
+                        "queueEmpty"
+                    }))
+                },
+            )
+            .when(music && (page.offset > 0 || page.has_more()), |s| {
                 s.child(
                     wrap()
                         .child(self.button(
@@ -2510,7 +2515,7 @@ impl Player {
                         )),
                 )
             })
-            .when(page.stale || page.failed, |s| {
+            .when(music && (page.stale || page.failed), |s| {
                 s.child(ui::banner(ui::Tone::Info, text("queueRefreshNeeded")))
             })
     }

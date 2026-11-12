@@ -204,25 +204,66 @@ pub struct Reference {
     pub service: String,
     pub id: String,
 }
+/// The server's supported provider discriminators.
+const SERVICES: [&str; 12] = [
+    "youtube",
+    "vimeo",
+    "direct",
+    "hls",
+    "dash",
+    "tubi",
+    "reddit",
+    "googledrive",
+    "pluto",
+    "invidious",
+    "odysee",
+    "peertube",
+];
 impl Reference {
     pub fn valid(&self) -> bool {
         // Only the server's supported provider discriminators, never an arbitrary request URL.
-        matches!(
-            self.service.as_str(),
-            "youtube"
-                | "vimeo"
-                | "direct"
-                | "hls"
-                | "dash"
-                | "tubi"
-                | "reddit"
-                | "googledrive"
-                | "pluto"
-                | "invidious"
-                | "odysee"
-                | "peertube"
-        ) && !self.id.is_empty()
-            && self.id.len() <= 2048
+        SERVICES.contains(&self.service.as_str()) && !self.id.is_empty() && self.id.len() <= 2048
+    }
+}
+
+/// A track of a regular queue as the desktop keeps it: a bounded title, a known provider
+/// name and, for YouTube only, the video (for its public cover). Never a source URL or any
+/// other provider payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RoomTrack {
+    pub title: Option<String>,
+    pub service: Option<&'static str>,
+    pub youtube: Option<crate::artwork::YoutubeId>,
+}
+impl RoomTrack {
+    fn read(value: &Value) -> Option<Self> {
+        let item = value.as_object()?;
+        let service = item.get("service").and_then(Value::as_str);
+        let service = SERVICES.into_iter().find(|known| service == Some(*known));
+        let youtube = (service == Some("youtube"))
+            .then(|| item.get("id").and_then(Value::as_str))
+            .flatten()
+            .and_then(crate::artwork::YoutubeId::parse);
+        let title = item
+            .get("title")
+            .and_then(Value::as_str)
+            .map(|title| title.trim().chars().take(300).collect::<String>())
+            .filter(|title| !title.is_empty());
+        Some(Self {
+            title,
+            service,
+            youtube,
+        })
+    }
+    /// Up to `max` tracks of a QueueItem array; the most recent ones when `latest`.
+    fn list(value: &Value, max: usize, latest: bool) -> Vec<Self> {
+        let items = value.as_array().map(Vec::as_slice).unwrap_or_default();
+        let items = if latest {
+            &items[items.len().saturating_sub(max)..]
+        } else {
+            &items[..items.len().min(max)]
+        };
+        items.iter().filter_map(Self::read).collect()
     }
 }
 
@@ -378,6 +419,14 @@ pub struct RoomState {
     /// Whether the room has a current source, and where in its media that track starts.
     pub has_source: bool,
     pub start_at: f64,
+    /// The current source of a regular queue (Music rooms use `music.current`).
+    pub current_track: Option<RoomTrack>,
+    /// Recently played tracks of a regular queue, oldest first; empty in Music rooms, which
+    /// publish `music.played`. Older servers do not send it.
+    pub played_tracks: Vec<RoomTrack>,
+    /// The first upcoming tracks of a regular queue, and how many there are.
+    pub upcoming: Vec<RoomTrack>,
+    pub upcoming_total: usize,
     /// The server has history for Previous to go back to (never with vote-skip on).
     pub previous_available: bool,
     pub vote_skip: bool,
@@ -490,9 +539,15 @@ impl RoomState {
             && (self.previous_available || self.previous_restarts(position))
     }
     /// Going back to a played track is a shared Previous: the same grant, never a way around
-    /// vote-skip, and only from a live Music room membership (the only rooms with `played`).
+    /// vote-skip, and in a Music room only from a live membership.
     pub fn can_go_back(&self) -> bool {
-        self.active() && self.can().skip && !self.vote_skip
+        (self.queue_mode.as_deref() != Some("music") || self.active())
+            && self.can().skip
+            && !self.vote_skip
+    }
+    /// Whether the room is a Music room (its queue and history live in `music`).
+    pub fn music_mode(&self) -> bool {
+        self.queue_mode.as_deref() == Some("music")
     }
     pub fn track_id(&self) -> Option<&str> {
         if self.queue_mode.as_deref() == Some("music") {
@@ -533,10 +588,18 @@ impl RoomState {
                         .filter(|id| uuid(id))
                         .map(str::to_owned);
                     self.has_source = v.is_object();
+                    self.current_track = RoomTrack::read(v);
                     self.start_at = v["startAt"]
                         .as_f64()
                         .filter(|n| n.is_finite() && *n >= 0.)
                         .unwrap_or(0.);
+                }
+                if let Some(v) = message.get("playedTracks") {
+                    self.played_tracks = RoomTrack::list(v, PLAYED_TRACKS, true);
+                }
+                if let Some(v) = message.get("queue") {
+                    self.upcoming = RoomTrack::list(v, 10, false);
+                    self.upcoming_total = v.as_array().map_or(0, Vec::len);
                 }
                 if let Some(v) = message.get("previousAvailable") {
                     self.previous_available = v.as_bool().unwrap_or(false);
@@ -1314,6 +1377,56 @@ mod tests {
         assert_eq!(back(0), Some(10));
     }
     #[test]
+    fn regular_queues_keep_only_titles_known_providers_and_youtube_videos() {
+        let mut r = room();
+        assert!(
+            r.played_tracks.is_empty() && r.upcoming.is_empty(),
+            "older servers"
+        );
+        let played: Vec<Value> = (0..12)
+            .map(|n| {
+                json!({"service":"youtube","id":format!("abcdefghi{n:02}"),
+                "title":format!("Played {n}"),"thumbnail":"http://127.0.0.1/private"})
+            })
+            .collect();
+        r.project(
+            &json!({"action":"sync","queueMode":"manual","playedTracks":played,
+            "currentSource":{"service":"direct","id":"https://private.example/a.mp4?token=x",
+                "title":"  Direct  ","startAt":3},
+            "queue":[{"service":"vimeo","id":"123","title":""},{"service":"evil","id":"x"},
+                {"service":"youtube","id":"not/a/video"},"junk"]}),
+            0,
+        );
+        assert_eq!(r.played_tracks.len(), PLAYED_TRACKS);
+        assert_eq!(r.played_tracks[0].title.as_deref(), Some("Played 2"));
+        assert_eq!(
+            r.played_tracks[9].youtube.as_ref().unwrap().as_str(),
+            "abcdefghi11"
+        );
+        let current = r.current_track.clone().unwrap();
+        assert_eq!(current.title.as_deref(), Some("Direct"));
+        assert_eq!((current.service, current.youtube), (Some("direct"), None));
+        assert_eq!(r.start_at, 3.);
+        assert_eq!(r.upcoming_total, 4);
+        assert_eq!(r.upcoming.len(), 3, "non-objects are dropped");
+        assert_eq!(
+            (r.upcoming[0].title.as_deref(), r.upcoming[0].service),
+            (None, Some("vimeo"))
+        );
+        assert_eq!(r.upcoming[1].service, None);
+        assert_eq!(r.upcoming[2].youtube, None);
+        let debug = format!("{r:?}");
+        assert!(!debug.contains("private"), "no source URL is retained");
+        // Regular rooms go back without a Music membership; Music rooms need one.
+        r.project(&json!({"action":"sync","grants":[[0,10]]}), 0);
+        assert!(r.can_go_back());
+        r.project(
+            &json!({"action":"sync","playedTracks":[],"currentSource":null}),
+            0,
+        );
+        assert!(r.played_tracks.is_empty() && r.current_track.is_none());
+    }
+    #[test]
     fn steps_go_back_from_the_current_track_within_the_server_cap() {
         assert_eq!(steps_back(3, 2), Some(1));
         assert_eq!(steps_back(3, 0), Some(3));
@@ -1361,8 +1474,13 @@ mod tests {
             0,
         );
         assert!(r.can_previous(5.5));
-        // Going back to a played track also needs a live Music membership.
-        r.project(&json!({"action":"sync","queueMode":"manual"}), 0);
+        // In a Music room, going back to a played track also needs a live membership.
+        r.project(
+            &json!({"action":"sync","music":{"revision":4,"planRevision":4,"queue":[],
+            "queueTotal":0,"current":null,"settings":{},"participants":[]}}),
+            0,
+        );
+        assert!(r.music_mode() && !r.active());
         assert!(r.can_previous(5.5) && !r.can_go_back());
     }
     #[test]

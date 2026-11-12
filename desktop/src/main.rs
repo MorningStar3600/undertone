@@ -10,9 +10,9 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use undertone_desktop::{
-    bridge::{self, HOST_URL, Ipc, Observation, Observer, RoomAddress},
+    bridge::{self, HOST_URL, Ipc, Observation, Observer, PreviousSteps, RoomAddress},
     connection::{Connection, Event, EventKind, Network, enqueue_ipc},
     session::{CommandAuthority, NativeState},
     text,
@@ -25,6 +25,7 @@ mod theme;
 mod ui;
 mod ui_input;
 mod ui_music;
+mod ui_queue;
 mod ui_scroll;
 mod ui_widget;
 
@@ -34,6 +35,8 @@ enum Control {
     Disconnect,
     PlayPause,
     Previous,
+    /// Back to a played track, this many tracks before the current one.
+    GoBack(u8),
     Next,
     Seek(f64),
     Mute,
@@ -71,7 +74,13 @@ struct Player {
     artwork: Option<Arc<gpui::RenderImage>>,
     room_name: String,
     details: ui::TrackDetails,
-    up_next: Vec<ui::UpcomingTrack>,
+    /// Played, current and upcoming tracks of every queue view.
+    queue: ui_queue::QueueView,
+    covers: ui_queue::Covers,
+    /// Where the main window's now-playing bars are; painted over its cached body.
+    bars: ui_queue::Bars,
+    /// The step count of a requested return to a played track (see `PreviousSteps`).
+    previous_steps: PreviousSteps,
     show_up_next: bool,
     join_input: Entity<ui_input::NativeInput>,
     native: NativeState,
@@ -175,7 +184,10 @@ impl Player {
             artwork: None,
             room_name: String::new(),
             details: ui::TrackDetails::default(),
-            up_next: Vec::new(),
+            queue: Default::default(),
+            covers: Default::default(),
+            bars: Default::default(),
+            previous_steps: Default::default(),
             show_up_next: true,
             join_input,
             native: NativeState::default(),
@@ -227,6 +239,7 @@ impl Player {
         self.host_generation += 1;
         self.host_ready = false;
         self.host_authority = None;
+        self.previous_steps.clear();
         self.ipc_overflow = Arc::new(AtomicBool::new(false));
         self.available = false;
         self.position = 0.;
@@ -245,7 +258,8 @@ impl Player {
         self.title.clear();
         self.room_name.clear();
         self.details = ui::TrackDetails::default();
-        self.up_next.clear();
+        self.queue = Default::default();
+        self.covers = Default::default();
         self.notice.clear();
         self.native = NativeState::default();
         self.authority = ui_music::Authority::default();
@@ -507,6 +521,9 @@ impl Player {
                     }
                     Ipc::Send { message } if self.host_ready => {
                         if let Some(authority) = self.host_authority {
+                            // A requested return to a played track rides on this host's
+                            // guarded `previous`; every other message passes unchanged.
+                            let message = self.previous_steps.apply(host, message, Instant::now());
                             self.send(authority, message);
                         }
                     }
@@ -529,6 +546,8 @@ impl Player {
                             self.available = false;
                         }
                         if code == "commandUnavailable" {
+                            // The host refused the command: no later Previous inherits steps.
+                            self.previous_steps.clear();
                             self.notice = text(&code);
                         } else {
                             self.status = text(&code);
@@ -574,7 +593,14 @@ impl Player {
             Control::PlayPause => {
                 Some(json!({"command":if self.playing { "pause" } else { "play" }}))
             }
+            // Without steps the server may restart the track (see `music::can_previous`).
             Control::Previous => Some(json!({"command":"previous"})),
+            // The host builds the same guarded `previous`; `previous_steps` adds the count.
+            Control::GoBack(_) if !self.native.room.can_go_back() => {
+                self.notice = text("playAgainUnavailable");
+                None
+            }
+            Control::GoBack(_) => Some(json!({"command":"previous"})),
             Control::Next => Some(json!({"command":"next"})),
             Control::Seek(position) => {
                 ui::safe_seek(position, self.duration, self.available && self.host_ready)
@@ -607,7 +633,24 @@ impl Player {
                     .as_ref()
                     .is_some_and(|c| authority.matches_session(&c.native_state()))
             {
-                self.script("command", command);
+                // A plain Previous never inherits a count; other commands leave a pending
+                // return to its own `previous`, which the host may not have sent yet.
+                let armed = match control {
+                    Control::GoBack(steps) => {
+                        self.previous_steps
+                            .arm(self.host_generation, steps, Instant::now())
+                    }
+                    Control::Previous => {
+                        self.previous_steps.clear();
+                        true
+                    }
+                    _ => true,
+                };
+                if armed {
+                    self.script("command", command);
+                } else {
+                    self.notice = text("commandUnavailable");
+                }
             } else {
                 self.notice = text("commandUnavailable");
             }

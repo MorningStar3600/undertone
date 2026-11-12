@@ -10,6 +10,7 @@ use super::{
     Control, Player, native_window, sky,
     ui::{self, rgb},
     ui_music::{Action, Panel},
+    ui_queue,
 };
 use crate::theme;
 use gpui::{
@@ -27,7 +28,8 @@ use undertone_desktop::{
     text,
 };
 
-pub const WIDGET_SIZE: (f32, f32) = (410., 640.);
+/// Tall enough for two played tracks, the current one and one upcoming under the moods.
+pub const WIDGET_SIZE: (f32, f32) = (410., 720.);
 /// Folded: one bar with the cover, title, play and unfold.
 pub const MINI_SIZE: (f32, f32) = (410., 68.);
 const RADIUS: f32 = 22.;
@@ -52,6 +54,8 @@ pub struct Widget {
     folded: bool,
     error: String,
     layers: Option<sky::Layers<Widget>>,
+    /// Where this window's now-playing bars are; painted over its cached body.
+    bars: ui_queue::Bars,
 }
 
 /// Bounds to open the widget with: the remembered place, moved fully onto a display, or the
@@ -234,6 +238,7 @@ impl Widget {
                 text("widgetPinFailed")
             },
             layers: None,
+            bars: ui_queue::Bars::default(),
         }
     }
     /// Frames drawn by this widget's sky (debug counter).
@@ -498,6 +503,8 @@ impl Widget {
 
     /// The window's content, a cached view over the sky (see `sky::Body`).
     fn body(&mut self, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        // The bars are laid out again with the body; the overlay reads where they are.
+        self.bars.clear();
         let Some(owner) = self.owner.upgrade() else {
             return div().into_any_element();
         };
@@ -855,7 +862,7 @@ impl Widget {
                         "previous",
                         Route::Playback(Control::Previous),
                         authority,
-                        live,
+                        player.previous_enabled(),
                         cx,
                     ))
                     .child(self.play(52., player.playing, live, authority, cx))
@@ -984,39 +991,81 @@ impl Widget {
             })
     }
 
+    /// A played track: a click (or Enter) brings it back for the room. Like `control`, but
+    /// the row's own layout sets its single hover and tooltip.
+    fn played(
+        &self,
+        player: &Player,
+        index: usize,
+        track: &ui_queue::QueueTrack,
+        authority: CommandAuthority,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let steps = player.queue.steps(index);
+        let enabled = player.go_back_enabled() && steps.is_some();
+        let route = Route::Playback(Control::GoBack(steps.unwrap_or(1)));
+        let base = div()
+            .id(("widget-played", index))
+            .occlude()
+            .border_1()
+            .border_color(gpui::transparent_black())
+            .when(enabled, |s| {
+                s.cursor_pointer()
+                    .focusable()
+                    .tab_stop(true)
+                    .focus(|s| s.border_color(rgb(ui::TEXT)))
+            })
+            .on_click(cx.listener(move |widget, _, _, cx| {
+                if enabled {
+                    widget.route(route.clone(), authority, cx);
+                }
+            }));
+        let image = player.covers.get(track.cover.as_ref());
+        ui_queue::played_row(base, track, image, 26., false, enabled)
+    }
+
+    /// The last played tracks, the current one and the next ones, kept compact.
     fn queue(&self, player: &Player, authority: CommandAuthority, cx: &Context<Self>) -> Div {
-        let mut list = column();
-        for (index, track) in player.up_next.iter().take(2).enumerate() {
-            list = list.child(
-                row()
-                    .gap(px(10.))
-                    .py(px(6.))
-                    .when(index > 0, |s| s.border_t_1().border_color(rgb(ui::BORDER)))
-                    // Queue DTO has no validated provider ID/art URL or duration.
-                    .child(ui::artwork(34., None).rounded(px(8.)))
-                    .child(
-                        column()
-                            .min_w_0()
-                            .flex_1()
-                            .child(
-                                div()
-                                    .text_size(px(13.5))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .truncate()
-                                    .child(track.title.clone()),
-                            )
-                            .when_some(track.artist.clone(), |s, a| s.child(quiet(a, 12.))),
-                    ),
-            );
+        let queue = &player.queue;
+        let (played_rows, upcoming_rows) = widget_rows(queue.played.len());
+        let mut list = column().gap(px(2.));
+        for (index, track) in queue.recent(played_rows) {
+            list = list.child(self.played(player, index, track, authority, cx));
         }
-        if player.up_next.is_empty() {
-            list = list.child(quiet(text("queueEmpty"), 12.).py(px(6.)));
+        if let Some(current) = &queue.current {
+            let image = player
+                .covers
+                .get(current.cover.as_ref())
+                .or_else(|| player.artwork.clone());
+            list = list.child(ui_queue::now_card(
+                current,
+                &player.title,
+                image,
+                player.playing,
+                &self.bars,
+                40.,
+                true,
+            ));
+        }
+        if !player.show_up_next {
+            list = list.child(quiet(text("upcomingHidden"), 12.).py(px(4.)).px(px(6.)));
+        } else if queue.upcoming.is_empty() {
+            list = list.child(quiet(text("queueEmpty"), 12.).py(px(4.)).px(px(6.)));
+        } else {
+            for track in queue.upcoming.iter().take(upcoming_rows) {
+                let image = player.covers.get(track.cover.as_ref());
+                list = list.child(ui_queue::upcoming_row(track, image, 30.));
+            }
         }
         column()
             .mt(px(16.))
             .gap(px(4.))
             .child(section(
-                text("upNext"),
+                text(if queue.history() {
+                    "queueHeading"
+                } else {
+                    "upNext"
+                }),
                 self.link(
                     "widget-see-queue",
                     "widgetSeeQueue",
@@ -1161,6 +1210,13 @@ impl Render for Widget {
             .layers
             .get_or_insert_with(|| sky::Layers::new(RADIUS, Widget::body, window, cx));
         let (sky, body) = (layers.sky.clone(), layers.body());
+        let playing = self
+            .owner
+            .upgrade()
+            .is_some_and(|owner| owner.read(cx).playing);
+        let bars = self
+            .bars
+            .overlay(playing && theme::animate(cx), rgb(ui::AMBER));
         div()
             .size_full()
             .relative()
@@ -1186,6 +1242,7 @@ impl Render for Widget {
                     .window_control_area(WindowControlArea::Drag),
             )
             .child(body)
+            .child(bars)
             .child(
                 div()
                     .absolute()
@@ -1197,6 +1254,12 @@ impl Render for Widget {
                     .border_color(rgb(ui::BORDER)),
             )
     }
+}
+
+/// Played and upcoming rows of the widget: at most two played tracks, three rows in all.
+fn widget_rows(played: usize) -> (usize, usize) {
+    let played = played.min(2);
+    (played, (3 - played).min(2))
 }
 
 fn forget_widget(main: WindowHandle<Player>, widget: WindowHandle<Widget>, cx: &mut App) {
@@ -1313,6 +1376,12 @@ mod tests {
         assert!(!can_show_personal(&state, ActiveTag::Unknown));
         state.account.expired = true;
         assert!(!can_show_personal(&state, ActiveTag::Active));
+    }
+    #[test]
+    fn the_widget_queue_stays_compact() {
+        assert_eq!(widget_rows(0), (0, 2));
+        assert_eq!(widget_rows(1), (1, 2));
+        assert_eq!(widget_rows(10), (2, 1));
     }
     #[test]
     fn folded_and_full_sizes_fit_the_card() {

@@ -9,6 +9,7 @@
 use super::{
     Control, Player,
     ui_music::{Action, Panel},
+    ui_queue::{self, QueueTrack},
 };
 use crate::{sky, theme};
 use gpui::{
@@ -72,11 +73,6 @@ pub struct TrackDetails {
     pub tags: Vec<String>,
     /// Populate only from an authenticated account's own track tags.
     pub personal_tags: Option<Vec<String>>,
-}
-
-pub struct UpcomingTrack {
-    pub title: String,
-    pub artist: Option<String>,
 }
 
 pub fn progress(position: f64, duration: f64) -> f32 {
@@ -148,6 +144,7 @@ fn glyph(path: &str) -> Option<&'static str> {
             "<circle cx='12' cy='8' r='4'/><path d='M4 21C4 16 8 14 12 14C16 14 20 16 20 21'/>"
         }
         "refresh" => "<path d='M20 12A8 8 0 1 1 17.7 6.3M20 4V9H15'/>",
+        "replay" => "<path d='M4 12A8 8 0 1 0 6.3 6.3M4 4V9H9'/>",
         "search" => "<circle cx='11' cy='11' r='6.5'/><path d='M16 16L21 21'/>",
         "chevron" => "<path d='M9 6L15 12L9 18'/>",
         "check" => "<path d='M5.5 12.5l4.2 4.2L18.5 8' stroke-width='2.2'/>",
@@ -731,7 +728,7 @@ impl Player {
                 "previous",
                 "previous",
                 Control::Previous,
-                enabled,
+                self.previous_enabled(),
                 false,
                 cx,
             ))
@@ -863,7 +860,7 @@ impl Player {
                         "previous",
                         "previous",
                         Control::Previous,
-                        enabled,
+                        self.previous_enabled(),
                         false,
                         cx,
                     ))
@@ -882,48 +879,89 @@ impl Player {
             )
     }
 
-    /// Right column list of the public upcoming preview, with the add entry point.
-    fn up_next_card(&self, rows: usize, cx: &Context<Self>) -> Div {
-        let music = self.native.room.active();
-        let mut list = column().gap(px(0.));
+    /// Previous is offered when there is history or the track would restart (server rule).
+    pub(super) fn previous_enabled(&self) -> bool {
+        self.available && self.host_ready && self.native.room.can_previous(self.position)
+    }
+
+    /// Going back to a played track: live playback, the skip grant, no vote-skip.
+    pub(super) fn go_back_enabled(&self) -> bool {
+        self.available && self.host_ready && self.native.room.can_go_back()
+    }
+
+    /// A played track of the main window: a click (or Enter) brings it back for the room.
+    pub(super) fn played_button(
+        &self,
+        id: impl Into<gpui::ElementId>,
+        index: usize,
+        track: &QueueTrack,
+        edge: f32,
+        cx: &Context<Self>,
+    ) -> Stateful<Div> {
+        let steps = self.queue.steps(index);
+        let enabled = self.go_back_enabled() && steps.is_some();
+        let base = self.action_base(id, Action::GoBack(steps.unwrap_or(1)), enabled, cx);
+        let image = self.covers.get(track.cover.as_ref());
+        ui_queue::played_row(base, track, image, edge, true, enabled)
+    }
+
+    /// The current track's card; its cover falls back to the main cover while loading.
+    pub(super) fn now_playing_card(&self, current: &QueueTrack, edge: f32, compact: bool) -> Div {
+        let image = self
+            .covers
+            .get(current.cover.as_ref())
+            .or_else(|| self.artwork.clone());
+        ui_queue::now_card(
+            current,
+            &self.title,
+            image,
+            self.playing,
+            &self.bars,
+            edge,
+            compact,
+        )
+    }
+
+    /// Right column: the room's recent past, the current track and what comes next, with
+    /// the add entry point.
+    fn up_next_card(&self, provider: bool, cx: &Context<Self>) -> Div {
+        let queue = &self.queue;
+        let history = queue.history();
+        let (played_rows, upcoming_rows) = card_rows(
+            provider,
+            queue.played.len(),
+            queue.current.is_some(),
+            self.show_up_next,
+        );
+        let mut list = column().gap(px(2.));
+        for (index, track) in queue.recent(played_rows) {
+            list = list.child(self.played_button(("card-played", index), index, track, 30., cx));
+        }
+        if let Some(current) = &queue.current {
+            list = list.child(self.now_playing_card(current, 52., false));
+        }
+        if history {
+            list = list.child(ui_queue::up_next_heading());
+        }
         if !self.show_up_next {
-            list = list.child(quiet(text("upcomingHidden"), 12.));
-        } else if self.up_next.is_empty() {
+            list = list.child(quiet(text("upcomingHidden"), 12.).px(px(6.)));
+        } else if queue.upcoming.is_empty() {
             list = list.child(
                 div()
                     .py(px(8.))
+                    .px(px(6.))
                     .text_size(px(12.))
                     .text_color(rgb(MUTED))
-                    .child(text(if music {
+                    .child(text(if self.native.room.active() {
                         "queueEmptyHint"
                     } else {
-                        "musicModeShort"
+                        "queueEmpty"
                     })),
             );
         } else {
-            for (index, track) in self.up_next.iter().take(rows).enumerate() {
-                list = list.child(
-                    row()
-                        .h(px(48.))
-                        .gap(px(10.))
-                        .when(index > 0, |s| s.border_t_1().border_color(rgb(BORDER)))
-                        // Queue DTO has no validated provider ID/art URL or duration.
-                        .child(artwork(34., None))
-                        .child(
-                            column()
-                                .gap(px(1.))
-                                .min_w_0()
-                                .flex_1()
-                                .child(
-                                    div()
-                                        .text_size(px(13.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .truncate()
-                                        .child(track.title.clone()),
-                                )
-                                .when_some(track.artist.clone(), |s, a| s.child(quiet(a, 12.))),
-                        ),
-                );
+            for track in queue.upcoming.iter().take(upcoming_rows) {
+                let image = self.covers.get(track.cover.as_ref());
+                list = list.child(ui_queue::upcoming_row(track, image, 34.));
             }
         }
         card()
@@ -936,7 +974,11 @@ impl Player {
             .child(
                 row()
                     .justify_between()
-                    .child(section_label(text("upNext")))
+                    .child(section_label(text(if history {
+                        "queueHeading"
+                    } else {
+                        "upNext"
+                    })))
                     .child(self.link_action(
                         "see-queue",
                         text("widgetSeeQueue"),
@@ -1169,6 +1211,8 @@ impl Player {
     /// The window's content, rendered as a cached view over the sky (see `sky::Body`).
     pub(super) fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         self.music_ui.scrolling.begin_frame(window, cx);
+        // The bars are laid out again with the body; the overlay reads where they are.
+        self.bars.clear();
         self.music_ui.rendered_authority = self.native.authority();
         let body = if self.connection.is_none() {
             self.welcome(cx)
@@ -1198,7 +1242,7 @@ impl Player {
                         .bg(rgb(BACKGROUND)),
                 );
             }
-            right = right.child(self.up_next_card(if provider { 4 } else { 8 }, cx));
+            right = right.child(self.up_next_card(provider, cx));
             row()
                 .items_start()
                 .gap(px(GUTTER))
@@ -1242,7 +1286,28 @@ impl Render for Player {
             }))
             .child(sky)
             .child(body)
+            .child(
+                self.bars
+                    .overlay(self.playing && theme::animate(cx), rgb(AMBER)),
+            )
     }
+}
+
+/// How many played and upcoming rows fit the right column's list (about 248 px under the
+/// provider, 484 px without it), after the current track's card and the "Up next" heading.
+fn card_rows(provider: bool, played: usize, current: bool, upcoming_shown: bool) -> (usize, usize) {
+    const PLAYED_ROW: usize = 40;
+    const UPCOMING_ROW: usize = 44;
+    const NOW_CARD: usize = 118;
+    let height: usize = if provider { 248 } else { 484 };
+    let played = played.min(if provider { 1 } else { 3 });
+    let used = played * PLAYED_ROW + usize::from(current || played > 0) * NOW_CARD;
+    let upcoming = if upcoming_shown {
+        height.saturating_sub(used) / UPCOMING_ROW
+    } else {
+        0
+    };
+    (played, upcoming)
 }
 
 #[cfg(test)]
@@ -1283,6 +1348,17 @@ mod tests {
     }
 
     #[test]
+    fn the_right_column_keeps_history_short_and_room_for_what_comes_next() {
+        // Old servers and empty rooms: the upcoming list keeps its former size.
+        assert_eq!(card_rows(true, 0, false, true), (0, 5));
+        assert_eq!(card_rows(false, 0, false, true), (0, 11));
+        // Under the provider: the last played track, the current one, two upcoming.
+        assert_eq!(card_rows(true, 10, true, true), (1, 2));
+        assert_eq!(card_rows(false, 10, true, true), (3, 5));
+        assert_eq!(card_rows(false, 10, true, false), (3, 0));
+    }
+
+    #[test]
     fn time_handles_unknown_and_long_tracks() {
         assert_eq!(time(f64::NAN), "0:00");
         assert_eq!(time(-1.), "0:00");
@@ -1310,7 +1386,7 @@ mod tests {
             );
         }
         assert!(logo_markup("logo-00").is_none() && logo_markup("logo-13").is_none());
-        for name in ["fold", "unfold", "pin", "play", "pause"] {
+        for name in ["fold", "unfold", "pin", "play", "pause", "replay"] {
             assert!(glyph(name).is_some());
         }
     }

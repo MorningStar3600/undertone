@@ -254,5 +254,10 @@
 	"animationSystem": "System",
 	"animationSystemOn": "System · on",
 	"animationSystemOff": "System · off",
-	"animationFrames": "Animation frames drawn (debug)"
+	"animationFrames": "Animation frames drawn (debug)",
+	"nowPlayingTrack": "Now playing",
+	"nowPaused": "Paused",
+	"queueHeading": "Queue",
+	"playAgainHint": "Play this track again for the whole room. The tracks played since come next again.",
+	"playAgainUnavailable": "Going back to a played track needs the skip permission, and is off while the room votes to skip."
 }
