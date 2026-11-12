@@ -79,6 +79,7 @@ export default {
 			"The server plans this order. Positions can change with participants, filters and new requests.",
 		"empty-queue": "No tracks admitted yet. Add a track or adjust the room filters.",
 		"now-playing": "Now playing",
+		"now-paused": "Paused",
 		"up-next": "Up next",
 		"play-again": "Play “{title}” again",
 		"play-again-hint":

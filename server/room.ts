@@ -103,6 +103,8 @@ import { conf } from "./ott-config.js";
 import { ALL_SKIP_CATEGORIES } from "ott-common/constants.js";
 
 const PLAYBACK_AUTH_FAILURE = /membership|session changed|quorum changed/;
+/** Played tracks of a regular queue shown to the room, most recent last. */
+const PUBLIC_PLAYED_TRACKS = 10;
 
 /**
  * Represents a User from the Room's perspective.
@@ -189,6 +191,8 @@ export interface RoomState extends RoomOptions, RoomStateComputed {
 	/** Server-only bounded legacy navigation stack, persisted with the room. */
 	previousTracks: QueueItem[];
 	previousAvailable: boolean;
+	/** Public tail of `previousTracks`, oldest first; Music rooms publish `music.played`. */
+	playedTracks: QueueItem[];
 	music: MusicRoomPublic | null;
 	musicState?: MusicSchedulerState;
 	currentSource: QueueItem | null;
@@ -226,6 +230,7 @@ export type RoomStateStorable = Omit<
 
 const syncableProps: (keyof RoomStateSyncable)[] = [
 	"previousAvailable",
+	"playedTracks",
 	"music",
 	"name",
 	"title",
@@ -291,6 +296,7 @@ export type RoomStatePersistable = Omit<
 	| "votesToSkip"
 	| "previousTracks"
 	| "previousAvailable"
+	| "playedTracks"
 >;
 
 export class Room implements RoomState {
@@ -325,6 +331,7 @@ export class Room implements RoomState {
 	}
 	private recordPlayback(options: { load?: boolean; seek?: boolean } = {}) {
 		this.markDirty("previousAvailable");
+		this.markDirty("playedTracks");
 		this.journal.commit(
 			{
 				currentSource: this.currentSource,
@@ -795,6 +802,11 @@ export class Room implements RoomState {
 
 	_currentSource: QueueItem | null = null;
 	previousTracks: QueueItem[] = [];
+	get playedTracks(): QueueItem[] {
+		return this.queueMode === QueueMode.Music
+			? []
+			: this.previousTracks.slice(-PUBLIC_PLAYED_TRACKS);
+	}
 	get previousAvailable(): boolean {
 		return (
 			!this.enableVoteSkip &&
@@ -998,6 +1010,7 @@ export class Room implements RoomState {
 
 	public set queueMode(value: QueueMode) {
 		this.markDirty("previousAvailable");
+		this.markDirty("playedTracks");
 		this._queueMode = value;
 		this.markDirty("queueMode");
 	}
@@ -1193,6 +1206,7 @@ export class Room implements RoomState {
 	private rememberPrevious(item: QueueItem) {
 		this.previousTracks = [...this.previousTracks.slice(-99), structuredClone(item)];
 		this.markDirty("previousAvailable");
+		this.markDirty("playedTracks");
 	}
 
 	/** Only the guarded, idempotent authoritative command can select server history. */
@@ -1274,6 +1288,7 @@ export class Room implements RoomState {
 		this.votesToSkip.clear();
 		this.markDirty("votesToSkip");
 		this.markDirty("previousAvailable");
+		this.markDirty("playedTracks");
 		install();
 	}
 

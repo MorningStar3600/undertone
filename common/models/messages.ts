@@ -52,6 +52,8 @@ export interface ServerMessageSync extends ServerMessageBase {
 	playbackPosition?: number;
 	currentSource?: QueueItem | null;
 	previousAvailable?: boolean;
+	/** Recently played tracks of a regular queue, oldest first; empty in Music rooms. */
+	playedTracks?: QueueItem[];
 	queue?: QueueItem[];
 	prevQueue?: QueueItem[] | null;
 	grants?: [Role, number][];

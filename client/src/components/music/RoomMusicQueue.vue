@@ -1,34 +1,36 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { RotateCcw } from "@lucide/vue";
+import type { MusicRoomEntry } from "ott-common/models/music-room";
 import { useMusicRoom } from "@/composables/use-music-room";
 import { useGrants } from "@/components/composables/grants";
-import { useConnection } from "@/plugins/connection";
-import { useRoomApi } from "@/util/roomapi";
 import { useStore } from "@/store";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
+import QueueHistory, { type QueueHistoryTrack } from "@/components/QueueHistory.vue";
 const room = useMusicRoom()!;
 const granted = useGrants();
 const store = useStore();
-const roomapi = useRoomApi(useConnection());
-/** Recently played tracks, oldest first, then the one playing now. */
-const played = computed(() => room.state.value?.played ?? []);
-const current = computed(() => room.state.value?.current ?? null);
-// Going back is a shared "previous": the same grant, and never a way around vote-skip.
-const canGoBack = computed(
-	() => granted("playback.skip") && !store.state.room.enableVoteSkip && room.active.value,
-);
-function playAgain(index: number) {
-	roomapi.previous(played.value.length - index);
-}
 const entries = computed(() =>
 	room.fullQueue.value ? room.queue.items.value : room.state.value?.queue.slice(0, 5) ?? [],
 );
 const contributor = (id: string) =>
 	room.state.value?.participants.find(p => p.participantId === id)?.name ??
 	room.participantNames.get(id);
+const historyTrack = (entry: MusicRoomEntry, fallbackTitle?: string): QueueHistoryTrack => ({
+	key: entry.entryId,
+	title: entry.title || fallbackTitle,
+	cover: entry.artworkUrl,
+	detail: [entry.artists.join(", "), contributor(entry.contributorId)]
+		.filter(Boolean)
+		.join(" · "),
+});
+/** Recently played tracks, oldest first, then the one playing now. */
+const played = computed(() => (room.state.value?.played ?? []).map(entry => historyTrack(entry)));
+const current = computed(() => {
+	const now = room.state.value?.current;
+	return now ? historyTrack(now, store.state.room.currentSource?.title) : null;
+});
 </script>
 
 <template>
@@ -51,61 +53,12 @@ const contributor = (id: string) =>
 			>
 		</div>
 		<p class="text-sm text-muted-foreground">{{ $t("musicRoom.order-hint") }}</p>
-		<ol v-if="played.length || current" class="flex flex-col gap-1" data-cy="music-played">
-			<li v-for="(entry, index) in played" :key="entry.entryId" class="min-w-0">
-				<button
-					type="button"
-					class="queue-track queue-track--played"
-					:disabled="!canGoBack"
-					:aria-label="
-						$t('musicRoom.play-again', {
-							title: entry.title || $t('musicRoom.untitled'),
-						})
-					"
-					:title="$t('musicRoom.play-again-hint')"
-					data-cy="music-play-again"
-					@click="playAgain(index)"
-				>
-					<span class="queue-thumb">
-						<img
-							v-if="entry.artworkUrl"
-							:src="entry.artworkUrl"
-							alt=""
-							loading="lazy"
-						/>
-					</span>
-					<span class="queue-text">
-						<b>{{ entry.title || $t("musicRoom.untitled") }}</b>
-						<small>{{
-							[entry.artists.join(", "), contributor(entry.contributorId)]
-								.filter(Boolean)
-								.join(" · ")
-						}}</small>
-					</span>
-					<RotateCcw class="queue-again" aria-hidden="true" />
-				</button>
-			</li>
-			<li v-if="current" class="min-w-0" aria-current="true" data-cy="music-now-playing">
-				<div class="queue-track queue-track--current">
-					<span class="queue-thumb">
-						<img v-if="current.artworkUrl" :src="current.artworkUrl" alt="" />
-					</span>
-					<span class="queue-text">
-						<b>{{
-							current.title ||
-							store.state.room.currentSource?.title ||
-							$t("musicRoom.untitled")
-						}}</b>
-						<small>{{
-							[current.artists.join(", "), contributor(current.contributorId)]
-								.filter(Boolean)
-								.join(" · ")
-						}}</small>
-					</span>
-					<Badge>{{ $t("musicRoom.now-playing") }}</Badge>
-				</div>
-			</li>
-		</ol>
+		<QueueHistory
+			:played="played"
+			:current="current"
+			:disabled="!room.active.value"
+			data-cy="music-played"
+		/>
 		<h3 v-if="played.length || current">{{ $t("musicRoom.up-next") }}</h3>
 		<p v-if="room.fullQueue.value && room.queue.loading.value" role="status">
 			<Spinner />{{ $t("common.loading") }}
@@ -256,34 +209,6 @@ const contributor = (id: string) =>
 </template>
 
 <style scoped>
-.queue-track {
-	display: flex;
-	align-items: center;
-	gap: 0.75rem;
-	width: 100%;
-	min-width: 0;
-	padding: 0.4rem 0.5rem;
-	border-radius: var(--radius);
-	text-align: left;
-}
-/* Played tracks read as the past: quieter, and a click brings one back. */
-.queue-track--played {
-	color: var(--muted-foreground);
-	cursor: pointer;
-	transition: background-color 0.15s;
-}
-.queue-track--played:hover:not(:disabled),
-.queue-track--played:focus-visible {
-	background: var(--accent);
-	color: var(--foreground);
-}
-.queue-track--played:disabled {
-	cursor: default;
-}
-.queue-track--current {
-	background: color-mix(in srgb, var(--primary) 12%, transparent);
-	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 35%, transparent);
-}
 .queue-thumb {
 	display: block;
 	flex: none;
@@ -297,35 +222,5 @@ const contributor = (id: string) =>
 	width: 100%;
 	height: 100%;
 	object-fit: cover;
-}
-.queue-text {
-	display: flex;
-	min-width: 0;
-	flex: 1;
-	flex-direction: column;
-}
-.queue-text b,
-.queue-text small {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-.queue-text b {
-	font-weight: 500;
-}
-.queue-text small {
-	font-size: 0.8rem;
-	color: var(--muted-foreground);
-}
-.queue-again {
-	width: 1rem;
-	height: 1rem;
-	flex: none;
-	opacity: 0;
-	transition: opacity 0.15s;
-}
-.queue-track--played:hover:not(:disabled) .queue-again,
-.queue-track--played:focus-visible .queue-again {
-	opacity: 1;
 }
 </style>

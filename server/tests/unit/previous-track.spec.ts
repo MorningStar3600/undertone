@@ -277,6 +277,23 @@ describe("server-owned previous track", () => {
 		expect(room.currentSource?.id).toBe("a");
 	});
 
+	it("publishes the recent played tracks of a regular queue, not of a Music room", async () => {
+		const room = prepare(
+			new Room({
+				name: "played-sync",
+				currentSource: track("a"),
+				queueMode: QueueMode.Manual,
+			}),
+		);
+		await room.queue.set([track("b"), track("c")]);
+		await room.dequeueNext();
+		await room.dequeueNext();
+		expect(room.playedTracks.map(item => item.id)).toEqual(["a", "b"]);
+		expect(room.syncableState().playedTracks.map(item => item.id)).toEqual(["a", "b"]);
+		room.queueMode = QueueMode.Music;
+		expect(room.playedTracks).toEqual([]);
+	});
+
 	it("returns several tracks back in a regular queue and requeues those played since", async () => {
 		const room = prepare(
 			new Room({

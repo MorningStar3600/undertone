@@ -19,6 +19,8 @@ export interface RoomState {
 	queueMode: QueueMode;
 	currentSource: QueueItem | null;
 	previousAvailable: boolean;
+	/** Recently played tracks of a regular queue, oldest first (Music rooms use music.played). */
+	playedTracks: QueueItem[];
 	queue: QueueItem[];
 	isPlaying: boolean;
 	playbackPosition: number;
@@ -51,6 +53,7 @@ export const roomModule: Module<RoomState, FullOTTStoreState> = {
 		queueMode: QueueMode.Manual,
 		currentSource: {} as QueueItem,
 		previousAvailable: false,
+		playedTracks: [],
 		queue: [],
 		isPlaying: false,
 		playbackPosition: 0,
@@ -89,6 +92,9 @@ export const roomModule: Module<RoomState, FullOTTStoreState> = {
 			}
 			if ("previousAvailable" in message) {
 				stateupdate.previousAvailable = message.previousAvailable;
+			}
+			if ("playedTracks" in message) {
+				stateupdate.playedTracks = message.playedTracks ?? [];
 			}
 			if ("name" in message) {
 				stateupdate.name = message.name;

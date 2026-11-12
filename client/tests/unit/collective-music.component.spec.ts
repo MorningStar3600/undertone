@@ -603,7 +603,7 @@ describe("music queue history", () => {
 		]);
 		expect(rows[2].attributes("aria-current")).toBe("true");
 		expect(rows[1].get("img").attributes("src")).toContain("second12");
-		const again = queue.findAll('[data-cy="music-play-again"]');
+		const again = queue.findAll('[data-cy="queue-play-again"]');
 		await again[0].trigger("click");
 		await again[1].trigger("click");
 		expect(command).toHaveBeenNthCalledWith(1, { command: "previous", steps: 2 });

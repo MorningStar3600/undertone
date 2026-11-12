@@ -1,5 +1,9 @@
 <template>
 	<div class="video-queue">
+		<QueueHistory :played="played" :current="current" class="mb-3" />
+		<h3 v-if="played.length || current" class="queue-heading">
+			{{ $t("musicRoom.up-next") }}
+		</h3>
 		<div class="empty-queue" v-if="store.state.room.queue.length === 0">
 			<div class="empty-inner">
 				<div class="msg label-mono">
@@ -86,6 +90,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { mdiPlus, mdiShuffleVariant, mdiExportVariant, mdiContentCopy } from "@mdi/js";
 import { ref, computed } from "vue";
 import VideoQueueItem from "@/components/VideoQueueItem.vue";
+import QueueHistory, { type QueueHistoryTrack } from "@/components/QueueHistory.vue";
+import { coverUrl } from "@/ambience/cover-ambience";
+import type { QueueItem } from "ott-common/models/video";
 import { useStore } from "@/store";
 import { Sortable } from "sortablejs-vue3";
 import { useConnection } from "@/plugins/connection";
@@ -99,6 +106,23 @@ defineEmits(["switchtab"]);
 const store = useStore();
 const roomapi = useRoomApi(useConnection());
 const granted = useGrants();
+
+const SERVICE_NAMES: Record<string, string> = { youtube: "YouTube", vimeo: "Vimeo" };
+const historyTrack = (item: QueueItem, key: string): QueueHistoryTrack => ({
+	key,
+	title: item.title,
+	cover: coverUrl(item),
+	detail: SERVICE_NAMES[item.service] ?? item.service,
+});
+/** Recently played tracks, oldest first, then the one playing now. */
+const played = computed(() =>
+	(store.state.room.playedTracks ?? []).map((item, index) =>
+		historyTrack(item, `${index}:${item.service}:${item.id}`),
+	),
+);
+const current = computed(() =>
+	store.state.room.currentSource ? historyTrack(store.state.room.currentSource, "current") : null,
+);
 
 function onQueueDragDrop(e: { oldIndex: number; newIndex: number }) {
 	roomapi.queueMove(e.oldIndex, e.newIndex);
@@ -120,6 +144,13 @@ const { copy: copyExported, copySuccess: copyExportSuccess } = useCopyFromTextbo
 </script>
 
 <style lang="scss" scoped>
+.queue-heading {
+	margin: 1rem 0.5rem 0.4rem;
+	font: 600 0.8rem/1.2 var(--ut-f-text, var(--font-body));
+	letter-spacing: 0.02em;
+	text-transform: none;
+	color: var(--muted-foreground);
+}
 .video-queue {
 	margin: 0 10px;
 	min-height: 500px;
