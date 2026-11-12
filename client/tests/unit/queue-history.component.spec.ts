@@ -87,13 +87,15 @@ describe("regular queue history", () => {
 		const row = wrapper.get('[data-cy="queue-item"]');
 		await row.get('[data-cy="btn-remove-from-queue"]').trigger("click");
 		const playNow = () =>
-			connection.sent.filter(
-				m => m.action === "req" && m.request.type === RoomRequestType.PlayNowRequest,
+			connection.sent.flatMap(m =>
+				m.action === "req" && m.request.type === RoomRequestType.PlayNowRequest
+					? [m.request]
+					: [],
 			);
 		expect(playNow()).toHaveLength(0);
 		await row.get(".video-title").trigger("click");
 		expect(playNow()).toHaveLength(1);
-		expect(playNow()[0].request.video).toMatchObject({ service: "youtube", id: "nextsong" });
+		expect(playNow()[0].video).toMatchObject({ service: "youtube", id: "nextsong" });
 		store.commit("room/SYNC", { currentSource: null, queue: [] });
 	});
 });
