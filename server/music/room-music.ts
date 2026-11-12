@@ -891,13 +891,21 @@ export class RoomMusic {
 			}
 		});
 	}
-	/** Go back `steps` tracks in the room's history (1: the track right before this one). */
-	async previous(authorize: Authorize, steps = 1) {
+	/** Go back `steps` tracks in the room's history (1: the track right before this one).
+	 * With `play`, the track starts playing even if the room was paused. */
+	async previous(authorize: Authorize, steps = 1, play = false) {
 		await this.advanceLock.protect(async () => {
 			this.isAdvancing = true;
 			try {
 				await this.refresh();
-				await this.navigateLocked("previous", "interrupted", authorize, undefined, steps);
+				await this.navigateLocked(
+					"previous",
+					"interrupted",
+					authorize,
+					undefined,
+					steps,
+					play,
+				);
 			} finally {
 				this.isAdvancing = false;
 			}
@@ -914,6 +922,8 @@ export class RoomMusic {
 		assertOccurrence: () => void = () => undefined,
 		/** Previous only: how many history steps to rewind at once. */
 		steps = 1,
+		/** Start playback with the target, even if the room was paused. */
+		play = false,
 	): Promise<boolean> {
 		for (let attempt = 0; attempt < 5; attempt++) {
 			assertOccurrence();
@@ -1113,7 +1123,8 @@ export class RoomMusic {
 							revision: state.revision + 1,
 							updatedAt: now,
 						};
-						if (!target.started && this.value!.playback.isPlaying) {
+						const playing = play || this.value!.playback.isPlaying;
+						if (!target.started && playing) {
 							state = reduce(state, {
 								type: "started",
 								playbackId: target.playbackId,
@@ -1126,11 +1137,10 @@ export class RoomMusic {
 							playback: {
 								...this.value!.playback,
 								currentSource: resolved!.video,
+								isPlaying: playing,
 								playbackPosition: resolved!.video.startAt ?? 0,
 								playbackSpeed: 1,
-								playbackStart: this.value!.playback.isPlaying
-									? new Date(now).toISOString()
-									: null,
+								playbackStart: playing ? new Date(now).toISOString() : null,
 							},
 						};
 					};

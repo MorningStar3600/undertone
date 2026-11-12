@@ -277,6 +277,45 @@ describe("server-owned previous track", () => {
 		expect(room.currentSource?.id).toBe("a");
 	});
 
+	it("starts a picked played track even when the room was paused", async () => {
+		const room = prepare(
+			new Room({
+				name: "pick-plays",
+				currentSource: track("a"),
+				queueMode: QueueMode.Manual,
+			}),
+		);
+		await room.queue.set([track("b")]);
+		await room.dequeueNext();
+		expect(room.isPlaying).toBe(false);
+		const pick = { ...command(room, "pick-a"), steps: 1 };
+		expect((await room.executePlaybackCommand(pick, auth)).status).toBe("applied");
+		expect(room.currentSource?.id).toBe("a");
+		expect(room.isPlaying).toBe(true);
+		// A plain Previous keeps the room's play/pause state.
+		room.isPlaying = false;
+		await room.dequeueNext();
+		expect((await previous(room, "plain")).status).toBe("applied");
+		expect(room.isPlaying).toBe(false);
+	});
+
+	it("starts a picked played Music track even when the room was paused", async () => {
+		const fixture = await musicFixture();
+		try {
+			const { room } = fixture;
+			const a = room.music!.current!;
+			await room.dequeueNext();
+			await room.executePlaybackCommand(command(room, "pause-music", "pause"), auth);
+			expect(room.isPlaying).toBe(false);
+			const pick = { ...command(room, "pick-music-a"), steps: 1 };
+			expect((await room.executePlaybackCommand(pick, auth)).status).toBe("applied");
+			expect(room.music!.current!.playbackId).toBe(a.playbackId);
+			expect(room.isPlaying).toBe(true);
+		} finally {
+			await fixture.connection.close();
+		}
+	});
+
 	it("publishes the recent played tracks of a regular queue, not of a Music room", async () => {
 		const room = prepare(
 			new Room({

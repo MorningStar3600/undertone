@@ -670,6 +670,7 @@ export default {
 	},
 	"video-queue-item": {
 		experimental: "Experimental support for this service! Expect it to break a lot.",
+		"click-to-play": "Click to play this track now",
 		"play-next": "Play Next",
 		"play-last": "Play Last",
 		messages: {

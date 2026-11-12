@@ -468,7 +468,14 @@ export class Room implements RoomState {
 							if (!this.previousAvailable) {
 								return result("unavailable");
 							}
-							await this.previous(context, command.steps ?? 1);
+							// Picking a played track (explicit steps) also starts it, like a click
+							// on a track in any player, when the user may play.
+							await this.previous(
+								context,
+								command.steps ?? 1,
+								command.steps !== undefined &&
+									this.grants.granted(context.role, "playback.play-pause"),
+							);
 							break;
 					}
 					return result();
@@ -1239,12 +1246,13 @@ export class Room implements RoomState {
 		});
 	}
 
-	private async previous(context: RoomRequestContext, steps = 1): Promise<void> {
+	private async previous(context: RoomRequestContext, steps = 1, play = false): Promise<void> {
 		const guard = this.commandGuards.get(context)!;
 		if (this.queueMode === QueueMode.Music) {
 			await this.musicEngine.previous(
 				this.musicPlaybackAuthorization(context, "playback.skip"),
 				steps,
+				play,
 			);
 			this.votesToSkip.clear();
 			this.musicSkipVotes.clear();
@@ -1257,11 +1265,12 @@ export class Room implements RoomState {
 			return;
 		}
 		const now = Date.now();
+		const playing = play || this.isPlaying;
 		const install = this.journal.stage(
 			{
 				currentSource: target,
 				positionSeconds: target.startAt ?? 0,
-				isPlaying: this.isPlaying,
+				isPlaying: playing,
 				rate: 1,
 			},
 			{ load: true },
@@ -1282,7 +1291,10 @@ export class Room implements RoomState {
 		this.currentSource = structuredClone(target);
 		this.playbackPosition = target.startAt ?? 0;
 		this.playbackSpeed = 1;
-		this._playbackStart = this.isPlaying ? dayjs(now) : null;
+		if (this.isPlaying !== playing) {
+			this.isPlaying = playing;
+		}
+		this._playbackStart = playing ? dayjs(now) : null;
 		this.videoSegments = [];
 		this.wantSponsorBlock = true;
 		this.votesToSkip.clear();
@@ -2892,6 +2904,10 @@ export class Room implements RoomState {
 		this.currentSource = videoToPlay;
 		this.markDirty("queue");
 		this.playbackPosition = 0;
+		// "Play now" means it: start playback too, when the user may play.
+		if (!this.isPlaying && this.grants.granted(context.role, "playback.play-pause")) {
+			this.isPlaying = true;
+		}
 		this._playbackStart = dayjs();
 		this.videoSegments = [];
 		if (this.autoSkipSegmentCategories.length > 0) {

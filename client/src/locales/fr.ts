@@ -235,6 +235,7 @@ export default {
 		"add-video": "Ajouter une vidéo",
 	},
 	"video-queue-item": {
+		"click-to-play": "Clique pour lancer ce titre maintenant",
 		experimental:
 			"Support expérimental pour ce service ! Attendez-vous à ce qu'il y est beaucoup de bug.",
 		"play-next": "Vidéo suivante",

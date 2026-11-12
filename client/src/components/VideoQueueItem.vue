@@ -1,5 +1,11 @@
 <template>
-	<div class="video ticket-notch">
+	<div
+		class="video ticket-notch"
+		:class="{ 'is-playable': clickToPlay }"
+		:title="clickToPlay ? $t('video-queue-item.click-to-play') : undefined"
+		data-cy="queue-item"
+		@click="onRowClick"
+	>
 		<div class="img-container">
 			<img
 				:src="thumbnailSource"
@@ -438,6 +444,16 @@ async function vote() {
 	isLoadingVote.value = false;
 }
 
+/** A queued track plays on a click anywhere on its row, not only through its menu. */
+const clickToPlay = computed(() => !props.isPreview && granted("manage-queue.play-now"));
+const CONTROLS = 'button, a, input, textarea, select, label, [role="menuitem"], .drag-handle';
+function onRowClick(event: MouseEvent) {
+	if (!clickToPlay.value || (event.target as Element | null)?.closest(CONTROLS)) {
+		return;
+	}
+	playNow();
+}
+
 function playNow() {
 	roomapi.playNow(item.value);
 }
@@ -469,6 +485,13 @@ watchEffect(() => {
 </script>
 
 <style lang="scss" scoped>
+.video.is-playable {
+	cursor: pointer;
+	transition: background-color 0.15s;
+}
+.video.is-playable:hover {
+	background-color: color-mix(in srgb, var(--foreground) 5%, transparent);
+}
 $sm-max: 600px;
 
 .video {

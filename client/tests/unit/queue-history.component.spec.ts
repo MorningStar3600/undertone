@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import { PlayerStatus, Role } from "ott-common/models/types";
 import { Grants, parseIntoGrantMask } from "ott-common/permissions";
+import { RoomRequestType } from "ott-common/models/messages";
 import VideoQueue from "@/components/VideoQueue.vue";
 import * as playbackSession from "@/playback/playback-session";
 import { mountComponent } from "./component-test-utils";
@@ -59,5 +60,40 @@ describe("regular queue history", () => {
 		await again[0].trigger("click");
 		expect(command).toHaveBeenCalledWith({ command: "previous", steps: 2 });
 		store.commit("room/SYNC", { playedTracks: [], currentSource: null, queue: [] });
+	});
+
+	it("plays a queued track on a click anywhere on its row, but not from its controls", async () => {
+		const { wrapper, store, connection } = mountComponent(VideoQueue);
+		store.state.users.you.id = "me";
+		store.state.users.users = new Map([
+			[
+				"me",
+				{
+					id: "me",
+					name: "Me",
+					role: Role.UnregisteredUser,
+					isLoggedIn: false,
+					status: PlayerStatus.ready,
+				},
+			],
+		]);
+		store.commit("room/SYNC", {
+			currentSource: song("nowplay1", "Now playing song"),
+			queue: [song("nextsong", "Next song")],
+			grants: new Grants(new Map([[Role.UnregisteredUser, parseIntoGrantMask(["*"])]])),
+		});
+		await nextTick();
+		connection.mockReset();
+		const row = wrapper.get('[data-cy="queue-item"]');
+		await row.get('[data-cy="btn-remove-from-queue"]').trigger("click");
+		const playNow = () =>
+			connection.sent.filter(
+				m => m.action === "req" && m.request.type === RoomRequestType.PlayNowRequest,
+			);
+		expect(playNow()).toHaveLength(0);
+		await row.get(".video-title").trigger("click");
+		expect(playNow()).toHaveLength(1);
+		expect(playNow()[0].request.video).toMatchObject({ service: "youtube", id: "nextsong" });
+		store.commit("room/SYNC", { currentSource: null, queue: [] });
 	});
 });
