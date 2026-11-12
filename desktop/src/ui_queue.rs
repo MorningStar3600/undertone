@@ -17,10 +17,10 @@ use std::{
     collections::{HashMap, VecDeque},
     rc::Rc,
     sync::{Arc, LazyLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use undertone_desktop::{
-    artwork::YoutubeId,
+    artwork::{Artwork, YoutubeId},
     music::{self, Entry, RoomMusic, RoomState, RoomTrack},
     text,
 };
@@ -122,6 +122,9 @@ fn join<const N: usize>(parts: [Option<String>; N]) -> Option<String> {
 
 /// Covers fetched at once; the rest wait their turn.
 const COVER_CONCURRENCY: usize = 3;
+/// A fetched cover waits up to five seconds for its window to be free.
+const COVER_RETRIES: usize = 100;
+const COVER_RETRY: Duration = Duration::from_millis(50);
 /// Row covers of the tracks on show (at most the published history, the current track, the
 /// public queue and one queue page), as small decoded thumbnails.
 #[derive(Default)]
@@ -183,26 +186,48 @@ impl Player {
             let done = key.clone();
             let task = cx.spawn_in(window, async move |this, cx| {
                 let art = (&mut request.result).await.ok().flatten();
-                let _ = this.update_in(cx, |player, window, cx| {
-                    // Gone from the view (or the room) meanwhile: the result is not wanted.
-                    let Some(task) = player.covers.inflight.remove(&done) else {
+                // Windows can run this task inside a nested message loop while the window is
+                // busy (the WebView starting, for one), and the window is then unavailable.
+                // Try again shortly rather than lose the cover and hold its fetch slot.
+                for _ in 0..COVER_RETRIES {
+                    let (key, art) = (done.clone(), art.clone());
+                    if this
+                        .update_in(cx, |player, window, cx| {
+                            player.cover_loaded(key, art, window, cx)
+                        })
+                        .is_ok()
+                        || this.upgrade().is_none()
+                    {
                         return;
-                    };
-                    task.detach();
-                    player.covers.images.insert(
-                        done,
-                        art.map(|art| {
-                            Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
-                                art.thumb_bgra.clone(),
-                            )]))
-                        }),
-                    );
-                    player.pump_covers(window, cx);
-                    cx.notify();
-                });
+                    }
+                    gpui::Timer::after(COVER_RETRY).await;
+                }
             });
             self.covers.inflight.insert(key, task);
         }
+    }
+    fn cover_loaded(
+        &mut self,
+        key: String,
+        art: Option<Arc<Artwork>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Gone from the view (or the room) meanwhile: the result is not wanted.
+        let Some(task) = self.covers.inflight.remove(&key) else {
+            return;
+        };
+        task.detach();
+        self.covers.images.insert(
+            key,
+            art.map(|art| {
+                Arc::new(gpui::RenderImage::new(vec![image::Frame::new(
+                    art.thumb_bgra.clone(),
+                )]))
+            }),
+        );
+        self.pump_covers(window, cx);
+        cx.notify();
     }
 }
 
