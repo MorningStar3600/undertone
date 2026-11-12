@@ -1,11 +1,14 @@
 //! This is a source/lifecycle observer, not a second timeline/clock implementation.
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 use url::Url;
 
 pub const HOST_URL: &str = "http://undertone.localhost/index.html";
 pub const MAX_MESSAGE: usize = 256 * 1024;
 const MAX_COUNTER: u64 = 9_007_199_254_740_991;
+/// Server cap of a `previous` command's `steps` (`common/playback/transport.ts`).
+pub const MAX_PREVIOUS_STEPS: u8 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomAddress {
@@ -106,6 +109,16 @@ pub fn allowed_outbound(value: &Value) -> bool {
             if let Some(extra) = extra {
                 fields.push(extra);
             }
+            // Only Rust adds `steps` to a host-built `previous` (see `PreviousSteps`).
+            if c["command"] == "previous" && c.get("steps").is_some() {
+                if !c["steps"]
+                    .as_u64()
+                    .is_some_and(|n| (1..=u64::from(MAX_PREVIOUS_STEPS)).contains(&n))
+                {
+                    return false;
+                }
+                fields.push("steps");
+            }
             keys(value, &["action", "command"])
                 && keys(c, &fields)
                 && nonce(&c["requestId"])
@@ -114,6 +127,48 @@ pub fn allowed_outbound(value: &Value) -> bool {
                 && (c["command"] == "previous" || c["occurrenceId"].as_u64().unwrap_or(0) > 0)
         }
         _ => false,
+    }
+}
+
+/// How long an armed step count waits for the host's `previous`. The host answers a command
+/// synchronously (a command or a `commandUnavailable` status), so this only bounds a lost answer.
+const STEPS_WAIT: Duration = Duration::from_secs(3);
+
+/// Going back to a played track. The host builds the guarded `previous` command exactly as for
+/// the Previous button (requestId, epoch, occurrenceId, sequence); Rust then adds how many
+/// played tracks to go back. Armed for one host, consumed by its next `previous` or cleared by
+/// its refusal, so a plain Previous never inherits a count.
+#[derive(Debug, Default)]
+pub struct PreviousSteps {
+    armed: Option<(u64, u8, Instant)>,
+}
+impl PreviousSteps {
+    /// Arms `steps` (1 to [`MAX_PREVIOUS_STEPS`]) for the next `previous` sent by `host`.
+    pub fn arm(&mut self, host: u64, steps: u8, now: Instant) -> bool {
+        self.armed = (1..=MAX_PREVIOUS_STEPS)
+            .contains(&steps)
+            .then_some((host, steps, now));
+        self.armed.is_some()
+    }
+    pub fn clear(&mut self) {
+        self.armed = None;
+    }
+    pub fn armed(&self) -> bool {
+        self.armed.is_some()
+    }
+    /// The message to send for a validated outbound host message: the armed host's next
+    /// `previous` carries the armed steps; anything else passes unchanged.
+    pub fn apply(&mut self, host: u64, mut message: Value, now: Instant) -> Value {
+        if message["action"] != "playback-command" || message["command"]["command"] != "previous" {
+            return message;
+        }
+        if let Some((armed, steps, at)) = self.armed.take()
+            && armed == host
+            && now.saturating_duration_since(at) < STEPS_WAIT
+        {
+            message["command"]["steps"] = json!(steps);
+        }
+        message
     }
 }
 
@@ -148,7 +203,12 @@ pub fn parse_ipc(uri: &str, body: &str) -> Option<Ipc> {
     }
     let ipc = serde_json::from_str::<Ipc>(body).ok()?;
     match &ipc {
-        Ipc::Send { message } if !allowed_outbound(message) => None,
+        // The host never chooses how far back to go; `PreviousSteps` adds that in Rust.
+        Ipc::Send { message }
+            if !allowed_outbound(message) || message["command"].get("steps").is_some() =>
+        {
+            None
+        }
         Ipc::State {
             position, duration, ..
         } if !position.is_finite()

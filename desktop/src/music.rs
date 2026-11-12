@@ -66,6 +66,9 @@ pub struct Entry {
     pub origin: String,
     pub request_id: Option<String>,
     pub title: Option<String>,
+    /// Public cover (YouTube thumbnails only). Fetched only through [`crate::artwork`], which
+    /// accepts nothing but an exact `i.ytimg.com` video thumbnail.
+    pub artwork_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -108,11 +111,32 @@ pub struct RoomMusic {
     pub plan_revision: u64,
     pub queue: Vec<Entry>,
     pub queue_total: usize,
+    /// Recently played tracks, oldest first; the last one is right before the current track.
+    /// Older servers do not send it.
+    #[serde(default)]
+    pub played: Vec<Entry>,
     pub current: Option<Current>,
     pub participants: Vec<Participant>,
     #[serde(default)]
     pub rule_moods: Vec<Mood>,
     pub settings: Settings,
+}
+
+/// At most this many played tracks are kept, the most recent ones (the server sends ten).
+pub const PLAYED_TRACKS: usize = 10;
+
+/// Past this many seconds into a track, a plain Previous restarts it instead of going back.
+/// Mirrors `PREVIOUS_RESTARTS_AFTER_SECONDS` in `common/playback/transport.ts`; the server
+/// decides again when the command arrives.
+pub const PREVIOUS_RESTARTS_AFTER_SECONDS: f64 = 5.;
+
+/// The `steps` of the `previous` command that returns to `played[index]` (oldest first):
+/// 1 is the track right before the current one.
+pub fn steps_back(played: usize, index: usize) -> Option<u8> {
+    played
+        .checked_sub(index)
+        .and_then(|steps| u8::try_from(steps).ok())
+        .filter(|steps| (1..=crate::bridge::MAX_PREVIOUS_STEPS).contains(steps))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -330,6 +354,8 @@ impl<T> Page<T> {
 
 #[derive(Clone, Debug, Default)]
 pub struct Can {
+    /// `playback.skip`: Next, Previous and going back to a played track.
+    pub skip: bool,
     pub preferences: bool,
     pub add_mix: bool,
     pub add_next: bool,
@@ -349,6 +375,12 @@ pub struct RoomState {
     pub own_logged_in: Option<bool>,
     /// Only a catalogue UUID is retained from legacy currentSource; no source URL/provider payload.
     pub catalogue_track_id: Option<String>,
+    /// Whether the room has a current source, and where in its media that track starts.
+    pub has_source: bool,
+    pub start_at: f64,
+    /// The server has history for Previous to go back to (never with vote-skip on).
+    pub previous_available: bool,
+    pub vote_skip: bool,
     pub music: Option<RoomMusic>,
     pub revision: u64,
     pub busy: bool,
@@ -429,6 +461,7 @@ impl RoomState {
             .unwrap_or(0);
         let active = self.active();
         Can {
+            skip: mask & (1 << 1) != 0,
             preferences: active,
             add_mix: active && mask & (1 << 3) != 0,
             add_next: active && mask & ((1 << 3) | (1 << 5)) == ((1 << 3) | (1 << 5)),
@@ -441,6 +474,25 @@ impl RoomState {
                 }),
             account_write: false,
         }
+    }
+    /// Whether a plain Previous would restart the current track rather than go back. The
+    /// server decides again; `position` is the media position, like `startAt`.
+    pub fn previous_restarts(&self, position: f64) -> bool {
+        self.has_source
+            && position.is_finite()
+            && position - self.start_at > PREVIOUS_RESTARTS_AFTER_SECONDS
+    }
+    /// The Previous control, as on the web player: the skip grant outside vote-skip, and
+    /// either history to go back to or a track that would restart.
+    pub fn can_previous(&self, position: f64) -> bool {
+        self.can().skip
+            && !self.vote_skip
+            && (self.previous_available || self.previous_restarts(position))
+    }
+    /// Going back to a played track is a shared Previous: the same grant, never a way around
+    /// vote-skip, and only from a live Music room membership (the only rooms with `played`).
+    pub fn can_go_back(&self) -> bool {
+        self.active() && self.can().skip && !self.vote_skip
     }
     pub fn track_id(&self) -> Option<&str> {
         if self.queue_mode.as_deref() == Some("music") {
@@ -480,6 +532,17 @@ impl RoomState {
                         .as_str()
                         .filter(|id| uuid(id))
                         .map(str::to_owned);
+                    self.has_source = v.is_object();
+                    self.start_at = v["startAt"]
+                        .as_f64()
+                        .filter(|n| n.is_finite() && *n >= 0.)
+                        .unwrap_or(0.);
+                }
+                if let Some(v) = message.get("previousAvailable") {
+                    self.previous_available = v.as_bool().unwrap_or(false);
+                }
+                if let Some(v) = message.get("enableVoteSkip") {
+                    self.vote_skip = v.as_bool().unwrap_or(false);
                 }
                 if let Some(v) = message.get("name") {
                     self.name = v.as_str().map(str::to_owned);
@@ -505,6 +568,8 @@ impl RoomState {
                         && music.revision >= self.revision
                     {
                         music.queue.truncate(10);
+                        let older = music.played.len().saturating_sub(PLAYED_TRACKS);
+                        music.played.drain(..older);
                         self.revision = music.revision;
                         self.music = Some(music);
                     }
@@ -1213,6 +1278,92 @@ mod tests {
                     .is_some()
             );
         }
+    }
+    fn entry(n: usize) -> Value {
+        json!({"entryId":format!("entry-{n}"),"trackId":format!("track-{n}"),"sourceId":"source",
+            "contributorId":"guest:one","artists":["Artist"],"origin":"manual",
+            "title":format!("Track {n}"),
+            "artworkUrl":format!("https://i.ytimg.com/vi/abcdefghi{n:02}/mqdefault.jpg")})
+    }
+    #[test]
+    fn played_tracks_are_optional_bounded_to_the_most_recent_and_carry_covers() {
+        // An older server sends neither `played` nor covers.
+        let r = room();
+        let music = r.music.as_ref().unwrap();
+        assert!(music.played.is_empty());
+        let mut r = room();
+        let played: Vec<Value> = (0..12).map(entry).collect();
+        r.project(
+            &json!({"action":"sync","music":{"revision":4,"planRevision":4,
+            "queue":[entry(20)],"queueTotal":1,"played":played,"current":null,"settings":{},
+            "participants":[{"participantId":"guest:one","clientIds":["client"],
+                "includeMoodIds":[],"excludeMoodIds":[]}]}}),
+            0,
+        );
+        let music = r.music.as_ref().unwrap();
+        assert_eq!(music.played.len(), PLAYED_TRACKS);
+        // Oldest first, the most recent kept: the last one is right before the current track.
+        assert_eq!(music.played[0].entry_id, "entry-2");
+        assert_eq!(music.played[9].entry_id, "entry-11");
+        assert_eq!(
+            music.queue[0].artwork_url.as_deref(),
+            Some("https://i.ytimg.com/vi/abcdefghi20/mqdefault.jpg")
+        );
+        let back = |index: usize| steps_back(music.played.len(), index);
+        assert_eq!(back(9), Some(1));
+        assert_eq!(back(0), Some(10));
+    }
+    #[test]
+    fn steps_go_back_from_the_current_track_within_the_server_cap() {
+        assert_eq!(steps_back(3, 2), Some(1));
+        assert_eq!(steps_back(3, 0), Some(3));
+        assert_eq!(
+            steps_back(3, 3),
+            None,
+            "the current track is not behind itself"
+        );
+        assert_eq!(steps_back(3, 7), None);
+        assert_eq!(steps_back(0, 0), None);
+        assert_eq!(steps_back(100, 0), Some(100));
+        assert_eq!(steps_back(101, 0), None);
+    }
+    #[test]
+    fn previous_restarts_after_five_seconds_and_needs_skip_outside_vote_skip() {
+        let mut r = room();
+        r.project(
+            &json!({"action":"sync","previousAvailable":false,
+            "currentSource":{"service":"youtube","id":"abcdefghijk","startAt":10}}),
+            0,
+        );
+        assert!(!r.can().skip, "the fixture guest has no skip grant");
+        assert!(!r.can_previous(60.) && !r.can_go_back());
+        r.project(&json!({"action":"sync","grants":[[-1,67108863],[0,10]]}), 0);
+        assert!(r.can().skip && r.can_go_back());
+        // Restart counts from the track's own start, and only strictly after five seconds.
+        assert!(!r.can_previous(14.));
+        assert!(!r.can_previous(10. + PREVIOUS_RESTARTS_AFTER_SECONDS));
+        assert!(r.previous_restarts(15.5) && r.can_previous(15.5));
+        assert!(!r.can_previous(f64::NAN) && !r.can_previous(f64::INFINITY));
+        // At the start, Previous needs history the server reports.
+        r.project(&json!({"action":"sync","previousAvailable":true}), 0);
+        assert!(r.can_previous(10.) && !r.previous_restarts(10.));
+        r.project(&json!({"action":"sync","enableVoteSkip":true}), 0);
+        assert!(!r.can_previous(60.) && !r.can_go_back());
+        r.project(
+            &json!({"action":"sync","enableVoteSkip":false,"previousAvailable":false,
+            "currentSource":null}),
+            0,
+        );
+        assert!(!r.previous_restarts(60.) && !r.can_previous(60.));
+        // A source without startAt starts at zero.
+        r.project(
+            &json!({"action":"sync","currentSource":{"service":"youtube","id":"x"}}),
+            0,
+        );
+        assert!(r.can_previous(5.5));
+        // Going back to a played track also needs a live Music membership.
+        r.project(&json!({"action":"sync","queueMode":"manual"}), 0);
+        assert!(r.can_previous(5.5) && !r.can_go_back());
     }
     #[test]
     fn late_pages_cannot_replace_newer_sync_and_modes_gate_writes() {

@@ -238,3 +238,66 @@ fn gaps_conflicts_and_future_source_schedules_fail_closed() {
         assert!(!forwarded(&json!({"action":action})));
     }
 }
+
+fn host_previous() -> Value {
+    json!({"action":"playback-command","command":{"command":"previous","requestId":"desktop-1-g1-c1","epoch":"epoch","occurrenceId":4,"sequence":9}})
+}
+
+#[test]
+fn only_rust_adds_a_bounded_step_count_to_a_guarded_previous() {
+    let mut stepped = host_previous();
+    stepped["command"]["steps"] = json!(3);
+    assert!(allowed_outbound(&stepped));
+    for steps in [
+        json!(0),
+        json!(101),
+        json!(-1),
+        json!(1.5),
+        json!("2"),
+        json!(null),
+    ] {
+        let mut invalid = host_previous();
+        invalid["command"]["steps"] = steps;
+        assert!(!allowed_outbound(&invalid));
+    }
+    let mut next = json!({"action":"playback-command","command":{"command":"next","requestId":"a","epoch":"e","occurrenceId":1}});
+    next["command"]["steps"] = json!(1);
+    assert!(!allowed_outbound(&next));
+    // The host page never chooses how far back to go, even within bounds.
+    let body = |message: &Value| json!({"kind":"send","message":message}).to_string();
+    assert!(parse_ipc(HOST_URL, &body(&host_previous())).is_some());
+    assert!(parse_ipc(HOST_URL, &body(&stepped)).is_none());
+}
+
+#[test]
+fn armed_steps_reach_only_the_next_previous_of_the_same_host() {
+    let now = std::time::Instant::now();
+    let mut steps = PreviousSteps::default();
+    // Unarmed, a plain Previous stays plain (the server may restart the track).
+    assert_eq!(steps.apply(1, host_previous(), now), host_previous());
+    assert!(!steps.arm(1, 0, now) && !steps.arm(1, MAX_PREVIOUS_STEPS + 1, now));
+    assert!(steps.arm(1, 2, now));
+    // Other outbound messages pass through and keep the count armed.
+    let probe = json!({"action":"clock-probe","generation":1,"nonce":"abc"});
+    assert_eq!(steps.apply(1, probe.clone(), now), probe);
+    let sent = steps.apply(1, host_previous(), now);
+    assert_eq!(sent["command"]["steps"], 2);
+    // Every guard the host built is kept.
+    for key in ["requestId", "epoch", "occurrenceId", "sequence"] {
+        assert_eq!(sent["command"][key], host_previous()["command"][key]);
+    }
+    assert!(allowed_outbound(&sent));
+    // Consumed once: the next Previous is plain again.
+    assert!(!steps.armed());
+    assert_eq!(steps.apply(1, host_previous(), now), host_previous());
+    // A replaced host, a refusal or a lost answer never hands the count to a later Previous.
+    steps.arm(1, 2, now);
+    assert_eq!(steps.apply(2, host_previous(), now), host_previous());
+    assert!(!steps.armed());
+    steps.arm(1, 2, now);
+    steps.clear();
+    assert_eq!(steps.apply(1, host_previous(), now), host_previous());
+    steps.arm(1, 2, now);
+    let late = now + std::time::Duration::from_secs(4);
+    assert_eq!(steps.apply(1, host_previous(), late), host_previous());
+}

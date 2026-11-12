@@ -58,6 +58,16 @@ impl YoutubeId {
                 .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)))
         .then(|| Self(id.into()))
     }
+    /// The video of a queue entry's public cover. Only an exact YouTube thumbnail URL names a
+    /// video; the cover itself is then fetched from [`Self::thumbnail_url`], never this URL.
+    pub fn from_artwork_url(url: &str) -> Option<Self> {
+        let (id, file) = url
+            .strip_prefix("https://i.ytimg.com/vi/")?
+            .split_once('/')?;
+        matches!(file, "mqdefault.jpg" | "hqdefault.jpg")
+            .then(|| Self::parse(id))
+            .flatten()
+    }
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -304,6 +314,24 @@ mod tests {
             YoutubeId::parse("aB01_-xyz89").unwrap().thumbnail_url(),
             "https://i.ytimg.com/vi/aB01_-xyz89/hqdefault.jpg"
         );
+        assert_eq!(
+            YoutubeId::from_artwork_url("https://i.ytimg.com/vi/aB01_-xyz89/mqdefault.jpg")
+                .unwrap()
+                .thumbnail_url(),
+            "https://i.ytimg.com/vi/aB01_-xyz89/hqdefault.jpg"
+        );
+        for url in [
+            "http://i.ytimg.com/vi/aB01_-xyz89/mqdefault.jpg",
+            "https://i.ytimg.com.evil/vi/aB01_-xyz89/mqdefault.jpg",
+            "https://i.ytimg.com/vi/aB01_-xyz89/maxres.webp",
+            "https://i.ytimg.com/vi/aB01_-xyz89/mqdefault.jpg?x=1",
+            "https://i.ytimg.com/vi/../mqdefault.jpg",
+            "https://i.ytimg.com/vi/short/mqdefault.jpg",
+            "https://user@i.ytimg.com/vi/aB01_-xyz89/mqdefault.jpg",
+            "https://127.0.0.1/vi/aB01_-xyz89/mqdefault.jpg",
+        ] {
+            assert!(YoutubeId::from_artwork_url(url).is_none(), "{url}");
+        }
         for id in [
             "",
             "abcdefghij",
