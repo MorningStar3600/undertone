@@ -1022,3 +1022,169 @@ async fn a_search_preempts_a_mood_page_load_and_keeps_partially_valid_results() 
     .await
     .unwrap();
 }
+
+async fn next_json(ws: &mut WebSocketStream<TcpStream>) -> Value {
+    let message = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(message.to_text().unwrap()).unwrap()
+}
+
+/// The guarded `previous` the host page builds for any Previous (as `player.js` does).
+fn host_previous(request: &str) -> String {
+    json!({"kind":"send","message":{"action":"playback-command","command":{
+        "command":"previous","requestId":request,"epoch":"epoch-a","occurrenceId":4,"sequence":12}}})
+    .to_string()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn played_tracks_reach_the_state_and_a_played_row_sends_a_stepped_guarded_previous() {
+    use std::time::Instant;
+    use undertone_desktop::{
+        bridge::{HOST_URL, Ipc, PreviousSteps, parse_ipc},
+        music::steps_back,
+    };
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let network = Network::new().unwrap();
+        let (events, _playback) = async_channel::bounded(8);
+        let c = network.connect(
+            91,
+            RoomAddress::parse(&format!("http://127.0.0.1:{port}/prefix/room/test")).unwrap(),
+            events,
+        );
+        let mut native = c.subscribe_native();
+        grant(&listener).await;
+        let mut ws = socket(&listener, false).await;
+        // The host page's command, then what Rust adds before it reaches the socket.
+        let mut steps = PreviousSteps::default();
+        let outbound = |steps: &mut PreviousSteps, body: String| {
+            let Some(Ipc::Send { message }) = parse_ipc(HOST_URL, &body) else {
+                panic!("the host's guarded previous is a valid outbound message");
+            };
+            steps.apply(1, message, Instant::now())
+        };
+
+        // An older server sends no history: nothing to go back to, Previous stays plain.
+        let old = until(&mut native, |s| s.room.active()).await;
+        assert!(old.room.music.as_ref().unwrap().played.is_empty());
+        assert!(old.room.played_tracks.is_empty());
+        assert!(c.send(
+            old.authority(),
+            outbound(&mut steps, host_previous("plain-0"))
+        ));
+        let sent = next_json(&mut ws).await;
+        assert_eq!(sent["command"]["requestId"], "plain-0");
+        assert!(sent["command"].get("steps").is_none());
+
+        let entry = |n: u8| {
+            json!({"entryId":format!("entry-{n}"),"trackId":format!("track-{n}"),
+            "sourceId":"source","contributorId":"me","artists":["Artist"],"origin":"manual",
+            "title":format!("Track {n}"),
+            "artworkUrl":format!("https://i.ytimg.com/vi/abcdefghi{n:02}/mqdefault.jpg")})
+        };
+        ws.send(Message::Text(
+            json!({"action":"sync","grants":[[0,10]],"previousAvailable":true,
+            "playedTracks":[],"music":{"revision":2,"planRevision":2,"queue":[entry(4)],
+                "queueTotal":1,"played":[entry(1),entry(2),entry(3)],"current":null,
+                "settings":{},"participants":[{"participantId":"me","clientIds":["self"],
+                    "includeMoodIds":[],"excludeMoodIds":[]}]}})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let state = until(&mut native, |s| {
+            s.room.music.as_ref().is_some_and(|m| m.played.len() == 3)
+        })
+        .await;
+        let played = &state.room.music.as_ref().unwrap().played;
+        assert_eq!(played[0].title.as_deref(), Some("Track 1"));
+        assert_eq!(
+            played[2].artwork_url.as_deref(),
+            Some("https://i.ytimg.com/vi/abcdefghi03/mqdefault.jpg")
+        );
+        assert!(state.room.can_go_back() && state.room.can_previous(0.));
+
+        // Clicking played[1] (oldest first) goes back two tracks, with the host's guards.
+        let back = steps_back(played.len(), 1).unwrap();
+        assert_eq!(back, 2);
+        assert!(steps.arm(1, back, Instant::now()));
+        assert!(c.send(
+            state.authority(),
+            outbound(&mut steps, host_previous("stepped-1"))
+        ));
+        assert_eq!(
+            next_json(&mut ws).await,
+            json!({"action":"playback-command","command":{"command":"previous","steps":2,
+                "requestId":"stepped-1","epoch":"epoch-a","occurrenceId":4,"sequence":12}})
+        );
+        // The Previous button right after is plain again: the server may restart the track.
+        assert!(c.send(
+            state.authority(),
+            outbound(&mut steps, host_previous("plain-1"))
+        ));
+        let sent = next_json(&mut ws).await;
+        assert_eq!(sent["command"]["requestId"], "plain-1");
+        assert!(sent["command"].get("steps").is_none());
+        // The host page itself can never choose how far back to go.
+        let mut forged: Value = serde_json::from_str(&host_previous("forged")).unwrap();
+        forged["message"]["command"]["steps"] = json!(1);
+        assert!(parse_ipc(HOST_URL, &forged.to_string()).is_none());
+
+        // A regular queue publishes its own history; the most recent is one step back.
+        ws.send(Message::Text(
+            json!({"action":"sync","queueMode":"manual","music":null,
+            "playedTracks":[{"service":"youtube","id":"abcdefghijk","title":"Old one"},
+                {"service":"vimeo","id":"42","title":"Last one"}],
+            "currentSource":{"service":"youtube","id":"zyxwvutsrqp","title":"Now","startAt":0},
+            "queue":[{"service":"youtube","id":"kJQP7kiw5Fk","title":"Next"}]})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let regular = until(&mut native, |s| {
+            s.room.queue_mode.as_deref() == Some("manual") && s.room.played_tracks.len() == 2
+        })
+        .await;
+        assert_eq!(
+            regular.room.played_tracks[1].title.as_deref(),
+            Some("Last one")
+        );
+        assert_eq!(regular.room.upcoming_total, 1);
+        assert!(regular.room.can_go_back(), "no Music membership needed");
+        let back = steps_back(regular.room.played_tracks.len(), 1).unwrap();
+        assert!(steps.arm(1, back, Instant::now()));
+        assert!(c.send(
+            regular.authority(),
+            outbound(&mut steps, host_previous("stepped-2"))
+        ));
+        let sent = next_json(&mut ws).await;
+        assert_eq!(
+            (&sent["command"]["requestId"], &sent["command"]["steps"]),
+            (&json!("stepped-2"), &json!(1))
+        );
+        // Vote-skip closes going back, like the Previous button.
+        ws.send(Message::Text(
+            json!({"action":"sync","enableVoteSkip":true,"previousAvailable":false})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let voting = until(&mut native, |s| s.room.vote_skip).await;
+        assert!(!voting.room.can_go_back() && !voting.room.can_previous(60.));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), ws.next())
+                .await
+                .is_err(),
+            "nothing else leaves"
+        );
+    })
+    .await
+    .unwrap();
+}
