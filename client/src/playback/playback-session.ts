@@ -24,7 +24,8 @@ import {
 } from "./playback-controller";
 
 export type PlaybackIntention =
-	| { command: "play" | "pause" | "next" | "previous" }
+	| { command: "play" | "pause" | "next" }
+	| { command: "previous"; steps?: number }
 	| { command: "seek"; positionSeconds: number }
 	| { command: "rate"; rate: number };
 

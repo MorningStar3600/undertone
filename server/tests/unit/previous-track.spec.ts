@@ -216,6 +216,86 @@ describe("server-owned previous track", () => {
 		}
 	});
 
+	it("returns to any played Music track at once and shows the room's recent history", async () => {
+		const fixture = await musicFixture();
+		try {
+			const { room } = fixture;
+			const a = room.music!.current!;
+			await room.dequeueNext();
+			const b = room.music!.current!;
+			await room.executePlaybackCommand(command(room, "skip-c", "next"), auth);
+			const c = room.music!.current!;
+			expect(room.music!.played?.map(entry => entry.entryId)).toEqual([a.entryId, b.entryId]);
+			// Two steps back: A plays again, then B and C come next in their order.
+			const back = { ...command(room, "back-to-a"), steps: 2 };
+			expect(PlaybackCommandSchema.safeParse(back).success).toBe(true);
+			expect((await room.executePlaybackCommand(back, auth)).status).toBe("applied");
+			expect(room.music!.current!.playbackId).toBe(a.playbackId);
+			expect(room.music!.queue.slice(0, 2).map(entry => entry.entryId)).toEqual([
+				b.entryId,
+				c.entryId,
+			]);
+			expect(room.music!.played).toEqual([]);
+			expect(room.musicState!.history.events).toHaveLength(3);
+			// Beyond the history: nothing moves.
+			const tooFar = { ...command(room, "too-far"), steps: 5 };
+			await room.executePlaybackCommand(tooFar, auth);
+			expect(room.music!.current!.playbackId).toBe(a.playbackId);
+			await room.dequeueNext();
+			expect(room.music!.current!.playbackId).toBe(b.playbackId);
+			expect(room.music!.played?.map(entry => entry.entryId)).toEqual([a.entryId]);
+		} finally {
+			await fixture.connection.close();
+		}
+	});
+
+	it("restarts the current track when Previous comes after the first seconds", async () => {
+		const room = prepare(
+			new Room({
+				name: "previous-restart",
+				currentSource: track("a"),
+				queueMode: QueueMode.Manual,
+			}),
+		);
+		await room.queue.set([track("b")]);
+		await room.dequeueNext();
+		room.playbackPosition = 42;
+		expect(room.previousRestarts).toBe(true);
+		expect((await previous(room, "restart-b")).status).toBe("applied");
+		expect(room.currentSource?.id).toBe("b");
+		expect(room.realPlaybackPosition).toBe(0);
+		expect(room.previousTracks.map(item => item.id)).toEqual(["a"]);
+		// At the start of the track, Previous goes back.
+		expect(room.previousRestarts).toBe(false);
+		expect((await previous(room, "back-a")).status).toBe("applied");
+		expect(room.currentSource?.id).toBe("a");
+		// Picking a played track always goes back, however far into this one we are.
+		await room.dequeueNext();
+		room.playbackPosition = 90;
+		const pick = { ...command(room, "pick-a"), steps: 1 };
+		expect((await room.executePlaybackCommand(pick, auth)).status).toBe("applied");
+		expect(room.currentSource?.id).toBe("a");
+	});
+
+	it("returns several tracks back in a regular queue and requeues those played since", async () => {
+		const room = prepare(
+			new Room({
+				name: "previous-steps",
+				currentSource: track("a"),
+				queueMode: QueueMode.Manual,
+			}),
+		);
+		await room.queue.set([track("b"), track("c"), track("d")]);
+		await room.dequeueNext();
+		await room.dequeueNext();
+		expect(room.previousTracks.map(item => item.id)).toEqual(["a", "b"]);
+		const back = { ...command(room, "back-two"), steps: 2 };
+		expect((await room.executePlaybackCommand(back, auth)).status).toBe("applied");
+		expect(room.currentSource?.id).toBe("a");
+		expect(room.queue.items.map(item => item.id)).toEqual(["b", "c", "d"]);
+		expect(room.previousAvailable).toBe(false);
+	});
+
 	it("rolls Music navigation back after staged SQL authorization failure", async () => {
 		const fixture = await musicFixture();
 		try {

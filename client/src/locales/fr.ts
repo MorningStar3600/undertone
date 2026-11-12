@@ -20,7 +20,8 @@ export default {
 	"player-widget": {
 		brand: "undertone",
 		move: "Déplacer le lecteur",
-		"move-hint": "Fais glisser le lecteur où tu veux, ou utilise les flèches ici (Maj pour aller plus vite, Début pour le replacer)",
+		"move-hint":
+			"Fais glisser le lecteur où tu veux, ou utilise les flèches ici (Maj pour aller plus vite, Début pour le replacer)",
 		fold: "Replier le lecteur",
 		unfold: "Déplier le lecteur",
 		together: "personne | rien que toi | {count} ensemble",
@@ -37,7 +38,8 @@ export default {
 			auto: "Auto",
 			on: "Activé",
 			off: "Désactivé",
-			"system-reduced": "Ton système demande de réduire les animations : en Auto, les fonds restent fixes.",
+			"system-reduced":
+				"Ton système demande de réduire les animations : en Auto, les fonds restent fixes.",
 		},
 	},
 	common: {

@@ -113,6 +113,9 @@ export interface MusicRoomPublic {
 	planRevision: number;
 	queue: MusicRoomEntry[];
 	queueTotal: number;
+	/** Recently played tracks, oldest first; the last one is right before the current track.
+	 * Each can be returned to with a `previous` playback command of `played.length - index` steps. */
+	played?: MusicRoomEntry[];
 	current:
 		| (MusicRoomEntry & {
 				playbackId: string;

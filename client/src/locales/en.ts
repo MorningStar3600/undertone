@@ -20,7 +20,8 @@ export default {
 	"player-widget": {
 		brand: "undertone",
 		move: "Move the player",
-		"move-hint": "Drag the player anywhere, or use the arrow keys here (Shift for bigger steps, Home to reset)",
+		"move-hint":
+			"Drag the player anywhere, or use the arrow keys here (Shift for bigger steps, Home to reset)",
 		fold: "Fold the player",
 		unfold: "Unfold the player",
 		together: "nobody here | just you | {count} together",
@@ -77,6 +78,11 @@ export default {
 		"order-hint":
 			"The server plans this order. Positions can change with participants, filters and new requests.",
 		"empty-queue": "No tracks admitted yet. Add a track or adjust the room filters.",
+		"now-playing": "Now playing",
+		"up-next": "Up next",
+		"play-again": "Play “{title}” again",
+		"play-again-hint":
+			"Go back to this track for the whole room. The tracks played since come next again.",
 		untitled: "Untitled track",
 		"contributed-by": "Brought by {name}",
 		"departed-participant": "a participant who left",

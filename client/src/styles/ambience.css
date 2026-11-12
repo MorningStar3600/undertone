@@ -47,7 +47,8 @@
 	--ut-ease: cubic-bezier(0.4, 0, 0.2, 1);
 	--ut-f-display: "Segoe UI Variable Display", "Hanken Grotesk", system-ui, sans-serif;
 	--ut-f-text: "Segoe UI Variable Text", "Hanken Grotesk", system-ui, sans-serif;
-	--ut-f-voice: "Sitka Heading", "Sitka Display", "Iowan Old Style", "Palatino Linotype", Palatino,
+	--ut-f-voice:
+		"Sitka Heading", "Sitka Display", "Iowan Old Style", "Palatino Linotype", Palatino,
 		ui-serif, Georgia, serif;
 	--ut-line: color-mix(in srgb, var(--ut-ink) 13%, transparent);
 	--ut-glass: color-mix(in srgb, var(--ut-ink) 7%, transparent);
@@ -55,9 +56,14 @@
 	--ut-tint: color-mix(in srgb, var(--ut-ink) 15%, transparent);
 	--ut-tintline: color-mix(in srgb, var(--ut-ink) 42%, transparent);
 	--ut-shadow: color-mix(in srgb, var(--ut-bg0) 75%, #000);
-	transition: --ut-bg0 0.9s var(--ut-ease), --ut-bg1 0.9s var(--ut-ease),
-		--ut-ink 0.9s var(--ut-ease), --ut-ink2 0.9s var(--ut-ease), --ut-mu 0.9s var(--ut-ease),
-		--ut-acc 0.9s var(--ut-ease), --ut-on 0.9s var(--ut-ease);
+	transition:
+		--ut-bg0 0.9s var(--ut-ease),
+		--ut-bg1 0.9s var(--ut-ease),
+		--ut-ink 0.9s var(--ut-ease),
+		--ut-ink2 0.9s var(--ut-ease),
+		--ut-mu 0.9s var(--ut-ease),
+		--ut-acc 0.9s var(--ut-ease),
+		--ut-on 0.9s var(--ut-ease);
 }
 
 /* ---------------------------------------------------------------------------
@@ -297,7 +303,8 @@ html.ut-ambient .ott-text-scanlines::after {
 	width: 125%;
 	aspect-ratio: 1;
 	margin: -62.5% 0 0 -62.5%;
-	background: radial-gradient(circle at 28% 30%, var(--g1), transparent 33%),
+	background:
+		radial-gradient(circle at 28% 30%, var(--g1), transparent 33%),
 		radial-gradient(circle at 72% 70%, var(--g2), transparent 33%);
 	animation: ut-k-spin calc(18s * var(--s)) linear infinite;
 }

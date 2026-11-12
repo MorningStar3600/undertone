@@ -7,6 +7,7 @@ import { UndoSourceSchema } from "./playback/undo.js";
 import type { PlaybackAuthorization } from "./playback/authorization.js";
 import { z } from "zod";
 import {
+	PREVIOUS_RESTARTS_AFTER_SECONDS,
 	PlaybackCommandSchema,
 	type PlaybackCommand,
 	type PlaybackCommandResult,
@@ -451,10 +452,16 @@ export class Room implements RoomState {
 							await this.skip({ type: RoomRequestType.SkipRequest }, context);
 							break;
 						case "previous":
+							// Like any player: past the first seconds, Previous restarts the
+							// track. An explicit step count (picking a played track) always goes back.
+							if (command.steps === undefined && this.previousRestarts) {
+								await this.restartCurrent(context);
+								break;
+							}
 							if (!this.previousAvailable) {
 								return result("unavailable");
 							}
-							await this.previous(context);
+							await this.previous(context, command.steps ?? 1);
 							break;
 					}
 					return result();
@@ -1189,11 +1196,41 @@ export class Room implements RoomState {
 	}
 
 	/** Only the guarded, idempotent authoritative command can select server history. */
-	private async previous(context: RoomRequestContext): Promise<void> {
+	/** Whether a plain Previous would restart the current track rather than go back. */
+	get previousRestarts(): boolean {
+		return (
+			!!this.currentSource &&
+			this.realPlaybackPosition - (this.currentSource.startAt ?? 0) >
+				PREVIOUS_RESTARTS_AFTER_SECONDS
+		);
+	}
+
+	/** Previous after the first seconds: back to the start of the current track. Previous is
+	 * a skip-level command, so it needs the skip grant rather than the seek grant. */
+	private async restartCurrent(context: RoomRequestContext): Promise<void> {
+		const start = this.currentSource?.startAt ?? 0;
+		const prevPosition = this.realPlaybackPosition;
+		if (this.queueMode === QueueMode.Music) {
+			await this.musicEngine.setPlayback(
+				{ playbackPosition: start },
+				this.musicPlaybackAuthorization(context, "playback.skip"),
+			);
+		} else {
+			await this.commandGuards.get(context)!();
+			context.auth?.assertCurrent?.();
+			this.seekRaw(start);
+		}
+		await this.publishRoomEvent({ type: RoomRequestType.SeekRequest, value: start }, context, {
+			prevPosition,
+		});
+	}
+
+	private async previous(context: RoomRequestContext, steps = 1): Promise<void> {
 		const guard = this.commandGuards.get(context)!;
 		if (this.queueMode === QueueMode.Music) {
 			await this.musicEngine.previous(
 				this.musicPlaybackAuthorization(context, "playback.skip"),
+				steps,
 			);
 			this.votesToSkip.clear();
 			this.musicSkipVotes.clear();
@@ -1201,7 +1238,7 @@ export class Room implements RoomState {
 			return;
 		}
 		await guard();
-		const target = this.previousTracks.at(-1);
+		const target = this.previousTracks.at(-steps);
 		if (!target) {
 			return;
 		}
@@ -1217,12 +1254,17 @@ export class Room implements RoomState {
 			now,
 		);
 		guard.assertCurrent?.();
-		// DJ's Next repeats the current track, so there is no return-to-queue promise.
+		// Tracks played after the target come next again, in their order. DJ's Next repeats
+		// the current track, so there is no return-to-queue promise for it.
+		const rewound = this.previousTracks.splice(this.previousTracks.length - steps);
+		const returning = rewound.slice(1).map(item => structuredClone(item));
 		if (this.currentSource && this.queueMode !== QueueMode.Dj) {
-			this.queue.items.unshift(structuredClone(this.currentSource));
+			returning.push(structuredClone(this.currentSource));
+		}
+		if (returning.length > 0) {
+			this.queue.items.unshift(...returning);
 			this.queue.markDirty();
 		}
-		this.previousTracks.pop();
 		this.currentSource = structuredClone(target);
 		this.playbackPosition = target.startAt ?? 0;
 		this.playbackSpeed = 1;

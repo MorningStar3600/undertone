@@ -110,6 +110,7 @@ import { useStore } from "@/store";
 import { useConnection } from "@/plugins/connection";
 import { useRoomApi } from "@/util/roomapi";
 import { useGrants } from "../composables/grants";
+import { PREVIOUS_RESTARTS_AFTER_SECONDS } from "ott-common/playback/transport";
 
 const props = withDefaults(
 	defineProps<{
@@ -130,10 +131,17 @@ const canPlay = computed(
 	() => !!store.state.room.currentSource?.id && granted("playback.play-pause"),
 );
 const canSkip = computed(() => !!store.state.room.currentSource?.id && granted("playback.skip"));
+/** Past the first seconds, Previous restarts the track (decided again by the server). */
+const restartsTrack = computed(() => {
+	const source = store.state.room.currentSource;
+	return (
+		!!source && props.currentPosition - (source.startAt ?? 0) > PREVIOUS_RESTARTS_AFTER_SECONDS
+	);
+});
 const canPrevious = computed(
 	() =>
 		store.state.room.playbackEstablished &&
-		store.state.room.previousAvailable &&
+		(store.state.room.previousAvailable || restartsTrack.value) &&
 		!store.state.room.enableVoteSkip &&
 		granted("playback.skip"),
 );

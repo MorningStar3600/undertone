@@ -172,6 +172,18 @@ describe("Persistent player controls", () => {
 		expect(connection.sent).toEqual([]);
 	});
 
+	it("offers Previous to restart a track once it has played a few seconds", async () => {
+		const { wrapper, store } = await controls();
+		store.commit("room/SYNC", { playbackEstablished: true, previousAvailable: false });
+		await nextTick();
+		// 30 s in, with no history: Previous restarts the track.
+		expect(wrapper.get('[data-cy="playback-previous"]').attributes("disabled")).toBeUndefined();
+		await wrapper.setProps({ truePosition: 3 });
+		expect(wrapper.get('[data-cy="playback-previous"]').attributes("disabled")).toBeDefined();
+		// Room module state outlives a store in these tests.
+		store.commit("room/SYNC", { playbackEstablished: false });
+	});
+
 	it("keeps primary commands mounted while the secondary panel opens and restores focus", async () => {
 		const { wrapper } = await controls();
 		const transport = wrapper.get('[data-cy="playback-toggle"]').element;

@@ -14,6 +14,9 @@ const commandBase = {
 	epoch: PlaybackEpochSchema,
 	occurrenceId: counter.min(1),
 };
+/** Past this many seconds into a track, a plain Previous restarts it instead of going back. */
+export const PREVIOUS_RESTARTS_AFTER_SECONDS = 5;
+
 export const PlaybackCommandSchema = z.discriminatedUnion("command", [
 	z.object({ ...commandBase, command: z.literal("play") }).strict(),
 	z.object({ ...commandBase, command: z.literal("pause") }).strict(),
@@ -25,6 +28,8 @@ export const PlaybackCommandSchema = z.discriminatedUnion("command", [
 			command: z.literal("previous"),
 			occurrenceId: counter,
 			sequence: counter,
+			/** How far back in the room's history to go; 1 (the default) is the last track. */
+			steps: z.number().int().min(1).max(100).optional(),
 		})
 		.strict(),
 	z

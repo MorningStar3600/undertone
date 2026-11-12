@@ -20,6 +20,7 @@ import RoomMusicQueue from "@/components/music/RoomMusicQueue.vue";
 import RoomMusicSettings from "@/components/music/RoomMusicSettings.vue";
 import RoomMusicConfirmation from "@/components/music/RoomMusicConfirmation.vue";
 import MusicPreview from "@/components/music/MusicPreview.vue";
+import * as playbackSession from "@/playback/playback-session";
 import { mountComponent } from "./component-test-utils";
 
 const { API } = vi.hoisted(() => ({
@@ -556,5 +557,60 @@ describe("Collective music commands and views", () => {
 		await flushPromises();
 		expect(room.confirmation.value).toBeNull();
 		expect(commands().filter(c => c.action === "request")).toHaveLength(1);
+	});
+});
+
+describe("music queue history", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("shows played tracks before the current one and goes back to any of them in one step", async () => {
+		const command = vi.fn(() => true);
+		vi.spyOn(playbackSession, "getPlaybackSession").mockReturnValue({
+			command,
+		} as unknown as NonNullable<ReturnType<typeof playbackSession.getPlaybackSession>>);
+		const mounted = await setup();
+		const first = { ...entry, entryId: "first", title: "First song" };
+		const second = {
+			...entry,
+			entryId: "second",
+			title: "Second song",
+			artworkUrl: "https://i.ytimg.com/vi/second12/mqdefault.jpg",
+		};
+		mounted.store.commit("room/SYNC", {
+			music: {
+				...publicState(),
+				played: [first, second],
+				current: {
+					...entry,
+					entryId: "now",
+					title: "Now song",
+					playbackId: "p-now",
+					started: true,
+					contributorMoodIds: [],
+					contributorMoods: [],
+				},
+			},
+		});
+		await nextTick();
+		const queue = mounted.wrapper.get('[data-cy="music-played"]');
+		const rows = queue.findAll("li");
+		expect(rows.map(row => row.text())).toEqual([
+			expect.stringContaining("First song"),
+			expect.stringContaining("Second song"),
+			expect.stringContaining("Now song"),
+		]);
+		expect(rows[2].attributes("aria-current")).toBe("true");
+		expect(rows[1].get("img").attributes("src")).toContain("second12");
+		const again = queue.findAll('[data-cy="music-play-again"]');
+		await again[0].trigger("click");
+		await again[1].trigger("click");
+		expect(command).toHaveBeenNthCalledWith(1, { command: "previous", steps: 2 });
+		expect(command).toHaveBeenNthCalledWith(2, { command: "previous", steps: 1 });
+
+		mounted.store.commit("room/SYNC", { enableVoteSkip: true });
+		await nextTick();
+		expect(again[0].attributes("disabled")).toBeDefined();
 	});
 });

@@ -61,10 +61,16 @@ class RoomApi {
 		});
 	}
 
-	/** Navigate trusted server history through the authoritative playback transport. */
-	previous() {
+	/**
+	 * Navigate trusted server history through the authoritative playback transport.
+	 * Without `steps`, it behaves like a player's Previous: past the first seconds the server
+	 * restarts the current track. With `steps`, it goes back exactly that many played tracks.
+	 */
+	previous(steps?: number) {
 		// Previous has no legacy undo/seek fallback: its history is owned by the server.
-		getPlaybackSession(this.connection)?.command({ command: "previous" });
+		getPlaybackSession(this.connection)?.command(
+			steps === undefined ? { command: "previous" } : { command: "previous", steps },
+		);
 	}
 
 	/** Send a message to skip the current video. */

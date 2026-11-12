@@ -5,10 +5,7 @@
 		"minChroma": 0.04,
 		"minColorfulShare": 0.15,
 		"warmNeutralChroma": 0.012,
-		"warmNeutralHue": [
-			15,
-			110
-		]
+		"warmNeutralHue": [15, 110]
 	},
 	"ambiences": [
 		{
@@ -17,20 +14,13 @@
 			"motion": "drift",
 			"hue": 285,
 			"palette": {
-				"background": [
-					"#0f1226",
-					"#1c1529"
-				],
+				"background": ["#0f1226", "#1c1529"],
 				"ink": "#f1ecf7",
 				"inkSoft": "#dbd4ec",
 				"muted": "#bdb7d3",
 				"accent": "#f2ae92",
 				"onAccent": "#2a1620",
-				"glows": [
-					"rgba(124,98,206,0.5)",
-					"rgba(232,140,128,0.3)",
-					"rgba(70,96,200,0.42)"
-				]
+				"glows": ["rgba(124,98,206,0.5)", "rgba(232,140,128,0.3)", "rgba(70,96,200,0.42)"]
 			},
 			"logo": "<path d=\"M2 12h20\"/><path d=\"M5.5 12a6.5 6.5 0 0 1 13 0\"/><path d=\"M7 14.2h10a5 5 0 0 1-10 0z\" fill=\"currentColor\" stroke=\"none\"/>"
 		},
@@ -40,20 +30,13 @@
 			"motion": "rise",
 			"hue": 44,
 			"palette": {
-				"background": [
-					"#160d0a",
-					"#2a1510"
-				],
+				"background": ["#160d0a", "#2a1510"],
 				"ink": "#f7ede3",
 				"inkSoft": "#e8d6c6",
 				"muted": "#cdb7a6",
 				"accent": "#f0c27a",
 				"onAccent": "#2b1707",
-				"glows": [
-					"rgba(214,90,46,0.45)",
-					"rgba(240,160,70,0.3)",
-					"rgba(170,50,34,0.45)"
-				]
+				"glows": ["rgba(214,90,46,0.45)", "rgba(240,160,70,0.3)", "rgba(170,50,34,0.45)"]
 			},
 			"logo": "<path d=\"M7.5 17.5V8.5a4.5 4.5 0 0 1 9 0v9\"/><path d=\"M7.5 18.6h9l4.3 3.4H3.2z\" fill=\"currentColor\" stroke=\"none\"/>"
 		},
@@ -63,20 +46,13 @@
 			"motion": "sway",
 			"hue": 125,
 			"palette": {
-				"background": [
-					"#0d130c",
-					"#1a2214"
-				],
+				"background": ["#0d130c", "#1a2214"],
 				"ink": "#eef1e4",
 				"inkSoft": "#d6dcc6",
 				"muted": "#b6bfa4",
 				"accent": "#dcc56c",
 				"onAccent": "#1e1c08",
-				"glows": [
-					"rgba(170,196,96,0.32)",
-					"rgba(232,212,124,0.26)",
-					"rgba(64,118,62,0.45)"
-				]
+				"glows": ["rgba(170,196,96,0.32)", "rgba(232,212,124,0.26)", "rgba(64,118,62,0.45)"]
 			},
 			"logo": "<path d=\"M12 11.2a1.75 1.75 0 0 1 3.5 0a3.5 3.5 0 0 1-7 0a5.25 5.25 0 0 1 10.5 0a7 7 0 0 1-14 0\"/>"
 		},
@@ -86,20 +62,13 @@
 			"motion": "ripple",
 			"hue": 205,
 			"palette": {
-				"background": [
-					"#071a1e",
-					"#0d2a2e"
-				],
+				"background": ["#071a1e", "#0d2a2e"],
 				"ink": "#e9f5f3",
 				"inkSoft": "#cde4e1",
 				"muted": "#a9c9c5",
 				"accent": "#ecd6a6",
 				"onAccent": "#1f1a0c",
-				"glows": [
-					"rgba(92,196,196,0.42)",
-					"rgba(236,214,166,0.24)",
-					"rgba(30,110,130,0.5)"
-				]
+				"glows": ["rgba(92,196,196,0.42)", "rgba(236,214,166,0.24)", "rgba(30,110,130,0.5)"]
 			},
 			"logo": "<path d=\"M12 2.8c2.7 3.5 4.3 5.9 4.3 8a4.3 4.3 0 0 1-8.6 0c0-2.1 1.6-4.5 4.3-8z\" fill=\"currentColor\" stroke=\"none\"/><ellipse cx=\"12\" cy=\"19.2\" rx=\"8.5\" ry=\"2.4\"/>"
 		},
@@ -109,20 +78,13 @@
 			"motion": "orbit",
 			"hue": 350,
 			"palette": {
-				"background": [
-					"#1a0b17",
-					"#2b1024"
-				],
+				"background": ["#1a0b17", "#2b1024"],
 				"ink": "#f8ecf3",
 				"inkSoft": "#ebd2e0",
 				"muted": "#d0b0c2",
 				"accent": "#f6b4c8",
 				"onAccent": "#2d0f1d",
-				"glows": [
-					"rgba(214,90,150,0.45)",
-					"rgba(150,84,206,0.4)",
-					"rgba(250,170,150,0.24)"
-				]
+				"glows": ["rgba(214,90,150,0.45)", "rgba(150,84,206,0.4)", "rgba(250,170,150,0.24)"]
 			},
 			"logo": "<path d=\"M2.5 12c3.2-6.5 6.3-6.5 9.5 0s6.3 6.5 9.5 0\"/><path d=\"M2.5 12c3.2 6.5 6.3 6.5 9.5 0s6.3-6.5 9.5 0\"/>"
 		},
@@ -132,10 +94,7 @@
 			"motion": "breathe",
 			"hue": null,
 			"palette": {
-				"background": [
-					"#121315",
-					"#1d1e21"
-				],
+				"background": ["#121315", "#1d1e21"],
 				"ink": "#f0efec",
 				"inkSoft": "#d9d8d3",
 				"muted": "#b8b7b1",
@@ -155,20 +114,13 @@
 			"motion": "curtain",
 			"hue": 22,
 			"palette": {
-				"background": [
-					"#170609",
-					"#2a0b12"
-				],
+				"background": ["#170609", "#2a0b12"],
 				"ink": "#f9eaec",
 				"inkSoft": "#ecd0d4",
 				"muted": "#d3acb2",
 				"accent": "#ff9f8c",
 				"onAccent": "#2c0a0c",
-				"glows": [
-					"rgba(196,40,72,0.42)",
-					"rgba(236,96,96,0.3)",
-					"rgba(120,22,44,0.55)"
-				]
+				"glows": ["rgba(196,40,72,0.42)", "rgba(236,96,96,0.3)", "rgba(120,22,44,0.55)"]
 			},
 			"logo": "<path d=\"M7 4.5v6.3a5 5 0 0 0 10 0M17 4.5v11.3\"/><path d=\"M4.5 20.3c2.5-2.2 5-2.2 7.5 0s5 2.2 7.5 0\"/>"
 		},
@@ -178,20 +130,13 @@
 			"motion": "pendulum",
 			"hue": 72,
 			"palette": {
-				"background": [
-					"#15100a",
-					"#241a0f"
-				],
+				"background": ["#15100a", "#241a0f"],
 				"ink": "#f6efe2",
 				"inkSoft": "#e6d9c2",
 				"muted": "#c9b99c",
 				"accent": "#eac35e",
 				"onAccent": "#261b04",
-				"glows": [
-					"rgba(226,168,74,0.4)",
-					"rgba(176,116,44,0.38)",
-					"rgba(255,222,150,0.16)"
-				]
+				"glows": ["rgba(226,168,74,0.4)", "rgba(176,116,44,0.38)", "rgba(255,222,150,0.16)"]
 			},
 			"logo": "<path d=\"M12 2.5v4.2\"/><path d=\"M5.5 13a6.5 6.3 0 0 1 13 0z\" fill=\"currentColor\"/><path d=\"M12 16.2v4.3M7.6 15.6l-2.1 3.3M16.4 15.6l2.1 3.3\"/>"
 		},
@@ -201,10 +146,7 @@
 			"motion": "aurora",
 			"hue": 162,
 			"palette": {
-				"background": [
-					"#081612",
-					"#0f2620"
-				],
+				"background": ["#081612", "#0f2620"],
 				"ink": "#eaf6f0",
 				"inkSoft": "#cfe6dc",
 				"muted": "#a8c8ba",
@@ -224,20 +166,13 @@
 			"motion": "halo",
 			"hue": 307,
 			"palette": {
-				"background": [
-					"#120b1f",
-					"#1f1235"
-				],
+				"background": ["#120b1f", "#1f1235"],
 				"ink": "#f2ecfb",
 				"inkSoft": "#ddd3f0",
 				"muted": "#bfb3da",
 				"accent": "#d4bdff",
 				"onAccent": "#1e1033",
-				"glows": [
-					"rgba(146,96,232,0.48)",
-					"rgba(206,124,222,0.3)",
-					"rgba(96,70,196,0.45)"
-				]
+				"glows": ["rgba(146,96,232,0.48)", "rgba(206,124,222,0.3)", "rgba(96,70,196,0.45)"]
 			},
 			"logo": "<circle cx=\"12\" cy=\"12\" r=\"8.5\"/><circle cx=\"12\" cy=\"15\" r=\"5.5\"/><circle cx=\"12\" cy=\"18.1\" r=\"2.4\" fill=\"currentColor\" stroke=\"none\"/>"
 		},
@@ -247,10 +182,7 @@
 			"motion": "call",
 			"hue": null,
 			"palette": {
-				"background": [
-					"#171312",
-					"#241e1c"
-				],
+				"background": ["#171312", "#241e1c"],
 				"ink": "#f5eeea",
 				"inkSoft": "#e2d6d0",
 				"muted": "#c4b6ae",
@@ -270,10 +202,7 @@
 			"motion": "sweep",
 			"hue": 258,
 			"palette": {
-				"background": [
-					"#070d1a",
-					"#0d1830"
-				],
+				"background": ["#070d1a", "#0d1830"],
 				"ink": "#ecf1fa",
 				"inkSoft": "#d0dbef",
 				"muted": "#aab9d4",
@@ -291,328 +220,152 @@
 	"vectors": [
 		{
 			"name": "solid crimson",
-			"pixels": [
-				[
-					"#b0122e",
-					16
-				]
-			],
+			"pixels": [["#b0122e", 16]],
 			"expected": "grenat"
 		},
 		{
 			"name": "solid red",
-			"pixels": [
-				[
-					"#d62828",
-					16
-				]
-			],
+			"pixels": [["#d62828", 16]],
 			"expected": "grenat"
 		},
 		{
 			"name": "solid orange",
-			"pixels": [
-				[
-					"#f07f22",
-					16
-				]
-			],
+			"pixels": [["#f07f22", 16]],
 			"expected": "braise"
 		},
 		{
 			"name": "solid amber",
-			"pixels": [
-				[
-					"#d49a2a",
-					16
-				]
-			],
+			"pixels": [["#d49a2a", 16]],
 			"expected": "tabac"
 		},
 		{
 			"name": "solid brown",
-			"pixels": [
-				[
-					"#6b4423",
-					16
-				]
-			],
+			"pixels": [["#6b4423", 16]],
 			"expected": "tabac"
 		},
 		{
 			"name": "solid yellow",
-			"pixels": [
-				[
-					"#f2d43c",
-					16
-				]
-			],
+			"pixels": [["#f2d43c", 16]],
 			"expected": "tabac"
 		},
 		{
 			"name": "solid olive",
-			"pixels": [
-				[
-					"#6f7a2c",
-					16
-				]
-			],
+			"pixels": [["#6f7a2c", 16]],
 			"expected": "sous-bois"
 		},
 		{
 			"name": "solid green",
-			"pixels": [
-				[
-					"#2f9e44",
-					16
-				]
-			],
+			"pixels": [["#2f9e44", 16]],
 			"expected": "jade"
 		},
 		{
 			"name": "solid mint",
-			"pixels": [
-				[
-					"#6fd6a8",
-					16
-				]
-			],
+			"pixels": [["#6fd6a8", 16]],
 			"expected": "jade"
 		},
 		{
 			"name": "solid teal",
-			"pixels": [
-				[
-					"#138a8a",
-					16
-				]
-			],
+			"pixels": [["#138a8a", 16]],
 			"expected": "lagune"
 		},
 		{
 			"name": "solid cyan",
-			"pixels": [
-				[
-					"#22b5d6",
-					16
-				]
-			],
+			"pixels": [["#22b5d6", 16]],
 			"expected": "lagune"
 		},
 		{
 			"name": "solid sky",
-			"pixels": [
-				[
-					"#4aa3e8",
-					16
-				]
-			],
+			"pixels": [["#4aa3e8", 16]],
 			"expected": "route-de-nuit"
 		},
 		{
 			"name": "solid navy",
-			"pixels": [
-				[
-					"#14244f",
-					16
-				]
-			],
+			"pixels": [["#14244f", 16]],
 			"expected": "route-de-nuit"
 		},
 		{
 			"name": "solid indigo",
-			"pixels": [
-				[
-					"#3f3a9e",
-					16
-				]
-			],
+			"pixels": [["#3f3a9e", 16]],
 			"expected": "heure-bleue"
 		},
 		{
 			"name": "solid violet",
-			"pixels": [
-				[
-					"#7b3fd1",
-					16
-				]
-			],
+			"pixels": [["#7b3fd1", 16]],
 			"expected": "amethyste"
 		},
 		{
 			"name": "solid purple",
-			"pixels": [
-				[
-					"#8e2c9e",
-					16
-				]
-			],
+			"pixels": [["#8e2c9e", 16]],
 			"expected": "amethyste"
 		},
 		{
 			"name": "solid magenta",
-			"pixels": [
-				[
-					"#c2338a",
-					16
-				]
-			],
+			"pixels": [["#c2338a", 16]],
 			"expected": "aurore"
 		},
 		{
 			"name": "solid rose",
-			"pixels": [
-				[
-					"#e8a0b0",
-					16
-				]
-			],
+			"pixels": [["#e8a0b0", 16]],
 			"expected": "aurore"
 		},
 		{
 			"name": "solid grey",
-			"pixels": [
-				[
-					"#7a7a7a",
-					16
-				]
-			],
+			"pixels": [["#7a7a7a", 16]],
 			"expected": "brume"
 		},
 		{
 			"name": "solid warm-grey",
-			"pixels": [
-				[
-					"#8a7f76",
-					16
-				]
-			],
+			"pixels": [["#8a7f76", 16]],
 			"expected": "cendre"
 		},
 		{
 			"name": "solid cool-grey",
-			"pixels": [
-				[
-					"#6f7682",
-					16
-				]
-			],
+			"pixels": [["#6f7682", 16]],
 			"expected": "brume"
 		},
 		{
 			"name": "solid beige",
-			"pixels": [
-				[
-					"#c8b8a0",
-					16
-				]
-			],
+			"pixels": [["#c8b8a0", 16]],
 			"expected": "cendre"
 		},
 		{
 			"name": "solid black",
-			"pixels": [
-				[
-					"#050505",
-					16
-				]
-			],
+			"pixels": [["#050505", 16]],
 			"expected": "brume"
 		},
 		{
 			"name": "solid white",
-			"pixels": [
-				[
-					"#fbfbfb",
-					16
-				]
-			],
+			"pixels": [["#fbfbfb", 16]],
 			"expected": "brume"
 		},
 		{
 			"name": "letterboxed teal",
-			"pixels": [
-				[
-					"#000000",
-					8
-				],
-				[
-					"#138a8a",
-					16
-				],
-				[
-					"#000000",
-					8
-				]
-			],
+			"pixels": [["#000000", 8], ["#138a8a", 16], ["#000000", 8]],
 			"expected": "lagune"
 		},
 		{
 			"name": "red accent on grey",
-			"pixels": [
-				[
-					"#7a7a7a",
-					16
-				],
-				[
-					"#d62828",
-					4
-				]
-			],
+			"pixels": [["#7a7a7a", 16], ["#d62828", 4]],
 			"expected": "grenat"
 		},
 		{
 			"name": "faint red on grey",
-			"pixels": [
-				[
-					"#7a7a7a",
-					18
-				],
-				[
-					"#d62828",
-					2
-				]
-			],
+			"pixels": [["#7a7a7a", 18], ["#d62828", 2]],
 			"expected": "cendre"
 		},
 		{
 			"name": "vivid orange beats dull blue",
-			"pixels": [
-				[
-					"#4f5f7a",
-					10
-				],
-				[
-					"#f07f22",
-					6
-				]
-			],
+			"pixels": [["#4f5f7a", 10], ["#f07f22", 6]],
 			"expected": "braise"
 		},
 		{
 			"name": "transparent",
-			"pixels": [
-				[
-					"#d62828",
-					8,
-					0
-				]
-			],
+			"pixels": [["#d62828", 8, 0]],
 			"expected": "brume"
 		},
 		{
 			"name": "half transparent ignored",
-			"pixels": [
-				[
-					"#d62828",
-					8,
-					100
-				],
-				[
-					"#3f3a9e",
-					4
-				]
-			],
+			"pixels": [["#d62828", 8, 100], ["#3f3a9e", 4]],
 			"expected": "heure-bleue"
 		}
 	]

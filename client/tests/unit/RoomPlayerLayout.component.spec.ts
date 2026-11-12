@@ -49,7 +49,7 @@ function mountLayout(props: Record<string, unknown> = {}) {
 				h(
 					"div",
 					{
-						"class": "widget-body",
+						class: "widget-body",
 						"data-collapsed": String(w.collapsed),
 						"data-docked": String(w.docked),
 					},

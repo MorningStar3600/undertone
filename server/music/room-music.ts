@@ -52,6 +52,8 @@ export const musicIdentity = (user: { user_id?: number; token: string }): string
 		: `guest:${createHash("sha256").update(user.token).digest("hex")}`;
 const accountId = (id: string): number | undefined =>
 	id.startsWith("account:") ? Number(id.slice(8)) : undefined;
+/** Played tracks shown to the room, most recent last. */
+const PUBLIC_PLAYED = 10;
 const YOUTUBE_VIDEO_ID = /^[\w-]{6,20}$/;
 /** Public cover for a queue entry. Only well-formed YouTube references; local sources stay private. */
 const entryArtwork = (mediaRef: MusicQueueEntry["mediaRef"]): { artworkUrl?: string } => {
@@ -153,11 +155,13 @@ export class RoomMusic {
 		}
 		this.rememberNames();
 		const s = this.value.state;
-		const queue = [...musicNavigation(s).future.map(item => item.entry), ...s.queue];
+		const navigation = musicNavigation(s);
+		const queue = [...navigation.future.map(item => item.entry), ...s.queue];
 		return {
 			revision: s.revision,
 			planRevision: s.planRevision,
 			queue: queue.slice(0, 10).map(entryDto),
+			played: navigation.past.slice(-PUBLIC_PLAYED).map(item => entryDto(item.entry)),
 			queueTotal: queue.length,
 			current: s.current
 				? {
@@ -887,12 +891,13 @@ export class RoomMusic {
 			}
 		});
 	}
-	async previous(authorize: Authorize) {
+	/** Go back `steps` tracks in the room's history (1: the track right before this one). */
+	async previous(authorize: Authorize, steps = 1) {
 		await this.advanceLock.protect(async () => {
 			this.isAdvancing = true;
 			try {
 				await this.refresh();
-				await this.navigateLocked("previous", "interrupted", authorize);
+				await this.navigateLocked("previous", "interrupted", authorize, undefined, steps);
 			} finally {
 				this.isAdvancing = false;
 			}
@@ -907,12 +912,15 @@ export class RoomMusic {
 		reason: "finished" | "skipped" | "interrupted",
 		authorize?: Authorize,
 		assertOccurrence: () => void = () => undefined,
+		/** Previous only: how many history steps to rewind at once. */
+		steps = 1,
 	): Promise<boolean> {
 		for (let attempt = 0; attempt < 5; attempt++) {
 			assertOccurrence();
 			const before = this.state!;
 			const navigation = musicNavigation(before);
-			const target = direction === "previous" ? navigation.past.at(-1) : navigation.future[0];
+			const target =
+				direction === "previous" ? navigation.past.at(-steps) : navigation.future[0];
 			if (!target) {
 				return false;
 			}
@@ -1084,13 +1092,14 @@ export class RoomMusic {
 						}
 						const nav = musicNavigation(this.value!.state);
 						if (direction === "previous") {
-							nav.past.pop();
-							if (current) {
-								nav.future = [structuredClone(current), ...nav.future].slice(
-									0,
-									100,
-								);
-							}
+							// The target leaves the history; tracks played after it come next
+							// again, in their order, followed by the interrupted one.
+							const rewound = nav.past.splice(nav.past.length - steps);
+							nav.future = [
+								...rewound.slice(1),
+								...(current ? [structuredClone(current)] : []),
+								...nav.future,
+							].slice(0, 100);
 						} else {
 							nav.future.shift();
 							if (current?.started) {
